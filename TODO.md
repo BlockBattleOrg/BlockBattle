@@ -9,7 +9,7 @@
 - [x] Create `.env.example` (without secrets)
 - [x] Add `README.md` (public overview)
 - [x] Add `SECURITY.md`
-- [ ] Add `LICENSE`
+- [x] Add `LICENSE`
 - [ ] Set branch protection on `main`
 
 ## Phase 1 — Application Skeleton
