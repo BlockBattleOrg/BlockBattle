@@ -10,7 +10,6 @@
 - [x] Add `README.md` (public overview)
 - [x] Add `SECURITY.md`
 - [x] Add `LICENSE`
-- [ ] Set branch protection on `main`
 
 ## Phase 1 — Application Skeleton
 - [ ] Create Next.js project (App Router, TypeScript, ESLint)
