@@ -12,9 +12,9 @@
 - [x] Add `LICENSE`
 
 ## Phase 1 — Application Skeleton
-- [ ] Create Next.js project (App Router, TypeScript, ESLint)
-- [ ] Add TailwindCSS, Prettier, scripts for `lint` and `format`
-- [ ] Add `/` page with "It works"
+- [x] Create Next.js project (App Router, TypeScript, ESLint)
+- [x] Add TailwindCSS, Prettier, scripts for `lint` and `format`
+- [x] Add `/` page with "It works"
 - [ ] Connect GitHub → Vercel and deploy
 
 ## Phase 2 — Supabase Database + RLS + Seed
