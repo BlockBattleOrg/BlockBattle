@@ -8,7 +8,7 @@
 - [x] Create `.gitignore`
 - [x] Create `.env.example` (without secrets)
 - [x] Add `README.md` (public overview)
-- [ ] Add `SECURITY.md`
+- [x] Add `SECURITY.md`
 - [ ] Add `LICENSE`
 - [ ] Set branch protection on `main`
 
