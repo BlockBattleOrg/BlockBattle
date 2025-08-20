@@ -18,10 +18,10 @@
 - [x] Connect GitHub → Vercel and deploy
 
 ## Phase 2 — Supabase Database + RLS + Seed
-- [ ] Create tables: `currencies`, `wallets`, `contributions`, `aggregates_daily`, `settings`
-- [ ] Set RLS rules (public SELECT)
-- [ ] Insert seed data (BTC, ETH, SOL, MATIC, AVAX)
-- [ ] Test public SELECT
+- [x] Create tables: `currencies`, `wallets`, `contributions`, `aggregates_daily`, `settings`
+- [x] Set RLS rules (public SELECT)
+- [x] Insert seed data (BTC, ETH, SOL, MATIC, AVAX)
+- [x] Test public SELECT
 
 ## Phase 3 — Ingestion Service
 - [ ] Create serverless ingestion functions per chain (BTC, ETH, SOL, MATIC, AVAX)
