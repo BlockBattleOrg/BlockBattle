@@ -15,7 +15,7 @@
 - [x] Create Next.js project (App Router, TypeScript, ESLint)
 - [x] Add TailwindCSS, Prettier, scripts for `lint` and `format`
 - [x] Add `/` page with "It works"
-- [ ] Connect GitHub → Vercel and deploy
+- [x] Connect GitHub → Vercel and deploy
 
 ## Phase 2 — Supabase Database + RLS + Seed
 - [ ] Create tables: `currencies`, `wallets`, `contributions`, `aggregates_daily`, `settings`
