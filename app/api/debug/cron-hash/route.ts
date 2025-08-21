@@ -1,6 +1,7 @@
-// app/api/debug/cron-hash/route.ts
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
+
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
