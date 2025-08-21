@@ -1,19 +1,9 @@
-name: Ingest BTC (every 30 min)
-
-on:
-  schedule:
-    - cron: "*/30 * * * *"   # runs every 30 minutes (UTC)
-  workflow_dispatch: {}       # allows manual trigger from GitHub Actions tab
-
-concurrency:
-  group: ingest-btc
-  cancel-in-progress: false
-
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
+      - name: Validate secrets
+        run: |
+          [ -n "${{ secrets.VERCEL_URL }}" ] || { echo "Missing VERCEL_URL secret"; exit 1; }
+          [ -n "${{ secrets.CRON_SECRET }}" ] || { echo "Missing CRON_SECRET secret"; exit 1; }
+
       - name: Call BTC ingestion endpoint on Vercel
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -26,6 +16,7 @@ jobs:
             HTTP_CODE=$(curl -sS -o /tmp/out.json -w "%{http_code}" \
               -X POST "https://${VERCEL_URL}/api/ingest/btc" \
               -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "x-cron-secret: ${CRON_SECRET}" \
               --max-time 25)
             echo "HTTP ${HTTP_CODE}"
             cat /tmp/out.json || true

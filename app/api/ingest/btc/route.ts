@@ -2,18 +2,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runBtcIngestion } from "@/lib/ingestion/btc";
 
-export const dynamic = "force-dynamic"; // ensure runtime execution, avoid build-time evaluation
+export const dynamic = "force-dynamic";
 
 /**
- * Auth check for GitHub Actions / (or Vercel Cron if re-enabled):
- * - Set CRON_SECRET in environment
- * - Caller must send: Authorization: Bearer <CRON_SECRET>
+ * Accept multiple auth formats to be robust across schedulers/proxies:
+ * - Authorization: Bearer <CRON_SECRET>
+ * - x-cron-secret: <CRON_SECRET>
+ * - x-ingest-secret: <CRON_SECRET>
+ * - ?secret=<CRON_SECRET> (fallback)
  */
 function isAuthorized(req: NextRequest): boolean {
-  const expected = process.env.CRON_SECRET;
+  const expected = (process.env.CRON_SECRET || "").trim();
   if (!expected) return false;
-  const auth = req.headers.get("authorization") || "";
-  return auth === `Bearer ${expected}`;
+
+  const auth = (req.headers.get("authorization") || "").trim();
+  if (auth === `Bearer ${expected}`) return true;
+
+  const x1 = (req.headers.get("x-cron-secret") || "").trim();
+  if (x1 && x1 === expected) return true;
+
+  const x2 = (req.headers.get("x-ingest-secret") || "").trim();
+  if (x2 && x2 === expected) return true;
+
+  const url = new URL(req.url);
+  const qp = (url.searchParams.get("secret") || "").trim();
+  if (qp && qp === expected) return true;
+
+  return false;
 }
 
 export async function POST(req: NextRequest) {
