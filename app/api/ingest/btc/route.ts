@@ -1,10 +1,10 @@
 // app/api/ingest/btc/route.ts
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 import { NextRequest, NextResponse } from "next/server";
 import { runBtcIngestion } from "@/lib/ingestion/btc";
 
+// Force Node.js runtime so process.env is available (not Edge)
+export const runtime = "nodejs";
+// Avoid static optimization; always run at request time
 export const dynamic = "force-dynamic";
 
 /**
