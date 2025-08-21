@@ -2,10 +2,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runBtcIngestion } from "@/lib/ingestion/btc";
 
+export const dynamic = "force-dynamic"; // ensure runtime execution, avoid build-time evaluation
+
 /**
- * Auth check for Vercel Cron:
- * - Set CRON_SECRET in Vercel Project → Settings → Environment Variables
- * - Vercel Cron will send: Authorization: Bearer <CRON_SECRET>
+ * Auth check for GitHub Actions / (or Vercel Cron if re-enabled):
+ * - Set CRON_SECRET in environment
+ * - Caller must send: Authorization: Bearer <CRON_SECRET>
  */
 function isAuthorized(req: NextRequest): boolean {
   const expected = process.env.CRON_SECRET;
@@ -18,7 +20,6 @@ export async function POST(req: NextRequest) {
   if (!isAuthorized(req)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-
   try {
     const result = await runBtcIngestion();
     return NextResponse.json({ ok: true, ...result });
@@ -28,16 +29,5 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-/**
- * Optional GET for manual health check from Vercel Cron UI.
- * Remove if you prefer POST-only.
- */
-export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  return NextResponse.json({ ok: true, hint: "Use POST to run BTC ingestion." });
 }
 

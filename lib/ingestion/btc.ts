@@ -1,17 +1,18 @@
 // lib/ingestion/btc.ts
-import { supabaseAdmin } from "../supabaseAdmin";
+import { getSupabaseAdmin } from "../supabaseAdmin";
 import { fetchIncomingForAddress, BtcTx } from "../providers/btc/blockstream";
 
 type Currency = { id: string; symbol: string; decimals?: number | null };
-type Wallet = { id: string; address: string; is_active: boolean; currency_id: string };
+type Wallet = { id: string; address: string; is_active?: boolean | null; currency_id: string };
 
 const BTC_DECIMALS = 8;
 
-// Simple in-run USD rate cache to minimize DB reads for the same day
+// In-run USD rate cache to minimize DB reads for the same day
 const usdCache = new Map<string, number | null>();
 
 async function getBtcCurrency(): Promise<Currency> {
-  const { data, error } = await supabaseAdmin
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
     .from("currencies")
     .select("id, symbol, decimals")
     .eq("symbol", "BTC")
@@ -21,7 +22,9 @@ async function getBtcCurrency(): Promise<Currency> {
 }
 
 async function getActiveBtcWallets(currencyId: string): Promise<Wallet[]> {
-  const { data, error } = await supabaseAdmin
+  const supabase = getSupabaseAdmin();
+  // If you added wallets.is_active, filter it; otherwise remove .eq("is_active", true)
+  const { data, error } = await supabase
     .from("wallets")
     .select("id, address, is_active, currency_id")
     .eq("currency_id", currencyId)
@@ -35,11 +38,12 @@ function toAmountBTC(sats: number, decimals: number): number {
 }
 
 async function getUsdRateFor(dateISO: string): Promise<number | null> {
+  const supabase = getSupabaseAdmin();
   const day = dateISO.slice(0, 10); // YYYY-MM-DD
   if (usdCache.has(day)) return usdCache.get(day)!;
 
   const key = `fx:BTC:${day}`;
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabase
     .from("settings")
     .select("value")
     .eq("key", key)
@@ -59,17 +63,17 @@ type InsertContribution = {
   wallet_id: string;
   currency_id: string;
   tx_hash: string;
-  amount_raw: string;       // store as string to avoid JS precision issues
-  amount: number;           // normalized (BTC)
+  amount_raw: string;
+  amount: number;
   amount_usd: number | null;
-  tx_timestamp: string;     // ISO
-  source: string;           // e.g. "blockstream"
+  tx_timestamp: string;
+  source: string;
 };
 
 async function upsertContributions(rows: InsertContribution[]) {
   if (!rows.length) return;
-  // Expecting a unique index on (wallet_id, tx_hash) for idempotency.
-  const { error } = await supabaseAdmin
+  const supabase = getSupabaseAdmin();
+  const { error } = await supabase
     .from("contributions")
     .upsert(rows, { onConflict: "wallet_id,tx_hash" });
   if (error) throw error;
@@ -102,7 +106,6 @@ async function ingestForWallet(wallet: Wallet, currency: Currency) {
 export async function runBtcIngestion(): Promise<{ inserted: number; wallets: number }> {
   const currency = await getBtcCurrency();
   const wallets = await getActiveBtcWallets(currency.id);
-
   let processedWallets = 0;
   for (const w of wallets) {
     await ingestForWallet(w, currency);
