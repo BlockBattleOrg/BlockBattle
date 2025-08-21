@@ -1,3 +1,18 @@
+name: Ingest BTC (every 30 min)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # runs every 30 minutes (UTC)
+  workflow_dispatch: {}       # allows manual trigger
+
+concurrency:
+  group: ingest-btc
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Validate secrets
         run: |
