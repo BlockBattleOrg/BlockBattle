@@ -1,9 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/ingest/btc",
-      "schedule": "*/30 * * * *"
-    }
-  ]
-}
-

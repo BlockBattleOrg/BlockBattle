@@ -1,0 +1,38 @@
+name: Ingest BTC (every 30 min)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # runs every 30 minutes (UTC)
+  workflow_dispatch: {}       # allows manual trigger from GitHub Actions tab
+
+concurrency:
+  group: ingest-btc
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Call BTC ingestion endpoint on Vercel
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          VERCEL_URL: ${{ secrets.VERCEL_URL }}
+        run: |
+          set -e
+          echo "Calling https://${VERCEL_URL}/api/ingest/btc ..."
+          # up to 3 retries with exponential delay
+          for i in 1 2 3; do
+            HTTP_CODE=$(curl -sS -o /tmp/out.json -w "%{http_code}" \
+              -X POST "https://${VERCEL_URL}/api/ingest/btc" \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              --max-time 25)
+            echo "HTTP ${HTTP_CODE}"
+            cat /tmp/out.json || true
+            if [ "$HTTP_CODE" = "200" ]; then exit 0; fi
+            echo "Retry in $((5*i))s..."
+            sleep $((5*i))
+          done
+          echo "Failed to run ingestion after retries."
+          exit 1
+
