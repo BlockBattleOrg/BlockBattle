@@ -15,7 +15,8 @@ create table if not exists wallets (
   currency_id uuid references currencies(id) on delete cascade,
   address text not null,
   chain text not null,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  is_active boolean not null default false,
 );
 
 -- 3. contributions (raw tx-level records)
