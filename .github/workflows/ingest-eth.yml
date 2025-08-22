@@ -1,0 +1,34 @@
+name: Ingest ETH (every 15 min)
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # every 15 minutes
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call ETH ingestion endpoint on Vercel
+        run: |
+          set -e
+          echo "Calling https://www.blockbattle.org/api/ingest/eth ..."
+          for i in 1 2 3; do
+            response=$(curl -s -o response.txt -w "%{http_code}" -X POST "https://www.blockbattle.org/api/ingest/eth" \
+              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")
+
+            cat response.txt
+
+            if [ "$response" -eq 200 ]; then
+              echo "ETH ingestion succeeded."
+              exit 0
+            else
+              echo "HTTP $response"
+              echo "Retry in $((i * 5))s..."
+              sleep $((i * 5))
+            fi
+          done
+
+          echo "Failed to run ETH ingestion after retries."
+          exit 1
+
