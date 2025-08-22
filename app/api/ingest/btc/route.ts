@@ -1,10 +1,7 @@
-// app/api/ingest/btc/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { runBtcIngestion } from "@/lib/ingestion/btc";
 
-// Force Node.js runtime so process.env is available (not Edge)
 export const runtime = "nodejs";
-// Avoid static optimization; always run at request time
 export const dynamic = "force-dynamic";
 
 /**
@@ -38,9 +35,11 @@ export async function POST(req: NextRequest) {
   if (!isAuthorized(req)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
   try {
     const result = await runBtcIngestion();
-    return NextResponse.json({ ok: true, ...result });
+    // result već sadrži { ok: true, ... }, pa samo vrati njega
+    return NextResponse.json(result);
   } catch (err: any) {
     return NextResponse.json(
       { ok: false, error: err?.message ?? "Unknown error" },
