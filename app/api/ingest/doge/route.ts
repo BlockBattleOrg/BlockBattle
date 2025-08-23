@@ -1,14 +1,9 @@
 // app/api/ingest/doge/route.ts
-// Dogecoin ingestion (SoChain-only: no Cloudflare challenges).
-// - Auth: x-cron-secret === process.env.CRON_SECRET
-// - Cursor: settings.key='doge_last_height' -> { n: <blockHeight> }
-// - Tracks: wallets.chain IN ('DOGE','doge','dogecoin') AND is_active = true
-// - Inserts: one row per matched output (and prevout spent) with amount in DOGE (8 decimals)
-
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabaseAdmin';
-export const runtime = 'nodejs';     // ne koristi Edge (kraći limiti)
-export const maxDuration = 60;       // Vercel dopušta do 60s (ovisno o planu)
+
+export const runtime = 'nodejs';
+export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 const supabase = getSupabaseAdmin();
@@ -181,6 +176,4 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok:false, error: msg }, { status: 500 });
   }
 }
-
-export const dynamic = 'force-dynamic';
 
