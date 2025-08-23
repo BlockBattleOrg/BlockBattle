@@ -1,31 +1,69 @@
-name: Ingest LTC (every 30 min)
+name: Ingest LTC
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch:
+    # pokreće se svake 5 minute (češći kratki runovi brzo pojedu backlog)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 jobs:
   run:
+    name: Call LTC ingestion endpoint on Vercel
     runs-on: ubuntu-latest
+    timeout-minutes: 8  # zaštita na razini cijelog joba
+
     steps:
-      - name: Call LTC ingestion endpoint on Vercel
+      - name: Call /api/ingest/ltc with retries
+        id: call
+        timeout-minutes: 6  # zaštita na razini koraka (da ne visi predugo)
+        shell: bash
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          URL: https://www.blockbattle.org/api/ingest/ltc
         run: |
-          set -e
-          echo "Calling https://www.blockbattle.org/api/ingest/ltc ..."
-          for i in 1 2 3; do
-            response=$(curl -s -o response.txt -w "%{http_code}" -X POST "https://www.blockbattle.org/api/ingest/ltc" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")
-            cat response.txt
-            if [ "$response" -eq 200 ]; then
+          set -euo pipefail
+
+          echo "Calling ${URL} ..."
+          # 5 pokušaja s linearnim backoffom (5s,10s,15s,20s,25s)
+          for i in 1 2 3 4 5; do
+            # -s silent, -S show errors, -o response.txt (body), -w http_code (status)
+            code=$(curl -sS -o response.txt -w "%{http_code}" -X POST "${URL}" \
+              -H "x-cron-secret: ${CRON_SECRET}" \
+              --max-time 55) || code="000"
+
+            echo "HTTP ${code}"
+            echo "----- response body -----"
+            cat response.txt || true
+            echo -e "\n-------------------------"
+
+            # 200 = uspjeh (i partial je ok jer server javlja 200)
+            if [ "${code}" = "200" ]; then
               echo "LTC ingestion succeeded."
               exit 0
-            else
-              echo "HTTP $response"
-              echo "Retry in $((i * 5))s..."
+            fi
+
+            # Ako je 401/403 — nema smisla dalje (krivi secret ili blokada)
+            if [ "${code}" = "401" ] || [ "${code}" = "403" ]; then
+              echo "Auth or access error; not retrying."
+              exit 1
+            fi
+
+            # 405 znači da endpoint očekuje POST — mi već koristimo POST; treat as fatal
+            if [ "${code}" = "405" ]; then
+              echo "Method not allowed; check HTTP verb."
+              exit 1
+            fi
+
+            # ostalo (5xx, 4xx) — retry
+            if [ "${i}" -lt 5 ]; then
               sleep $((i * 5))
+              continue
+            else
+              echo "Failed to run LTC ingestion after retries."
+              exit 1
             fi
           done
-          echo "Failed to run LTC ingestion after retries."
-          exit 1
 
