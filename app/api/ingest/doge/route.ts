@@ -7,6 +7,10 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabaseAdmin';
+export const runtime = 'nodejs';     // ne koristi Edge (kraći limiti)
+export const maxDuration = 60;       // Vercel dopušta do 60s (ovisno o planu)
+export const dynamic = 'force-dynamic';
+
 const supabase = getSupabaseAdmin();
 
 const SOCHAIN_BASE = (process.env.DOGE_API_URLS || 'https://sochain.com/api/v2')
