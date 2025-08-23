@@ -1,0 +1,31 @@
+name: Ingest DOGE (every 30 min)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call DOGE ingestion endpoint on Vercel
+        run: |
+          set -e
+          echo "Calling https://www.blockbattle.org/api/ingest/doge ..."
+          for i in 1 2 3; do
+            response=$(curl -s -o response.txt -w "%{http_code}" -X POST "https://www.blockbattle.org/api/ingest/doge" \
+              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")
+            cat response.txt
+            if [ "$response" -eq 200 ]; then
+              echo "DOGE ingestion succeeded."
+              exit 0
+            else
+              echo "HTTP $response"
+              echo "Retry in $((i * 5))s..."
+              sleep $((i * 5))
+            fi
+          done
+          echo "Failed to run DOGE ingestion after retries."
+          exit 1
+
