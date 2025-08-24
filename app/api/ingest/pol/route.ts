@@ -1,4 +1,4 @@
-// app/api/ingest/eth/route.ts
+// app/api/ingest/pol/route.ts
 import { NextResponse } from 'next/server';
 import { getLatestBlockNumber } from '@/lib/evm';
 import { setIntSetting } from '@/lib/settings';
@@ -16,17 +16,18 @@ export async function POST(request: Request) {
       }
     }
 
-    const url = process.env.ETH_RPC_URL;
+    // Back-compat: accept both POL_RPC_URL and MATIC_RPC_URL
+    const url = process.env.POL_RPC_URL || process.env.MATIC_RPC_URL;
     if (!url) {
-      return NextResponse.json({ ok: false, error: 'Missing ETH_RPC_URL' }, { status: 500 });
+      return NextResponse.json({ ok: false, error: 'Missing POL_RPC_URL (or MATIC_RPC_URL)' }, { status: 500 });
     }
 
     const height = await getLatestBlockNumber(url);
-    await setIntSetting('eth_last_height', height);
+    await setIntSetting('pol_last_height', height);
 
-    return NextResponse.json({ ok: true, chain: 'ETH', height, saved: true });
+    return NextResponse.json({ ok: true, chain: 'POL', height, saved: true });
   } catch (err: any) {
-    console.error('[ETH_INGEST_ERROR]', err);
+    console.error('[POL_INGEST_ERROR]', err);
     return NextResponse.json({ ok: false, error: err?.message || 'Unexpected error' }, { status: 500 });
   }
 }
