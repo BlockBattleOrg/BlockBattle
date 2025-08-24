@@ -1,48 +1,59 @@
-import { NextRequest, NextResponse } from "next/server";
-import { runBtcIngestion } from "@/lib/ingestion/btc";
+// app/api/ingest/btc/route.ts
+import { NextResponse } from 'next/server';
+import { rpcCall } from '@/lib/rpc';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs'; // ensure Node runtime for server-side fetch
 
 /**
- * Accept multiple auth formats to be robust across schedulers/proxies:
- * - Authorization: Bearer <CRON_SECRET>
- * - x-cron-secret: <CRON_SECRET>
- * - x-ingest-secret: <CRON_SECRET>
- * - ?secret=<CRON_SECRET> (fallback)
+ * POST /api/ingest/btc
+ * Minimal NowNodes smoke-test + placeholder for your normalization/storage.
+ * Keeps existing "x-cron-secret" gate if CRON_SECRET is set.
  */
-function isAuthorized(req: NextRequest): boolean {
-  const expected = (process.env.CRON_SECRET || "").trim();
-  if (!expected) return false;
-
-  const auth = (req.headers.get("authorization") || "").trim();
-  if (auth === `Bearer ${expected}`) return true;
-
-  const x1 = (req.headers.get("x-cron-secret") || "").trim();
-  if (x1 && x1 === expected) return true;
-
-  const x2 = (req.headers.get("x-ingest-secret") || "").trim();
-  if (x2 && x2 === expected) return true;
-
-  const url = new URL(req.url);
-  const qp = (url.searchParams.get("secret") || "").trim();
-  if (qp && qp === expected) return true;
-
-  return false;
-}
-
-export async function POST(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export async function POST(request: Request) {
   try {
-    const result = await runBtcIngestion();
-    // result već sadrži { ok: true, ... }, pa samo vrati njega
-    return NextResponse.json(result);
+    // Optional auth gate: only enforce if CRON_SECRET is configured.
+    const configuredSecret = process.env.CRON_SECRET;
+    if (configuredSecret) {
+      const reqSecret = request.headers.get('x-cron-secret');
+      if (reqSecret !== configuredSecret) {
+        return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+      }
+    }
+
+    if (!process.env.NOWNODES_API_KEY) {
+      return NextResponse.json(
+        { ok: false, error: 'Missing NOWNODES_API_KEY in environment' },
+        { status: 500 }
+      );
+    }
+
+    // --- NowNodes RPC calls (Bitcoin-like) ---
+    // 1) get latest block hash
+    const bestHash = await rpcCall<string>('BTC', 'getbestblockhash');
+
+    // 2) get verbose header (true → JSON with fields)
+    const header = await rpcCall<any>('BTC', 'getblockheader', [bestHash, true]);
+
+    // 3) (optional) fetch full block if/when you need txs for ingestion
+    // const block = await rpcCall<any>('BTC', 'getblock', [bestHash, 2]); // verbosity 2 returns decoded txs
+
+    // ---- TODO: your normalization + Supabase upsert goes here ----
+    // e.g. await upsertBlock('BTC', header.height, bestHash, header.time, block);
+
+    return NextResponse.json({
+      ok: true,
+      chain: 'BTC',
+      height: header?.height ?? null,
+      hash: bestHash,
+      timestamp: header?.time ?? null,
+      note: 'NowNodes adapter is working. Add your normalization/upsert where indicated.',
+    });
   } catch (err: any) {
+    // Surface meaningful error to logs and client
+    console.error('[BTC_INGEST_ERROR]', err);
     return NextResponse.json(
-      { ok: false, error: err?.message ?? "Unknown error" },
+      { ok: false, error: err?.message || 'Unexpected error' },
       { status: 500 }
     );
   }
