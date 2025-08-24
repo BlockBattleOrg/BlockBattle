@@ -1,15 +1,10 @@
-// app/api/ingest/doge/route.ts
 import { NextResponse } from 'next/server';
 import { rpcCall } from '@/lib/rpc';
+import { setIntSetting } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-/**
- * POST /api/ingest/doge
- * NowNodes smoke-test + hook za tvoju normalizaciju/upsert.
- * Poštuje "x-cron-secret" ako je CRON_SECRET postavljen.
- */
 export async function POST(request: Request) {
   try {
     const configuredSecret = process.env.CRON_SECRET;
@@ -29,16 +24,18 @@ export async function POST(request: Request) {
 
     const bestHash = await rpcCall<string>('DOGE', 'getbestblockhash');
     const header = await rpcCall<any>('DOGE', 'getblockheader', [bestHash, true]);
-    // const block = await rpcCall<any>('DOGE', 'getblock', [bestHash, 2]);
 
-    // TODO: normalizacija + upsert u tvoju bazu
+    if (header?.height != null) {
+      await setIntSetting('doge_last_height', Number(header.height));
+    }
+
     return NextResponse.json({
       ok: true,
       chain: 'DOGE',
       height: header?.height ?? null,
       hash: bestHash,
       timestamp: header?.time ?? null,
-      note: 'NowNodes adapter OK (DOGE). Dodaj normalizaciju/upsert gdje je označeno.',
+      saved: true,
     });
   } catch (err: any) {
     console.error('[DOGE_INGEST_ERROR]', err);

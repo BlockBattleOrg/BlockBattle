@@ -1,15 +1,10 @@
-// app/api/ingest/ltc/route.ts
 import { NextResponse } from 'next/server';
 import { rpcCall } from '@/lib/rpc';
+import { setIntSetting } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs'; // ensure Node runtime for server-side fetch
+export const runtime = 'nodejs';
 
-/**
- * POST /api/ingest/ltc
- * NowNodes smoke-test + hook za tvoju normalizaciju/upsert.
- * Poštuje "x-cron-secret" ako je CRON_SECRET postavljen.
- */
 export async function POST(request: Request) {
   try {
     const configuredSecret = process.env.CRON_SECRET;
@@ -29,16 +24,18 @@ export async function POST(request: Request) {
 
     const bestHash = await rpcCall<string>('LTC', 'getbestblockhash');
     const header = await rpcCall<any>('LTC', 'getblockheader', [bestHash, true]);
-    // const block = await rpcCall<any>('LTC', 'getblock', [bestHash, 2]);
 
-    // TODO: normalizacija + upsert u tvoju bazu
+    if (header?.height != null) {
+      await setIntSetting('ltc_last_height', Number(header.height));
+    }
+
     return NextResponse.json({
       ok: true,
       chain: 'LTC',
       height: header?.height ?? null,
       hash: bestHash,
       timestamp: header?.time ?? null,
-      note: 'NowNodes adapter OK (LTC). Dodaj normalizaciju/upsert gdje je označeno.',
+      saved: true,
     });
   } catch (err: any) {
     console.error('[LTC_INGEST_ERROR]', err);
