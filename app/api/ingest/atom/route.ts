@@ -7,7 +7,7 @@ export const runtime = 'nodejs';
 
 // Add api-key header automatically for *.nownodes.io
 function headersFor(urlStr: string) {
-  const h: Record<string, string> = { 'Content-Type': 'application/json' };
+  const h: Record<string, string> = { 'Accept': 'application/json' };
   try {
     const u = new URL(urlStr);
     if (u.hostname.endsWith('nownodes.io') && process.env.NOWNODES_API_KEY) {
@@ -19,8 +19,9 @@ function headersFor(urlStr: string) {
 
 /**
  * POST /api/ingest/atom
- * Tendermint RPC:
- *   GET <root>/status  → result.sync_info.latest_block_height
+ * Cosmos REST (gRPC-gateway):
+ *   GET <root>/cosmos/base/tendermint/v1beta1/blocks/latest
+ *   -> height nalazi se u block.header.height (ili sdk_block.header.height)
  * Piše u settings: atom_last_height
  */
 export async function POST(request: Request) {
@@ -31,25 +32,29 @@ export async function POST(request: Request) {
     }
 
     const root = process.env.ATOM_RPC_URL;
-    if (!root) {
-      return NextResponse.json({ ok: false, error: 'Missing ATOM_RPC_URL' }, { status: 500 });
-    }
+    if (!root) return NextResponse.json({ ok: false, error: 'Missing ATOM_RPC_URL' }, { status: 500 });
 
-    const url = `${root.replace(/\/$/, '')}/status`;
-    const res = await fetch(url, { headers: headersFor(root), cache: 'no-store' });
-    if (!res.ok) throw new Error(`Tendermint HTTP ${res.status} ${res.statusText}`);
+    const base = root.replace(/\/$/, '');
+    const url = `${base}/cosmos/base/tendermint/v1beta1/blocks/latest`;
+
+    const res = await fetch(url, { headers: headersFor(url), cache: 'no-store' });
+    if (!res.ok) throw new Error(`ATOM REST HTTP ${res.status} ${res.statusText}`);
 
     const json = await res.json();
-    const height = parseInt(json?.result?.sync_info?.latest_block_height ?? 'NaN', 10);
+    const hStr =
+      json?.block?.header?.height ??
+      json?.sdk_block?.header?.height ??
+      null;
+    const height = hStr != null ? Number(hStr) : null;
 
     if (Number.isFinite(height)) {
-      await setIntSetting('atom_last_height', height);
+      await setIntSetting('atom_last_height', height as number);
     }
 
     return NextResponse.json({
       ok: true,
       chain: 'ATOM',
-      height: Number.isFinite(height) ? height : null,
+      height: Number.isFinite(height as number) ? (height as number) : null,
       saved: true,
     });
   } catch (err: any) {
