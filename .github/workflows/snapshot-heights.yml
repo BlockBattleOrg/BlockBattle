@@ -1,0 +1,30 @@
+name: Snapshot Heights (daily)
+on:
+  schedule:
+    - cron: "5 0 * * *"   # 00:05 UTC daily
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upsert daily heights snapshot
+        env:
+          BASE: https://www.blockbattle.org
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -e
+          resp="$(curl -sSf -X POST "$BASE/api/admin/snapshot-heights" \
+            -H "x-cron-secret: $CRON_SECRET" \
+            -H "Cache-Control: no-cache")"
+          echo "$resp"
+          ok=$(echo "$resp" | jq -r '.ok')
+          if [ "$ok" != "true" ]; then
+            echo "Snapshot failed"; exit 1
+          fi
+
+      - name: Notify on failure (optional)
+        if: failure()
+        run: |
+          echo "TODO: curl -X POST $WEBHOOK_URL -d '{\"text\":\"Snapshot failed\"}'"
+
