@@ -1,6 +1,6 @@
 // app/api/admin/snapshot-heights/route.ts
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -8,13 +8,6 @@ export const runtime = 'nodejs';
 const CHAINS = ['BTC','LTC','DOGE','ETH','OP','ARB','POL','AVAX','DOT','ADA','ATOM','XRP','SOL','XLM','TRX'] as const;
 const keyH = (c: string) => `${c.toLowerCase()}_last_height`;
 const keyB = (c: string) => `${c.toLowerCase()}_last_block`;
-
-function getSupabaseSR() {
-  const url = process.env.SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  if (!url || !key) throw new Error('Missing Supabase service role env');
-  return createClient(url, key, { auth: { persistSession: false } });
-}
 
 function parseHeight(v: any): number | null {
   if (v == null) return null;
@@ -32,15 +25,32 @@ function todayUTC(): string {
   return `${y}-${m}-${dd}`;
 }
 
+function getSupabase(rolePreferred = true): { client: SupabaseClient; usingServiceRole: boolean } {
+  const url =
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL || // <-- allow fallback
+    '';
+  const sr = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const anon = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
+  if (!url) throw new Error('Missing SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL)');
+
+  if (rolePreferred && sr) {
+    return { client: createClient(url, sr, { auth: { persistSession: false } }), usingServiceRole: true };
+  }
+  if (!anon) throw new Error('Missing Supabase service role and ANON key');
+  return { client: createClient(url, anon, { auth: { persistSession: false } }), usingServiceRole: false };
+}
+
 export async function POST(req: Request) {
   try {
-    // protect with cron secret
     const sec = process.env.CRON_SECRET;
     if (sec && req.headers.get('x-cron-secret') !== sec) {
       return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
     }
 
-    const sb = getSupabaseSR();
+    const { client: sb, usingServiceRole } = getSupabase(true);
+
     const keys = [...CHAINS.map(keyH), ...CHAINS.map(keyB)];
     const { data, error } = await sb.from('settings').select('key,value').in('key', keys);
     if (error) throw error;
@@ -53,10 +63,15 @@ export async function POST(req: Request) {
       return { day, chain: c, height };
     });
 
-    const { error: upErr } = await sb.from('heights_daily').upsert(rows as any, { onConflict: 'day,chain' });
-    if (upErr) throw upErr;
+    const up = await sb.from('heights_daily').upsert(rows as any, { onConflict: 'day,chain' });
+    if (up.error) {
+      const msg = usingServiceRole
+        ? up.error.message
+        : `Write failed without service role. Add SUPABASE_SERVICE_ROLE_KEY in Vercel Production or enable an INSERT policy on 'heights_daily' for ANON. Original: ${up.error.message}`;
+      return NextResponse.json({ ok: false, error: msg, usingServiceRole }, { status: 500 });
+    }
 
-    return NextResponse.json({ ok: true, day, upserted: rows.length });
+    return NextResponse.json({ ok: true, day, upserted: rows.length, usingServiceRole });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || 'Unexpected error' }, { status: 500 });
   }
