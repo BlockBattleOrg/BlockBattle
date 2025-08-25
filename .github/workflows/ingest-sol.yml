@@ -1,0 +1,25 @@
+name: Ingest SOL (every 15 min)
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # svakih 15 minuta (po potrebi promijeni)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call ingest SOL (fail on HTTP/ok=false)
+        env:
+          BASE: https://www.blockbattle.org
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -e
+          resp="$(curl -sSf -X POST "$BASE/api/ingest/sol" \
+            -H "x-cron-secret: $CRON_SECRET" \
+            -H "Cache-Control: no-cache")"
+          echo "$resp"
+          ok=$(echo "$resp" | jq -r '.ok')
+          if [ "$ok" != "true" ]; then
+            echo "Route returned ok!=true"; exit 1
+          fi
+
