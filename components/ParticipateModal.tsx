@@ -1,4 +1,4 @@
-// components/ParticipateModal.tsx
+/* eslint-disable @next/next/no-img-element */
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
@@ -24,7 +24,7 @@ function buildQrText(w: Wallet): string {
     case 'BTC': return `bitcoin:${a}`;
     case 'LTC': return `litecoin:${a}`;
     case 'DOGE': return `dogecoin:${a}`;
-    // For EVM-like chains we usually show raw address; URI can be "ethereum:{address}"
+    // EVM-like: raw address is fine for MVP
     case 'ETH':
     case 'OP':
     case 'ARB':
@@ -48,10 +48,14 @@ export default function ParticipateModal({
   open,
   onClose,
   wallet,
+  loading = false,
+  error = null,
 }: {
   open: boolean;
   onClose: () => void;
   wallet: Wallet | null;
+  loading?: boolean;           // <-- NEW
+  error?: string | null;       // <-- NEW
 }) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
 
@@ -87,12 +91,13 @@ export default function ParticipateModal({
       >
         <div className="mb-4 flex items-start justify-between">
           <div>
-            <h3 className="text-lg font-semibold">Participate — {wallet?.chain}</h3>
+            <h3 className="text-lg font-semibold">Participate — {wallet?.chain || '...'}</h3>
             <p className="text-xs text-gray-500">
               Send a contribution to the address below. All data and addresses are public and verifiable.
             </p>
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="rounded-full p-2 text-gray-500 hover:bg-gray-100"
             aria-label="Close"
@@ -101,10 +106,18 @@ export default function ParticipateModal({
           </button>
         </div>
 
+        {error && (
+          <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+            {error}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="flex items-center justify-center rounded-xl border border-gray-200 p-3">
-            {qrDataUrl ? (
+            {wallet && qrDataUrl ? (
               <img src={qrDataUrl} alt="QR code" className="h-40 w-40" />
+            ) : loading ? (
+              <div className="text-xs text-gray-500">Generating QR…</div>
             ) : (
               <div className="text-xs text-gray-500">QR unavailable</div>
             )}
@@ -118,10 +131,9 @@ export default function ParticipateModal({
               </div>
               <div className="mt-2 flex gap-2">
                 <button
+                  type="button"
                   className="rounded-lg border border-gray-200 px-3 py-1 text-xs hover:bg-gray-50"
-                  onClick={() => {
-                    if (wallet?.address) navigator.clipboard.writeText(wallet.address);
-                  }}
+                  onClick={() => wallet?.address && navigator.clipboard.writeText(wallet.address)}
                 >
                   Copy
                 </button>
@@ -151,6 +163,7 @@ export default function ParticipateModal({
 
         <div className="mt-4 text-right">
           <button
+            type="button"
             onClick={onClose}
             className="rounded-lg bg-gray-900 px-4 py-1.5 text-sm text-white hover:bg-black"
           >
