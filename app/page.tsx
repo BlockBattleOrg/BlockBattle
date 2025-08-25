@@ -1,5 +1,6 @@
 // app/page.tsx
 import OverviewTable from '@/components/OverviewTable';
+import ContributionLeaderboard from '@/components/ContributionLeaderboard';
 
 export default function HomePage() {
   return (
@@ -10,7 +11,16 @@ export default function HomePage() {
           Live chain heights aggregated from scheduled ingestion.
         </p>
       </header>
+
       <OverviewTable />
+
+      <section className="mt-12">
+        <h2 className="mb-3 text-xl font-semibold">Community Contributions</h2>
+        <p className="mb-4 text-sm text-gray-500">
+          Sentiment by chain based on contributions sent to the project wallets.
+        </p>
+        <ContributionLeaderboard />
+      </section>
     </main>
   );
 }
