@@ -104,8 +104,7 @@ export default function OverviewTable() {
     );
   }
 
-  const fmt = (n: number | null) =>
-    n == null ? 'n/a' : n.toLocaleString('en-US');
+  const fmt = (n: number | null) => (n == null ? 'n/a' : n.toLocaleString('en-US'));
 
   return (
     <>
@@ -146,10 +145,7 @@ export default function OverviewTable() {
                         }
                       >
                         <span
-                          className={
-                            'h-1.5 w-1.5 rounded-full ' +
-                            (ok ? 'bg-emerald-500' : 'bg-gray-400')
-                          }
+                          className={'h-1.5 w-1.5 rounded-full ' + (ok ? 'bg-emerald-500' : 'bg-gray-400')}
                         />
                         {ok ? 'OK' : 'N/A'}
                       </span>
@@ -169,30 +165,17 @@ export default function OverviewTable() {
           </table>
         </div>
 
-        <p className="text-xs text-gray-400">
-          Source: /api/public/overview (cached ~30s at the edge).
-        </p>
+        <p className="text-xs text-gray-400">Source: /api/public/overview (cached ~30s at the edge).</p>
       </div>
 
+      {/* Pass loading + error into the modal; no bottom toasts */}
       <ParticipateModal
         open={open}
         onClose={() => setOpen(false)}
         wallet={wallet}
+        loading={walletLoading}
+        error={walletErr}
       />
-      {open && walletLoading && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center p-4">
-          <div className="rounded-lg bg-white/90 px-3 py-1 text-xs shadow">
-            Loading wallet…
-          </div>
-        </div>
-      )}
-      {open && walletErr && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center p-4">
-          <div className="rounded-lg bg-red-50 px-3 py-1 text-xs text-red-700 shadow">
-            {walletErr}
-          </div>
-        </div>
-      )}
     </>
   );
 }
