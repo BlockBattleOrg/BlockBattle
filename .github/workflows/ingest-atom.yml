@@ -22,4 +22,3 @@ jobs:
           if [ "$ok" != "true" ]; then
             echo "Route returned ok!=true"; exit 1
           fi
-

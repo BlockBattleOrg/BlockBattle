@@ -5,8 +5,7 @@ import { setIntSetting } from '@/lib/settings';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-// Add api-key header automatically for *.nownodes.io
-function addHeaders(urlStr: string) {
+function headersFor(urlStr: string) {
   const h: Record<string, string> = { Accept: 'application/json' };
   try {
     const u = new URL(urlStr);
@@ -17,17 +16,10 @@ function addHeaders(urlStr: string) {
   return h;
 }
 
-async function tryFetchJSON(url: string) {
-  const res = await fetch(url, { headers: addHeaders(url), cache: 'no-store' });
-  if (!res.ok) throw new Error(`${res.status}`);
-  return res.json();
-}
-
 /**
  * POST /api/ingest/atom
- * Prefer REST (Cosmos SDK gRPC-gateway), uz nekoliko poznatih prefiksa.
- * Fallback: Tendermint /status (ako provider izlaže CometBFT RPC).
- * Piše: atom_last_height
+ * NOWNodes Tendermint endpoint: <ATOM_RPC_URL>/status
+ * Writes settings key: atom_last_height
  */
 export async function POST(request: Request) {
   try {
@@ -39,54 +31,19 @@ export async function POST(request: Request) {
     const root = process.env.ATOM_RPC_URL;
     if (!root) return NextResponse.json({ ok: false, error: 'Missing ATOM_RPC_URL' }, { status: 500 });
 
-    const base = root.replace(/\/$/, '');
-    const candidates = [
-      `${base}/cosmos/base/tendermint/v1beta1/blocks/latest`,
-      `${base}/api/cosmos/base/tendermint/v1beta1/blocks/latest`,
-      `${base}/api/v1/cosmos/base/tendermint/v1beta1/blocks/latest`,
-      `${base}/status`,
-    ];
+    const url = `${root.replace(/\/$/, '')}/status`;
+    const res = await fetch(url, { headers: headersFor(url), cache: 'no-store' });
+    if (!res.ok) throw new Error(`ATOM RPC HTTP ${res.status} ${res.statusText}`);
 
-    let height: number | null = null;
-    let lastErr: any = null;
+    const json = await res.json();
+    const latest = json?.result?.sync_info?.latest_block_height;
+    const height = Number(latest);
 
-    for (const url of candidates) {
-      try {
-        const data = await tryFetchJSON(url);
-
-        // REST (SDK ≥ v0.47)
-        const hStr =
-          data?.block?.header?.height ??
-          data?.sdk_block?.header?.height ??
-          null;
-        if (hStr != null && Number.isFinite(Number(hStr))) {
-          height = Number(hStr);
-          break;
-        }
-
-        // Tendermint /status
-        const latest = data?.result?.sync_info?.latest_block_height;
-        if (latest != null && Number.isFinite(Number(latest))) {
-          height = Number(latest);
-          break;
-        }
-
-        if (data?.height != null && Number.isFinite(Number(data.height))) {
-          height = Number(data.height);
-          break;
-        }
-      } catch (e) {
-        lastErr = e;
-        continue;
-      }
+    if (!Number.isFinite(height)) {
+      return NextResponse.json({ ok: false, error: 'ATOM: cannot parse height' }, { status: 502 });
     }
 
-    if (!Number.isFinite(height as number)) {
-      const msg = lastErr ? `ATOM: upstream not found (${String(lastErr)})` : 'ATOM: unable to resolve height';
-      return NextResponse.json({ ok: false, error: msg }, { status: 502 });
-    }
-
-    await setIntSetting('atom_last_height', height as number);
+    await setIntSetting('atom_last_height', height);
     return NextResponse.json({ ok: true, chain: 'ATOM', height, saved: true });
   } catch (err: any) {
     console.error('[ATOM_INGEST_ERROR]', err);
