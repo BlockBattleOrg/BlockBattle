@@ -1,6 +1,6 @@
 // lib/ingestion/btc.ts
 import { getSupabaseAdmin } from "../supabaseAdmin";
-import { fetchIncomingForAddress, BtcTx } from "../providers/btc/blockbook";
+import { fetchIncomingForAddress, BtcTx } from "../providers/btc/blockstream";
 
 /**
  * Wallet row as per your schema (Phase 2 + is_active).
