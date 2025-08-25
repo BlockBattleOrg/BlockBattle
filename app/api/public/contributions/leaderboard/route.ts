@@ -18,16 +18,25 @@ export async function GET() {
       .from('contributions')
       .select('amount, wallet:wallet_id(id, is_active, currencies:currency_id(symbol))')
       .order('wallet_id')
-      .limit(5000); // plenty; adjust if needed
+      .limit(5000);
     if (error) throw error;
 
     const map = new Map<string, { total: number; count: number }>();
+
     for (const r of data ?? []) {
-      if (!r.wallet?.is_active) continue;
-      const sym = String(r.wallet?.currencies?.symbol || '').toUpperCase();
+      // wallet may be object or array
+      const walletAny: any = Array.isArray((r as any).wallet) ? (r as any).wallet[0] : (r as any).wallet;
+      if (!walletAny) continue;
+
+      // currencies may be object or array
+      const curAny: any = Array.isArray(walletAny.currencies) ? walletAny.currencies[0] : walletAny.currencies;
+
+      if (!walletAny.is_active) continue;
+      const sym = String(curAny?.symbol || '').toUpperCase();
       if (!sym) continue;
+
       const entry = map.get(sym) || { total: 0, count: 0 };
-      entry.total += Number(r.amount || 0);
+      entry.total += Number((r as any).amount || 0);
       entry.count += 1;
       map.set(sym, entry);
     }

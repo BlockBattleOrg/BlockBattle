@@ -21,14 +21,18 @@ export async function GET() {
       .limit(20);
     if (error) throw error;
 
-    const rows = (data ?? [])
-      .filter((r) => r.wallet?.is_active && r.wallet?.currencies?.symbol)
-      .map((r) => ({
-        chain: String(r.wallet!.currencies!.symbol).toUpperCase(),
+    const rows = (data ?? []).map((r: any) => {
+      const walletAny: any = Array.isArray(r.wallet) ? r.wallet[0] : r.wallet;
+      const curAny: any = Array.isArray(walletAny?.currencies) ? walletAny.currencies[0] : walletAny?.currencies;
+
+      if (!walletAny?.is_active || !curAny?.symbol) return null;
+      return {
+        chain: String(curAny.symbol).toUpperCase(),
         amount: Number(r.amount || 0),
         tx: r.tx_hash,
         timestamp: r.block_time,
-      }));
+      };
+    }).filter(Boolean) as Array<{ chain: string; amount: number; tx: string; timestamp: string }>;
 
     return NextResponse.json(
       { ok: true, rows },
