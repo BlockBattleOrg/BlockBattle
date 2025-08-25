@@ -1,0 +1,24 @@
+name: Contributions Ingest (POL)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger POL contributions ingest
+        env:
+          BASE: https://www.blockbattle.org
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -e
+          resp="$(curl -sSf -X POST "$BASE/api/ingest/contrib/pol" -H "x-cron-secret: $CRON_SECRET")"
+          echo "$resp"
+          ok=$(echo "$resp" | jq -r '.ok')
+          if [ "$ok" != "true" ]; then
+            echo "Ingest failed"; exit 1
+          fi
+
