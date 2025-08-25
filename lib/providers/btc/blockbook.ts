@@ -1,12 +1,15 @@
 // lib/providers/btc/blockbook.ts
 // NowNodes Blockbook provider (Bitcoin)
-// Minimal API da bude drop-in zamjena za blockstream.ts exports
+// Kompatibilan sa starim providerom: izvozimo satoshis + ISO timestamp
 
 export type BtcTx = {
   txid: string;
   blockHeight: number;
-  timestamp?: number | null;
-  valueSats: number; // ukupno primljeno na target adresu u tom tx-u (u satoshijima)
+  // kompatibilnost sa starim ingestion kodom:
+  satoshis: number;            // ukupno primljeno na target adresu (u satoshijima)
+  timestamp: string | null;    // ISO string (ili null)
+  // dodatno ostavljamo i valueSats (nije nužno, ali ne smeta)
+  valueSats?: number;
 };
 
 function noTrailingSlash(s: string) {
@@ -29,11 +32,9 @@ function btcToSats(val: string): number {
   const [i, f = ''] = String(val).split('.');
   const fi = (f + '00000000').slice(0, 8);
   const big = BigInt(i) * 100000000n + BigInt(fi);
-  // vrijednosti outputa su < 21e14 sat; fit-a u JS number
   return Number(big);
 }
 
-// Dohvati transakcije s Blockbook /address endpointa i filtriraj one gdje target adresa prima iznos
 async function getAddressTxs(base: string, address: string, pageSize = 100) {
   const url = `${noTrailingSlash(base)}/api/v2/address/${encodeURIComponent(
     address
@@ -47,7 +48,7 @@ async function getAddressTxs(base: string, address: string, pageSize = 100) {
 
 /**
  * Vrati sve "incoming" tx-ove za adresu, opcijski samo iznad `minBlockHeight`.
- * Pod incoming računamo zbroj svih vout vrijednosti gdje je target adresa u listi `addresses`.
+ * "Incoming" = zbroj svih outputa gdje se target adresa pojavljuje u listi adresa outputa.
  */
 export async function fetchIncomingForAddress(
   address: string,
@@ -59,7 +60,7 @@ export async function fetchIncomingForAddress(
   const json = await getAddressTxs(base, address, 100);
   const txs: any[] = json?.txs || json?.transactions || [];
 
-  const result: BtcTx[] = [];
+  const out: BtcTx[] = [];
 
   for (const tx of txs) {
     const height: number | null =
@@ -77,14 +78,13 @@ export async function fetchIncomingForAddress(
     let receivedSats = 0;
     const vout = Array.isArray(tx?.vout) ? tx.vout : [];
     for (const o of vout) {
-      const val = o?.value ?? o?.valueZat; // Blockbook value je string BTC
+      // Blockbook value je string BTC; ponekad postoji i valueZat
+      const val = o?.value ?? o?.valueZat;
       const addrs: string[] =
-        o?.addresses ??
-        (o?.address ? [o.address] : []) ??
-        [];
+        (Array.isArray(o?.addresses) && o.addresses) ||
+        (o?.address ? [o.address] : []);
 
-      if (val != null && Array.isArray(addrs) && addrs.includes(address)) {
-        // value je string BTC; pretvori u sats
+      if (val != null && addrs.includes(address)) {
         const sats =
           typeof val === 'string' ? btcToSats(val) : Number(val);
         if (Number.isFinite(sats)) receivedSats += sats;
@@ -92,22 +92,26 @@ export async function fetchIncomingForAddress(
     }
 
     if (receivedSats > 0) {
-      result.push({
+      // timestamp -> ISO string
+      const tsSec =
+        typeof tx?.blockTime === 'number'
+          ? tx.blockTime
+          : typeof tx?.time === 'number'
+          ? tx.time
+          : null;
+      const iso = tsSec ? new Date(tsSec * 1000).toISOString() : null;
+
+      out.push({
         txid: tx?.txid || tx?.txId || tx?.hash,
         blockHeight: height,
-        timestamp:
-          typeof tx?.blockTime === 'number'
-            ? tx.blockTime
-            : typeof tx?.time === 'number'
-            ? tx.time
-            : null,
+        satoshis: receivedSats,
+        timestamp: iso,
         valueSats: receivedSats,
       });
     }
   }
 
-  // sortiraj uzlazno po visini
-  result.sort((a, b) => a.blockHeight - b.blockHeight);
-  return result;
+  out.sort((a, b) => a.blockHeight - b.blockHeight);
+  return out;
 }
 
