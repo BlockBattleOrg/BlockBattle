@@ -2,6 +2,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const revalidate = 0;
+
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
@@ -19,25 +23,23 @@ export async function GET() {
     }
     const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
-    // Uzmi sve potrebne atribute u jednom upitu
+    // IMPORTANT: join by foreign key: wallet:wallet_id(...)
     const { data, error } = await sb
       .from("contributions")
-      .select(
-        `
+      .select(`
         amount,
-        wallet:wallets (
+        wallet:wallet_id (
           id, chain, is_active,
-          currencies ( symbol )
+          currencies:currency_id ( symbol )
         )
-      `
-      );
+      `);
 
     if (error) throw error;
 
     const map = new Map<string, { total: number; contributions: number }>();
 
-    for (const r of (data || [])) {
-      const w = (r as any).wallet;
+    for (const r of data || []) {
+      const w: any = (r as any).wallet;
       if (!w || w.is_active === false) continue;
 
       const label = toTicker(w?.currencies?.symbol, w?.chain);
@@ -53,7 +55,10 @@ export async function GET() {
       .map(([chain, v]) => ({ chain, total: v.total, contributions: v.contributions }))
       .sort((a, b) => b.total - a.total);
 
-    return NextResponse.json({ ok: true, rows });
+    return NextResponse.json(
+      { ok: true, rows },
+      { headers: { "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate" } }
+    );
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || "Leaderboard API error" }, { status: 500 });
   }
