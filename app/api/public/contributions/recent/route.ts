@@ -1,45 +1,59 @@
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+// app/api/public/contributions/recent/route.ts
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-function sbClient() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
-  if (!url || !key) throw new Error('Missing Supabase env.');
-  return createClient(url, key, { auth: { persistSession: false } });
+function toTicker(symbol?: string | null, chain?: string | null) {
+  const s = String(symbol || chain || "").trim().toUpperCase();
+  if (!s) return "";
+  if (s === "MATIC" || s === "POLYGON") return "POL";
+  return s;
 }
 
 export async function GET() {
   try {
-    const sb = sbClient();
+    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+      return NextResponse.json({ ok: false, error: "Missing Supabase env" }, { status: 500 });
+    }
+    const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
     const { data, error } = await sb
-      .from('contributions')
-      .select('tx_hash, amount, block_time, wallet:wallet_id(is_active, currencies:currency_id(symbol))')
-      .order('block_time', { ascending: false })
+      .from("contributions")
+      .select(
+        `
+        tx_hash, amount, block_time,
+        wallet:wallets (
+          id, chain, is_active,
+          currencies ( symbol )
+        )
+      `
+      )
+      .order("block_time", { ascending: false })
       .limit(20);
+
     if (error) throw error;
 
-    const rows = (data ?? []).map((r: any) => {
-      const walletAny: any = Array.isArray(r.wallet) ? r.wallet[0] : r.wallet;
-      const curAny: any = Array.isArray(walletAny?.currencies) ? walletAny.currencies[0] : walletAny?.currencies;
+    const rows = [];
+    for (const r of data || []) {
+      const w = (r as any).wallet;
+      if (!w || w.is_active === false) continue;
 
-      if (!walletAny?.is_active || !curAny?.symbol) return null;
-      return {
-        chain: String(curAny.symbol).toUpperCase(),
-        amount: Number(r.amount || 0),
-        tx: r.tx_hash,
-        timestamp: r.block_time,
-      };
-    }).filter(Boolean) as Array<{ chain: string; amount: number; tx: string; timestamp: string }>;
+      const chain = toTicker(w?.currencies?.symbol, w?.chain);
+      if (!chain) continue;
 
-    return NextResponse.json(
-      { ok: true, rows },
-      { headers: { 'Cache-Control': 'public, s-maxage=15, stale-while-revalidate=120' } }
-    );
+      rows.push({
+        chain,
+        amount: Number((r as any).amount || 0),
+        tx: String((r as any).tx_hash || ""),
+        timestamp: (r as any).block_time,
+      });
+    }
+
+    return NextResponse.json({ ok: true, rows });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Unexpected error' }, { status: 500 });
+    return NextResponse.json({ ok: false, error: e?.message || "Recent API error" }, { status: 500 });
   }
 }
 

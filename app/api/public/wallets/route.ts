@@ -1,97 +1,65 @@
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+// app/api/public/wallets/route.ts
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-const ALLOWED = new Set([
-  'BTC','LTC','DOGE','ETH','OP','ARB','POL','AVAX','DOT','ADA','ATOM','XRP','SOL','XLM','TRX',
-]);
-
-const SYNONYMS: Record<string, string> = {
-  BITCOIN: 'BTC', LITECOIN: 'LTC', DOGECOIN: 'DOGE',
-  ETHEREUM: 'ETH', OPTIMISM: 'OP', ARBITRUM: 'ARB', 'ARBITRUM ONE': 'ARB',
-  POLYGON: 'POL', MATIC: 'POL', AVALANCHE: 'AVAX',
-  POLKADOT: 'DOT', CARDANO: 'ADA', COSMOS: 'ATOM',
-  RIPPLE: 'XRP', XRPL: 'XRP', SOLANA: 'SOL', STELLAR: 'XLM', TRON: 'TRX',
-};
-
-function getSupabase() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
-  if (!url || !key) throw new Error('Missing Supabase env.');
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-const norm = (s: any) => (typeof s === 'string' ? s.trim() : '');
-const canon = (s: string) => {
-  const up = s.toUpperCase();
-  return ALLOWED.has(up) ? up : (SYNONYMS[up] ?? null);
-};
-
-function explorerFor(symbol: string | null) {
-  switch (symbol) {
-    case 'BTC': return 'https://mempool.space/address/{address}';
-    case 'LTC': return 'https://litecoinspace.org/address/{address}';
-    case 'DOGE': return 'https://dogechain.info/address/{address}';
-    case 'ETH': return 'https://etherscan.io/address/{address}';
-    case 'OP':  return 'https://optimistic.etherscan.io/address/{address}';
-    case 'ARB': return 'https://arbiscan.io/address/{address}';
-    case 'POL': return 'https://polygonscan.com/address/{address}';
-    case 'AVAX':return 'https://snowtrace.io/address/{address}';
-    case 'DOT': return 'https://polkadot.subscan.io/account/{address}';
-    case 'ADA': return 'https://cardanoscan.io/address/{address}';
-    case 'ATOM':return 'https://www.mintscan.io/cosmos/account/{address}';
-    case 'XRP': return 'https://xrpscan.com/account/{address}';
-    case 'SOL': return 'https://solscan.io/address/{address}';
-    case 'XLM': return 'https://stellar.expert/explorer/public/account/{address}';
-    case 'TRX': return 'https://tronscan.org/#/address/{address}';
-    default: return null;
-  }
+function norm(q: string | null | undefined) {
+  const s = String(q || "").trim().toUpperCase();
+  if (!s) return "";
+  if (s === "POLYGON" || s === "MATIC") return "POL";
+  return s;
 }
 
 export async function GET(req: Request) {
   try {
-    const { searchParams } = new URL(req.url);
-    const chainParam = searchParams.get('chain');
-    const filterCanon = chainParam ? canon(chainParam) : null;
-    if (chainParam && !filterCanon) {
-      return NextResponse.json({ ok: false, error: 'Unknown chain' }, { status: 400 });
+    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+      return NextResponse.json({ ok: false, error: "Missing Supabase env" }, { status: 500 });
+    }
+    const url = new URL(req.url);
+    const chainQ = norm(url.searchParams.get("chain")); // e.g. pol
+    if (!chainQ) {
+      return NextResponse.json({ ok: false, error: "Missing ?chain" }, { status: 400 });
     }
 
-    const sb = getSupabase();
-    // join currencies preko foreign-keya currency_id
+    const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
+    // Pokrij i currencies.symbol i wallets.chain (razni sinonimi)
+    const symbols = [chainQ, chainQ === "POL" ? "MATIC" : ""].filter(Boolean);
+    const chains = [chainQ, chainQ === "POL" ? "MATIC" : "", chainQ === "POL" ? "POLYGON" : ""]
+      .filter(Boolean)
+      .map((x) => x.toLowerCase());
+
     const { data, error } = await sb
-      .from('wallets')
-      .select('id, address, chain, is_active, currencies:currency_id(symbol, name, decimals)')
-      .eq('is_active', true);
+      .from("wallets")
+      .select(
+        `
+          id, address, chain, is_active, currency_id,
+          currencies ( symbol )
+        `
+      )
+      .eq("is_active", true);
 
     if (error) throw error;
 
-    let rows = (data ?? [])
-      .map((r: any) => {
-        const sym = r?.currencies?.symbol ? String(r.currencies.symbol).toUpperCase() : null;
-        const ch = sym ?? String(r.chain || '').toUpperCase();
-        const c = canon(ch) || sym || ch;
-        const addr = norm(r.address);
-        if (!c || !addr) return null;
-        return {
-          chain: c,
-          address: addr,
-          memo_tag: null,
-          explorer_template: explorerFor(c),
-          uri_scheme: null,
-        };
-      })
-      .filter(Boolean) as Array<{ chain: string; address: string; memo_tag: string | null; explorer_template: string | null; uri_scheme: string | null }>;
+    // Filtar u aplikaciji (fleksibilnije)
+    const candidates =
+      (data || []).filter((w: any) => {
+        const sym = String(w?.currencies?.symbol || "").toUpperCase();
+        const chn = String(w?.chain || "").toUpperCase();
+        const matchSym = !!sym && symbols.includes(sym);
+        const matchChn = !!chn && symbols.includes(chn) || chains.includes(chn.toLowerCase());
+        return matchSym || matchChn;
+      }) ?? [];
 
-    if (filterCanon) rows = rows.filter((w) => w.chain === filterCanon);
+    // Preferiraj one s currency_id (stabilniji joinovi), ali vrati bilo koji aktivni
+    candidates.sort((a: any, b: any) => Number(Boolean(b.currency_id)) - Number(Boolean(a.currency_id)));
 
-    return NextResponse.json(
-      { ok: true, wallets: rows },
-      { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=600' } }
-    );
+    const wallet = candidates[0] || null;
+    return NextResponse.json({ ok: true, wallets: wallet ? [wallet] : [] });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Unexpected error' }, { status: 500 });
+    return NextResponse.json({ ok: false, error: e?.message || "Wallets API error" }, { status: 500 });
   }
 }
 

@@ -1,56 +1,61 @@
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+// app/api/public/contributions/leaderboard/route.ts
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-function sbClient() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
-  if (!url || !key) throw new Error('Missing Supabase env.');
-  return createClient(url, key, { auth: { persistSession: false } });
+function toTicker(symbol?: string | null, chain?: string | null) {
+  const s = String(symbol || chain || "").trim().toUpperCase();
+  if (!s) return "";
+  if (s === "MATIC" || s === "POLYGON") return "POL";
+  return s;
 }
 
 export async function GET() {
   try {
-    const sb = sbClient();
+    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+      return NextResponse.json({ ok: false, error: "Missing Supabase env" }, { status: 500 });
+    }
+    const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
+    // Uzmi sve potrebne atribute u jednom upitu
     const { data, error } = await sb
-      .from('contributions')
-      .select('amount, wallet:wallet_id(id, is_active, currencies:currency_id(symbol))')
-      .order('wallet_id')
-      .limit(5000);
+      .from("contributions")
+      .select(
+        `
+        amount,
+        wallet:wallets (
+          id, chain, is_active,
+          currencies ( symbol )
+        )
+      `
+      );
+
     if (error) throw error;
 
-    const map = new Map<string, { total: number; count: number }>();
+    const map = new Map<string, { total: number; contributions: number }>();
 
-    for (const r of data ?? []) {
-      // wallet may be object or array
-      const walletAny: any = Array.isArray((r as any).wallet) ? (r as any).wallet[0] : (r as any).wallet;
-      if (!walletAny) continue;
+    for (const r of (data || [])) {
+      const w = (r as any).wallet;
+      if (!w || w.is_active === false) continue;
 
-      // currencies may be object or array
-      const curAny: any = Array.isArray(walletAny.currencies) ? walletAny.currencies[0] : walletAny.currencies;
+      const label = toTicker(w?.currencies?.symbol, w?.chain);
+      if (!label) continue;
 
-      if (!walletAny.is_active) continue;
-      const sym = String(curAny?.symbol || '').toUpperCase();
-      if (!sym) continue;
-
-      const entry = map.get(sym) || { total: 0, count: 0 };
+      const entry = map.get(label) || { total: 0, contributions: 0 };
       entry.total += Number((r as any).amount || 0);
-      entry.count += 1;
-      map.set(sym, entry);
+      entry.contributions += 1;
+      map.set(label, entry);
     }
 
     const rows = Array.from(map.entries())
-      .map(([chain, v]) => ({ chain, total: v.total, contributions: v.count }))
+      .map(([chain, v]) => ({ chain, total: v.total, contributions: v.contributions }))
       .sort((a, b) => b.total - a.total);
 
-    return NextResponse.json(
-      { ok: true, rows },
-      { headers: { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=300' } }
-    );
+    return NextResponse.json({ ok: true, rows });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Unexpected error' }, { status: 500 });
+    return NextResponse.json({ ok: false, error: e?.message || "Leaderboard API error" }, { status: 500 });
   }
 }
 
