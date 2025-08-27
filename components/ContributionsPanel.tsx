@@ -3,14 +3,55 @@
 
 import { useEffect, useState } from 'react';
 
-type LBRow = { chain: string; total: number; contributions: number };
+type LBRow   = { chain: string; total: number; contributions: number };
 type RecentRow = { chain: string; amount: number; tx: string; timestamp: string };
 
+// koliko decimala prikazati po chainu (native units)
+const DECIMALS: Record<string, number> = {
+  BTC: 8, LTC: 8, DOGE: 8,
+  ETH: 18, OP: 18, ARB: 18, POL: 18, AVAX: 18,
+  DOT: 10, ADA: 6, ATOM: 6, XRP: 6, SOL: 9, XLM: 7, TRX: 6,
+};
+
+// normaliziraj nazive (MATIC/POLYGON → POL)
+function normChain(x: string) {
+  const s = String(x || '').toUpperCase();
+  if (s === 'MATIC' || s === 'POLYGON') return 'POL';
+  return s;
+}
+
+// format s punim brojem decimala (bez znanstvene notacije, bez “0” za sitne iznose)
+function formatAmount(amount: number, chain: string) {
+  const c = normChain(chain);
+  const d = DECIMALS[c] ?? 8;
+
+  // prikaz do pune preciznosti nativne jedinice
+  let out = amount.toLocaleString('en-US', {
+    useGrouping: true,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: d,
+  });
+
+  // ako je zbog zaokruživanja ispalo "0" ali iznos je > 0, gurni malo više frakcija
+  if (out === '0' && amount > 0) {
+    out = amount.toLocaleString('en-US', {
+      useGrouping: true,
+      minimumFractionDigits: Math.min(6, d),
+      maximumFractionDigits: d,
+    });
+  }
+
+  // ukloni eventualne završne nule i decimalnu točku ako nisu potrebne
+  if (out.includes('.')) {
+    out = out.replace(/(\.\d*?[1-9])0+$/,'$1').replace(/\.$/,'');
+  }
+  return out;
+}
+
 function explorerTxUrl(chain: string, tx: string) {
-  const c = chain.toUpperCase();
+  const c = normChain(chain);
   if (c === 'ETH') return `https://etherscan.io/tx/${tx}`;
-  if (c === 'POL' || c === 'MATIC' || c === 'POLYGON') return `https://polygonscan.com/tx/${tx}`;
-  // add more as we onboard (BTC, LTC… with native explorers)
+  if (c === 'POL') return `https://polygonscan.com/tx/${tx}`;
   return '#';
 }
 
@@ -30,16 +71,14 @@ export default function ContributionsPanel() {
         if (!alive) return;
         if (!a.ok) throw new Error(a.error || 'Leaderboard error');
         if (!b.ok) throw new Error(b.error || 'Recent error');
-        setLb(a.rows || []);
-        setRecent(b.rows || []);
+        setLb((a.rows || []).map((r: LBRow) => ({ ...r, chain: normChain(r.chain) })));
+        setRecent((b.rows || []).map((r: RecentRow) => ({ ...r, chain: normChain(r.chain) })));
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.message || 'Failed to load contributions');
       }
     })();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, []);
 
   return (
@@ -67,15 +106,13 @@ export default function ContributionsPanel() {
             <tbody className="divide-y divide-gray-100">
               {lb.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-3 text-gray-500" colSpan={3}>
-                    No contributions yet.
-                  </td>
+                  <td className="px-4 py-3 text-gray-500" colSpan={3}>No contributions yet.</td>
                 </tr>
               ) : (
                 lb.map((r) => (
                   <tr key={r.chain}>
                     <td className="px-4 py-3 font-mono">{r.chain}</td>
-                    <td className="px-4 py-3">{r.total.toLocaleString('en-US')}</td>
+                    <td className="px-4 py-3">{formatAmount(r.total, r.chain)}</td>
                     <td className="px-4 py-3">{r.contributions}</td>
                   </tr>
                 ))
@@ -97,9 +134,7 @@ export default function ContributionsPanel() {
             <tbody className="divide-y divide-gray-100">
               {recent.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-3 text-gray-500" colSpan={3}>
-                    No recent contributions.
-                  </td>
+                  <td className="px-4 py-3 text-gray-500" colSpan={3}>No recent contributions.</td>
                 </tr>
               ) : (
                 recent.map((r, i) => {
@@ -108,7 +143,7 @@ export default function ContributionsPanel() {
                   return (
                     <tr key={i}>
                       <td className="px-4 py-3 font-mono">{r.chain}</td>
-                      <td className="px-4 py-3">{r.amount.toLocaleString('en-US')}</td>
+                      <td className="px-4 py-3">{formatAmount(r.amount, r.chain)}</td>
                       <td className="px-4 py-3">
                         {url === '#' ? (
                           <span className="font-mono">{short}</span>
