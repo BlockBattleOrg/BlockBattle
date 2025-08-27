@@ -13,6 +13,7 @@ const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
 
 type Hex = string;
+
 type EvmTx = {
   hash: string;
   to: string | null;
@@ -53,15 +54,22 @@ async function rpc<T>(method: string, params: any[]): Promise<T> {
   return json.result as T;
 }
 
+// tolerant symbol/chain resolver (OP / OPTIMISM)
 function isOP(symbol?: string | null, chain?: string | null) {
   const s = String(symbol || "").trim().toUpperCase();
   const c = String(chain || "").trim().toUpperCase();
   return s === "OP" || c === "OP" || c === "OPTIMISM";
 }
 
+// helpers for Supabase relation that may be object OR array
+function relFirst<T = any>(maybe: any): T | undefined {
+  if (!maybe) return undefined;
+  return Array.isArray(maybe) ? maybe[0] : maybe;
+}
+
 export async function POST(req: Request) {
   try {
-    // simple auth
+    // auth
     if (!CRON_SECRET) {
       return NextResponse.json({ ok: false, error: "Missing CRON_SECRET env" }, { status: 500 });
     }
@@ -75,43 +83,47 @@ export async function POST(req: Request) {
     }
     const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
-    // load active wallets and pick OP ones (tolerant to missing currency_id)
+    // load active wallets; use explicit FK alias for clarity
     const { data: walletsAll, error: wErr } = await sb
       .from("wallets")
-      .select(`id, address, chain, is_active, currency_id, currencies ( symbol, decimals )`)
+      .select(
+        `
+        id, address, chain, is_active, currency_id,
+        currencies:currency_id ( symbol, decimals )
+      `
+      )
       .eq("is_active", true);
 
     if (wErr) throw wErr;
 
-    const wallets = (walletsAll || []).filter(
-      (w: any) => w?.address && isOP(w?.currencies?.symbol, w?.chain)
-    );
+    const wallets = (walletsAll || []).filter((w: any) => {
+      const cur = relFirst(w?.currencies);
+      return w?.address && isOP(cur?.symbol, w?.chain);
+    });
+
     if (wallets.length === 0) {
       return NextResponse.json({ ok: true, info: "No OP wallets active; nothing to ingest.", inserted: 0 });
     }
 
-    // map address -> wallet info
-    const map = new Map<
-      string,
-      { wallet_id: string; decimals: number }
-    >();
+    // map address -> wallet_id/decimals (decimals default 18 for OP)
+    const map = new Map<string, { wallet_id: string; decimals: number }>();
     for (const w of wallets) {
-      const addr = String(w.address).toLowerCase();
-      const decimals = Number(w?.currencies?.decimals ?? 18) || 18;
-      map.set(addr, { wallet_id: w.id, decimals });
+      const addr = String((w as any).address).toLowerCase();
+      const cur = relFirst((w as any).currencies);
+      const decimals = Number(cur?.decimals ?? 18) || 18;
+      if (addr) map.set(addr, { wallet_id: (w as any).id, decimals });
     }
 
-    // get latest block
+    // latest block
     const latestHex = await rpc<Hex>("eth_blockNumber", []);
     const latest = toDec(latestHex);
 
-    // scanning window controlled by settings key
+    // scan window (settings marker)
     const key = "op_contrib_last_scanned";
     const { data: sRow } = await sb.from("settings").select("value").eq("key", key).maybeSingle();
     const last = Number(sRow?.value?.n ?? NaN);
     const SPAN = 250;
 
-    // if never set, start near tip to avoid deep scan
     const startBase = Number.isFinite(last) ? last : Math.max(0, latest - SPAN);
     const from = Math.max(0, startBase + 1);
     const to = Math.min(latest, from + SPAN - 1);
@@ -139,14 +151,11 @@ export async function POST(req: Request) {
       }
     }
 
-    // de-dup by hash and skip already inserted
+    // de-dup by hash
     const hashes = Array.from(new Set(matches.map((m) => m.hash)));
     let existing = new Set<string>();
     if (hashes.length) {
-      const { data: ex } = await sb
-        .from("contributions")
-        .select("tx_hash")
-        .in("tx_hash", hashes);
+      const { data: ex } = await sb.from("contributions").select("tx_hash").in("tx_hash", hashes);
       existing = new Set((ex || []).map((r: any) => String(r.tx_hash)));
     }
 
@@ -159,15 +168,13 @@ export async function POST(req: Request) {
         block_time: new Date(m.tsMs).toISOString(),
       }));
 
-    let inserted = 0;
     if (rows.length) {
-      const { error: insErr, count } = await sb.from("contributions").insert(rows);
+      const { error: insErr } = await sb.from("contributions").insert(rows);
       if (insErr) throw insErr;
-      inserted = rows.length; // supabase-js doesn't always return count here
     }
 
-    // advance marker to 'to'
-    await sb.from("settings").upsert({ key, value: { n: to } });
+    // advance marker
+    await sb.from("settings").upsert({ key, value: { n: to } }, { onConflict: "key" });
 
     return NextResponse.json({
       ok: true,
@@ -177,7 +184,7 @@ export async function POST(req: Request) {
       to,
       scanned,
       found: matches.length,
-      inserted,
+      inserted: rows.length,
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || "OP contrib ingest failed" }, { status: 500 });
