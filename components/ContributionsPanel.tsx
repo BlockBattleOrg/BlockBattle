@@ -1,9 +1,18 @@
+// components/ContributionsPanel.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
 
 type LBRow = { chain: string; total: number; contributions: number };
 type RecentRow = { chain: string; amount: number; tx: string; timestamp: string };
+
+function explorerTxUrl(chain: string, tx: string) {
+  const c = chain.toUpperCase();
+  if (c === 'ETH') return `https://etherscan.io/tx/${tx}`;
+  if (c === 'POL' || c === 'MATIC' || c === 'POLYGON') return `https://polygonscan.com/tx/${tx}`;
+  // add more as we onboard (BTC, LTC… with native explorers)
+  return '#';
+}
 
 export default function ContributionsPanel() {
   const [lb, setLb] = useState<LBRow[]>([]);
@@ -28,7 +37,9 @@ export default function ContributionsPanel() {
         setErr(e?.message || 'Failed to load contributions');
       }
     })();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
 
   return (
@@ -56,7 +67,9 @@ export default function ContributionsPanel() {
             <tbody className="divide-y divide-gray-100">
               {lb.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-3 text-gray-500" colSpan={3}>No contributions yet.</td>
+                  <td className="px-4 py-3 text-gray-500" colSpan={3}>
+                    No contributions yet.
+                  </td>
                 </tr>
               ) : (
                 lb.map((r) => (
@@ -84,18 +97,35 @@ export default function ContributionsPanel() {
             <tbody className="divide-y divide-gray-100">
               {recent.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-3 text-gray-500" colSpan={3}>No recent contributions.</td>
+                  <td className="px-4 py-3 text-gray-500" colSpan={3}>
+                    No recent contributions.
+                  </td>
                 </tr>
               ) : (
-                recent.map((r, i) => (
-                  <tr key={i}>
-                    <td className="px-4 py-3 font-mono">{r.chain}</td>
-                    <td className="px-4 py-3">{r.amount.toLocaleString('en-US')}</td>
-                    <td className="px-4 py-3">
-                      <span className="font-mono">{r.tx.slice(0, 10)}…{r.tx.slice(-6)}</span>
-                    </td>
-                  </tr>
-                ))
+                recent.map((r, i) => {
+                  const url = explorerTxUrl(r.chain, r.tx);
+                  const short = `${r.tx.slice(0, 10)}…${r.tx.slice(-6)}`;
+                  return (
+                    <tr key={i}>
+                      <td className="px-4 py-3 font-mono">{r.chain}</td>
+                      <td className="px-4 py-3">{r.amount.toLocaleString('en-US')}</td>
+                      <td className="px-4 py-3">
+                        {url === '#' ? (
+                          <span className="font-mono">{short}</span>
+                        ) : (
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono underline decoration-dotted hover:decoration-solid"
+                          >
+                            {short}
+                          </a>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -104,5 +134,4 @@ export default function ContributionsPanel() {
     </div>
   );
 }
-
 
