@@ -10,11 +10,11 @@ const HORIZON = (process.env.XLM_HORIZON_URL || "").replace(/\/+$/, "");
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
-// If you use a Horizon that requires API key (e.g. some providers), we try NOWNODES_API_KEY header.
+// If your Horizon provider requires an API key (e.g. a managed endpoint), we try NOWNODES_API_KEY header.
 const OPTIONAL_API_KEY = (process.env.NOWNODES_API_KEY || "").trim();
 
-const MAX_PAGES = Number(process.env.XLM_CONTRIB_MAX_PAGES || 5); // safety cap per wallet (pages of 200)
-const PAGE_LIMIT = 200; // Horizon max is typically 200
+const MAX_PAGES = Number(process.env.XLM_CONTRIB_MAX_PAGES || 5); // safety cap: pages per wallet
+const PAGE_LIMIT = 200; // Horizon usually allows up to 200
 
 type Json = any;
 
@@ -28,6 +28,11 @@ function relFirst<T = any>(maybe: any): T | undefined {
   return Array.isArray(maybe) ? maybe[0] : maybe;
 }
 
+/**
+ * GET helper for Horizon with tolerant 404:
+ * If the account doesn't exist (unfunded) Horizon returns 404.
+ * We convert that into an empty records page to avoid failing the whole run.
+ */
 async function hget(path: string, params: Record<string, string | number | undefined>) {
   if (!HORIZON) throw new Error("Missing XLM_HORIZON_URL");
   const url = new URL(HORIZON + path);
@@ -35,9 +40,16 @@ async function hget(path: string, params: Record<string, string | number | undef
     if (v === undefined || v === null || v === "") continue;
     url.searchParams.set(k, String(v));
   }
-  const headers: Record<string, string> = { "Accept": "application/json" };
+  const headers: Record<string, string> = { Accept: "application/json" };
   if (OPTIONAL_API_KEY) headers["api-key"] = OPTIONAL_API_KEY;
+
   const res = await fetch(url.toString(), { headers });
+
+  // Tolerate unfunded accounts (404 "Resource Missing") → treat as no payments yet
+  if (res.status === 404) {
+    return { _embedded: { records: [] } };
+  }
+
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`XLM Horizon HTTP ${res.status} ${res.statusText}${txt ? `: ${txt}` : ""}`);
@@ -47,7 +59,7 @@ async function hget(path: string, params: Record<string, string | number | undef
 
 export async function POST(req: Request) {
   try {
-    // auth
+    // Auth
     if (!CRON_SECRET || (req.headers.get("x-cron-secret") || "") !== CRON_SECRET) {
       return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
     }
@@ -56,7 +68,7 @@ export async function POST(req: Request) {
     }
     const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
-    // 1) Active XLM wallets
+    // 1) Load active XLM wallets
     const { data: walletsAll, error: wErr } = await sb
       .from("wallets")
       .select(`
@@ -66,18 +78,21 @@ export async function POST(req: Request) {
       .eq("is_active", true);
     if (wErr) throw wErr;
 
-    const wallets = (walletsAll || []).filter((w: any) => w?.address && isXLM(relFirst(w?.currencies)?.symbol, w?.chain));
+    const wallets = (walletsAll || []).filter(
+      (w: any) => w?.address && isXLM(relFirst(w?.currencies)?.symbol, w?.chain)
+    );
     if (wallets.length === 0) {
       return NextResponse.json({ ok: true, info: "No XLM wallets active; nothing to ingest.", inserted: 0 });
     }
 
-    // 2) Scan per wallet using /accounts/{account}/payments (incoming, native)
-    // We keep per-wallet cursor in settings: key = xlm_contrib_cursor_<wallet_id> { cursor: "<paging_token>" }
-    const candidatesAgg = new Map<string, { wallet_id: string; tx_hash: string; amount: number; block_time: string }>();
-    let totalScanned = 0;
+    // 2) Per-wallet scan via /accounts/{account}/payments
+    //    We keep per-wallet Horizon cursor in settings:
+    //    key = xlm_contrib_cursor_<wallet_id>  value = { cursor: "<paging_token>" }
+    const agg = new Map<string, { wallet_id: string; tx_hash: string; amount: number; block_time: string }>();
+    let scannedOps = 0;
 
     for (const w of wallets) {
-      const walletId = (w as any).id as string;
+      const walletId = String((w as any).id);
       const account = String((w as any).address).trim();
       if (!account) continue;
 
@@ -92,19 +107,18 @@ export async function POST(req: Request) {
         const out = await hget(`/accounts/${account}/payments`, {
           order: "asc",
           limit: PAGE_LIMIT,
-          cursor: cursor,
+          cursor,
         });
 
         const recs: any[] = out?._embedded?.records || [];
         if (recs.length === 0) break;
 
         for (const r of recs) {
-          // only native asset incoming payments
+          // Only incoming native payments
           if (r?.type !== "payment") continue;
           if (String(r?.to || "") !== account) continue;
           if (r?.asset_type !== "native") continue;
 
-          // amount is string in XLM units
           const amt = Number(r?.amount);
           if (!Number.isFinite(amt) || amt <= 0) continue;
 
@@ -113,25 +127,21 @@ export async function POST(req: Request) {
 
           const createdAt = String(r?.created_at || new Date().toISOString());
 
-          // aggregate per (tx_hash, wallet_id) in case multiple ops in same tx to same wallet occur
           const key = `${txHash}:${walletId}`;
-          const prev = candidatesAgg.get(key);
+          const prev = agg.get(key);
           if (prev) prev.amount += amt;
-          else candidatesAgg.set(key, { wallet_id: walletId, tx_hash: txHash, amount: amt, block_time: createdAt });
+          else agg.set(key, { wallet_id: walletId, tx_hash: txHash, amount: amt, block_time: createdAt });
 
           lastPagingToken = String(r?.paging_token || "") || lastPagingToken;
-          totalScanned++;
+          scannedOps++;
         }
 
-        // move page
         pages++;
-        if (recs.length < PAGE_LIMIT) break; // last page
-        // set cursor to last paging token to continue forward
+        if (recs.length < PAGE_LIMIT) break;
         cursor = String(recs[recs.length - 1]?.paging_token || "") || cursor;
         if (!cursor) break;
       }
 
-      // save cursor per wallet if we progressed
       if (lastPagingToken) {
         await sb.from("settings").upsert(
           { key: cursorKey, value: { cursor: lastPagingToken } },
@@ -140,19 +150,16 @@ export async function POST(req: Request) {
       }
     }
 
-    const candidates = Array.from(candidatesAgg.values());
+    const candidates = Array.from(agg.values());
 
     // 3) De-dup by (tx_hash, wallet_id)
-    let existingKeys = new Set<string>();
+    let existing = new Set<string>();
     if (candidates.length) {
-      const uniqHashes = Array.from(new Set(candidates.map((r) => r.tx_hash)));
-      const { data: ex } = await sb
-        .from("contributions")
-        .select("tx_hash, wallet_id")
-        .in("tx_hash", uniqHashes);
-      existingKeys = new Set((ex || []).map((e: any) => `${e.tx_hash}:${e.wallet_id}`));
+      const uniq = Array.from(new Set(candidates.map((r) => r.tx_hash)));
+      const { data: ex } = await sb.from("contributions").select("tx_hash, wallet_id").in("tx_hash", uniq);
+      existing = new Set((ex || []).map((e: any) => `${e.tx_hash}:${e.wallet_id}`));
     }
-    const rows = candidates.filter((r) => !existingKeys.has(`${r.tx_hash}:${r.wallet_id}`));
+    const rows = candidates.filter((r) => !existing.has(`${r.tx_hash}:${r.wallet_id}`));
 
     if (rows.length) {
       const { error: insErr } = await sb.from("contributions").insert(rows);
@@ -163,7 +170,7 @@ export async function POST(req: Request) {
       ok: true,
       chain: "XLM",
       wallets: wallets.length,
-      scanned_ops: totalScanned,
+      scanned_ops: scannedOps,
       candidates: candidates.length,
       inserted: rows.length,
       pages_per_wallet_cap: MAX_PAGES,
