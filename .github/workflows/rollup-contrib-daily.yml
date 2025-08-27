@@ -1,0 +1,20 @@
+name: Daily Rollup (Contributions)
+
+on:
+  schedule:
+    - cron: "5 * * * *" # every hour at minute 5
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: rollup-contrib-daily
+      cancel-in-progress: false
+    steps:
+      - name: Call daily contributions rollup
+        run: |
+          curl -fsS -X POST "https://www.blockbattle.org/api/admin/rollup/contributions/daily" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
