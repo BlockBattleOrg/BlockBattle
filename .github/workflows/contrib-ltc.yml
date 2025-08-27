@@ -1,0 +1,20 @@
+name: Contribution Ingest (LTC)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *" # every 10 minutes
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: contrib-ltc
+      cancel-in-progress: false
+    steps:
+      - name: Call LTC contribution ingest
+        run: |
+          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/contrib/ltc" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
