@@ -13,9 +13,31 @@ const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
 
 const PAGES = Number(process.env.SOL_CONTRIB_PAGES || 2); // pages per wallet
-const PAGE_LIMIT = 100; // Solana getSignaturesForAddress limit
+const PAGE_LIMIT = 100; // getSignaturesForAddress limit
 
 type Json = any;
+
+type SignatureInfo = {
+  signature: string;
+  slot?: number;
+  blockTime?: number | null;
+  err?: any;
+  memo?: string | null;
+  confirmationStatus?: string;
+};
+
+type ParsedTx = {
+  blockTime?: number | null;
+  transaction?: {
+    message?: {
+      accountKeys?: Array<string | { pubkey: string }>;
+    };
+  };
+  meta?: {
+    preBalances?: number[];
+    postBalances?: number[];
+  };
+};
 
 function isSOL(symbol?: string | null, chain?: string | null) {
   const s = String(symbol || "").trim().toUpperCase();
@@ -48,10 +70,13 @@ function toSol(lamports: number) {
   return lamports / 1_000_000_000; // 1e9
 }
 
+function keyToString(k: any): string {
+  return typeof k === "string" ? k : String(k?.pubkey || "");
+}
+
 function accountIndexFromKeys(keys: any[], account: string): number {
   for (let i = 0; i < (keys || []).length; i++) {
-    const k = keys[i];
-    const pk = typeof k === "string" ? k : String(k?.pubkey || "");
+    const pk = keyToString(keys[i]);
     if (pk === account) return i;
   }
   return -1;
@@ -92,9 +117,10 @@ export async function POST(req: Request) {
       if (!account) continue;
 
       let before: string | undefined = undefined;
+
       for (let page = 0; page < PAGES; page++) {
         // Newest-first page
-        const sigs = await rpc<any[]>("getSignaturesForAddress", [
+        const sigs: SignatureInfo[] = await rpc<SignatureInfo[]>("getSignaturesForAddress", [
           account,
           { limit: PAGE_LIMIT, before },
         ]);
@@ -106,23 +132,23 @@ export async function POST(req: Request) {
           if (!signature) continue;
 
           // getTransaction with jsonParsed
-          const tx = await rpc<any>("getTransaction", [
+          const tx: ParsedTx | null = await rpc<ParsedTx | null>("getTransaction", [
             signature,
             { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
           ]);
           if (!tx) continue;
 
-          const msgKeys = tx?.transaction?.message?.accountKeys || [];
-          const idx = accountIndexFromKeys(msgKeys, account);
+          const keys = tx?.transaction?.message?.accountKeys || [];
+          const idx = accountIndexFromKeys(keys, account);
           if (idx < 0) continue;
 
           const pre = Number(tx?.meta?.preBalances?.[idx] ?? 0);
           const post = Number(tx?.meta?.postBalances?.[idx] ?? 0);
           const delta = post - pre;
 
-          // Only consider positive net inflow (received SOL)
+          // Only positive net inflow (received SOL)
           if (delta > 0) {
-            const whenSec = Number(tx?.blockTime || 0) || Math.floor(Date.now() / 1000);
+            const whenSec = Number(tx?.blockTime ?? s?.blockTime ?? 0) || Math.floor(Date.now() / 1000);
             const whenIso = new Date(whenSec * 1000).toISOString();
 
             candidates.push({
