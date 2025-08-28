@@ -1,0 +1,20 @@
+name: Contribution Ingest (TRX)
+
+on:
+  schedule:
+    - cron: "2,17,32,47 * * * *" # 15-min, lagano "staggered"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call TRX contribution ingest
+        run: |
+          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/contrib/trx" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
