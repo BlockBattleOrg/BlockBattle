@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 
 type Json = Record<string, any>;
-const DECIMALS = 6; // ADA: lovelace -> ADA (1e6)
+const DECIMALS = 6; // lovelace -> ADA
 
 function ok(body: Json = {}) {
   return NextResponse.json({ ok: true, ...body });
@@ -24,19 +24,21 @@ function supa() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-/** NowNodes (Cardano) REST helper — GET only */
-function adaBase(): string {
-  const base = (process.env.ADA_API_BASE || "https://ada.nownodes.io/api/v0").replace(/\/+$/, "");
-  return base;
+// ----- NowNodes Blockfrost proxy (REST v0) -----
+function bfBase(): string {
+  // očekujemo ADA_BLOCKFROST_URL = https://ada-blockfrost.nownodes.io
+  const host = (process.env.ADA_BLOCKFROST_URL || "https://ada-blockfrost.nownodes.io").replace(/\/+$/, "");
+  return `${host}/api/v0`;
 }
-function adaHeaders(): Record<string, string> {
+function bfHeaders(): Record<string, string> {
   const key = need("NOWNODES_API_KEY");
+  // NowNodes koristi 'api-key' header (ne Blockfrost 'project_id')
   return { "api-key": key };
 }
-async function adaGET<T = any>(path: string): Promise<T> {
-  const res = await fetch(`${adaBase()}${path}`, {
+async function bfGET<T = any>(path: string): Promise<T> {
+  const res = await fetch(`${bfBase()}${path}`, {
     method: "GET",
-    headers: adaHeaders(),
+    headers: bfHeaders(),
     cache: "no-store",
   });
   if (!res.ok) {
@@ -53,13 +55,13 @@ export async function POST(req: Request) {
     const got = req.headers.get("x-cron-secret") || "";
     if (got !== expected) return err("Unauthorized", 401);
 
-    // env guards (Only NowNodes)
-    need("ADA_API_BASE"); // ako nema, koristimo default gore
+    // env guard (NowNodes only)
     need("NOWNODES_API_KEY");
+    // ADA_BLOCKFROST_URL je opcionalan (ima default), ali je dobro da postoji na Vercelu
 
     const sb = supa();
 
-    // 1) Active Cardano wallets (chain='cardano')
+    // 1) aktivni Cardano walleti (chain='cardano')
     const { data: wallets, error: wErr } = await sb
       .from("wallets")
       .select("id,address,chain,is_active")
@@ -68,29 +70,24 @@ export async function POST(req: Request) {
     if (wErr) throw wErr;
 
     const active = (wallets || []).filter((w) => typeof w.address === "string" && w.address);
-    if (active.length === 0) {
-      return ok({ scanned: 0, inserted: 0, note: "No active Cardano wallets" });
-    }
+    if (active.length === 0) return ok({ scanned: 0, inserted: 0, note: "No active Cardano wallets" });
 
-    // 2) Cursor (by height) u settings: 'ada_contrib_last_scanned'
+    // 2) cursor u settings ('ada_contrib_last_scanned' = height)
     const CUR = "ada_contrib_last_scanned";
     const { data: st } = await sb.from("settings").select("value").eq("key", CUR).maybeSingle();
     let last = Number(st?.value?.n ?? 0);
 
-    // latest block height (NowNodes ima Blockfrost-kompatibilan path)
-    const latestBlk = await adaGET<{ height: number }>("/blocks/latest");
+    // latest height
+    const latestBlk = await bfGET<{ height: number }>("/blocks/latest");
     const latest = Number(latestBlk?.height || 0);
     if (!latest) return err("ADA: failed to resolve latest block");
 
-    // init (prvi run): skeniraj malo unatrag
-    if (!last || last <= 0) last = Math.max(0, latest - 20000);
+    if (!last || last <= 0) last = Math.max(0, latest - 20000); // prvi run
 
     const SPAN = Number(process.env.ADA_BLOCK_SPAN || "8000");
     const from = last + 1;
     const to = Math.min(latest, last + SPAN);
-    if (to < from) {
-      return ok({ latest, from: last, to: last, scanned: 0, inserted: 0 });
-    }
+    if (to < from) return ok({ latest, from: last, to: last, scanned: 0, inserted: 0 });
 
     let scanned = 0;
     const rows: Array<{
@@ -101,8 +98,7 @@ export async function POST(req: Request) {
       block_time: string;
     }> = [];
 
-    // 3) Per-wallet scan transakcija u [from..to]
-    //    /addresses/{addr}/transactions?from=:heightFrom&to=:heightTo&order=asc&count=100&page=1
+    // 3) scan transakcija po walletu (Blockfrost pathovi)
     for (const w of active) {
       const addr = String(w.address);
       let page = 1;
@@ -110,8 +106,9 @@ export async function POST(req: Request) {
 
       while (true) {
         scanned++;
-        const list = await adaGET<any[]>(
-          `/addresses/${addr}/transactions?from=${from}&to=${to}&order=asc&count=${COUNT}&page=${page}`
+        // Podržano: order, page, count, from, to (block height)
+        const list = await bfGET<any[]>(
+          `/addresses/${addr}/transactions?order=asc&count=${COUNT}&page=${page}&from=${from}&to=${to}`
         );
         if (!Array.isArray(list) || list.length === 0) break;
 
@@ -120,12 +117,12 @@ export async function POST(req: Request) {
           if (!txHash) continue;
 
           // block_time
-          const tx = await adaGET<any>(`/txs/${txHash}`);
+          const tx = await bfGET<any>(`/txs/${txHash}`);
           const block_time = Number(tx?.block_time || Date.now());
           const whenISO = new Date(block_time * 1000).toISOString();
 
-          // outputs za našu adresu
-          const utxos = await adaGET<any>(`/txs/${txHash}/utxos`);
+          // outputs i naša adresa
+          const utxos = await bfGET<any>(`/txs/${txHash}/utxos`);
           const outputs: any[] = utxos?.outputs || [];
           if (!outputs.length) continue;
 
@@ -140,7 +137,6 @@ export async function POST(req: Request) {
               }
             }
           }
-
           if (sumLovelace > 0n) {
             rows.push({
               wallet_id: String(w.id),
@@ -157,27 +153,21 @@ export async function POST(req: Request) {
       }
     }
 
-    // 4) De-dup by (tx_hash, wallet_id)
+    // 4) de-dup (tx_hash, wallet_id)
     let existing = new Set<string>();
     if (rows.length) {
-      const uniqHashes = Array.from(new Set(rows.map((r) => r.tx_hash)));
-      const { data: ex } = await sb
-        .from("contributions")
-        .select("tx_hash, wallet_id")
-        .in("tx_hash", uniqHashes);
+      const uniq = Array.from(new Set(rows.map((r) => r.tx_hash)));
+      const { data: ex } = await sb.from("contributions").select("tx_hash,wallet_id").in("tx_hash", uniq);
       existing = new Set((ex || []).map((e: any) => `${e.tx_hash}:${e.wallet_id}`));
     }
     const toInsert = rows.filter((r) => !existing.has(`${r.tx_hash}:${r.wallet_id}`));
-
     if (toInsert.length) {
       const { error: insErr } = await sb.from("contributions").insert(toInsert);
       if (insErr) throw insErr;
     }
 
     // 5) spremi cursor
-    await sb
-      .from("settings")
-      .upsert({ key: CUR, value: { n: to }, updated_at: new Date().toISOString() });
+    await sb.from("settings").upsert({ key: CUR, value: { n: to }, updated_at: new Date().toISOString() });
 
     return ok({
       latest,
@@ -186,7 +176,7 @@ export async function POST(req: Request) {
       scanned,
       candidates: rows.length,
       inserted: toInsert.length,
-      base: adaBase(),
+      base: bfBase(),
     });
   } catch (e: any) {
     return err(e?.message || String(e), 500);
