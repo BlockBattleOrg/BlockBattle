@@ -36,7 +36,7 @@ function buildQrText(w: Wallet): string {
     case 'TRX':
     case 'SOL':
     case 'DOT':
-    case 'ADA':
+    case 'BSC':
     case 'ATOM':
       return a;
     default:
