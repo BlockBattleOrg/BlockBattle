@@ -7,10 +7,11 @@ export const runtime = "nodejs";
 // ---------- Tuning (ENV override) ----------
 const DECIMALS = 6; // lovelace -> ADA
 
-const PAGE_COUNT = Number(process.env.ADA_PAGE_COUNT || "50");
-const MAX_PAGES  = Number(process.env.ADA_MAX_PAGES  || "2");    // manje stranica po rundi zbog 524
-const TIMEOUT_MS = Number(process.env.ADA_HTTP_TIMEOUT_MS || "15000");
-const RETRIES    = Number(process.env.ADA_HTTP_RETRIES    || "2");
+const PAGE_COUNT = Number(process.env.ADA_PAGE_COUNT || "25");
+const MAX_PAGES  = Number(process.env.ADA_MAX_PAGES  || "1");    // mala runda po walletu
+const TIMEOUT_MS = Number(process.env.ADA_HTTP_TIMEOUT_MS || "25000");
+const RETRIES    = Number(process.env.ADA_HTTP_RETRIES    || "3");
+const SLEEP_MS   = Number(process.env.ADA_SLEEP_MS        || "200"); // throttle izmedu poziva
 
 const CURSOR_KEY = "ada_contrib_last_scanned";
 
@@ -19,6 +20,8 @@ type Json = Record<string, any>;
 const ok  = (b: Json = {}) => NextResponse.json({ ok: true,  ...b });
 const err = (m: string, status = 500, extra?: Json) =>
   NextResponse.json({ ok: false, error: m, ...(extra || {}) }, { status });
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 function need(name: string) {
   const v = process.env[name];
@@ -41,7 +44,7 @@ function bfHeaders(): Record<string, string> {
   return { "api-key": key, "project_id": key };
 }
 
-// fetch s timeoutom + retry (za 524/502/503/504 i AbortError)
+// fetch s timeoutom + retry (za 52x/504/524 i AbortError)
 async function bfGET<T = any>(path: string, attempt = 0): Promise<T> {
   const url = `${bfBase()}${path.startsWith("/") ? path : `/${path}`}`;
 
@@ -54,11 +57,10 @@ async function bfGET<T = any>(path: string, attempt = 0): Promise<T> {
     clearTimeout(t);
 
     if (!res.ok) {
-      // retry samo za flaky statuse
       const retriable = [502, 503, 504, 524].includes(res.status);
       if (retriable && attempt < RETRIES) {
-        const backoff = 500 * Math.pow(2, attempt); // 0.5s, 1s ...
-        await new Promise(r => setTimeout(r, backoff));
+        const backoff = 500 * Math.pow(2, attempt); // 0.5s, 1s, 2s
+        await sleep(backoff);
         return bfGET<T>(path, attempt + 1);
       }
       throw new Error(`ADA HTTP ${res.status} ${text || ""}`.trim());
@@ -70,12 +72,11 @@ async function bfGET<T = any>(path: string, attempt = 0): Promise<T> {
     }
   } catch (e: any) {
     clearTimeout(t);
-    // AbortError / network – probaj retry
     const msg = String(e?.message || e);
     const isAbort = msg.toLowerCase().includes("abort");
     if ((isAbort || msg.includes("fetch failed")) && attempt < RETRIES) {
       const backoff = 500 * Math.pow(2, attempt);
-      await new Promise(r => setTimeout(r, backoff));
+      await sleep(backoff);
       return bfGET<T>(path, attempt + 1);
     }
     throw e;
@@ -101,8 +102,8 @@ export async function POST(req: Request) {
       .select("id,address,chain,is_active")
       .eq("is_active", true)
       .eq("chain", "cardano");
-
     if (wErr) throw wErr;
+
     const active = (wallets || []).filter(w => !!w.address);
     if (!active.length) return ok({ scanned: 0, inserted: 0, note: "No active Cardano wallets" });
 
@@ -119,8 +120,8 @@ export async function POST(req: Request) {
 
     for (const w of active) {
       const addr = String(w.address);
-      // Uzimamo najnovije prvo (desc) i malo stranica po rundi
       let page = 1;
+
       while (page <= MAX_PAGES) {
         apiCalls++;
         const list = await bfGET<any[]>(
@@ -134,12 +135,14 @@ export async function POST(req: Request) {
 
           // meta (za block_time)
           apiCalls++;
+          await sleep(SLEEP_MS);
           const tx = await bfGET<any>(`/txs/${txHash}`);
           const block_time = Number(tx?.block_time || Date.now());
           const whenISO = new Date(block_time * 1000).toISOString();
 
           // utxos -> zbroji lovelace prema našem adresatu
           apiCalls++;
+          await sleep(SLEEP_MS);
           const utxos = await bfGET<any>(`/txs/${txHash}/utxos`);
           const outputs: any[] = utxos?.outputs || [];
           if (!outputs.length) continue;
@@ -167,6 +170,7 @@ export async function POST(req: Request) {
 
         if (list.length < PAGE_COUNT) break; // zadnja stranica
         page++;
+        await sleep(SLEEP_MS);
       }
     }
 
@@ -199,6 +203,7 @@ export async function POST(req: Request) {
       max_pages: MAX_PAGES,
       timeout_ms: TIMEOUT_MS,
       retries: RETRIES,
+      sleep_ms: SLEEP_MS,
     });
   } catch (e: any) {
     return err(e?.message || String(e), 500);
