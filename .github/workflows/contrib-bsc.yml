@@ -1,0 +1,16 @@
+name: Contribution Ingest (BSC)
+
+on:
+  schedule:
+    - cron: "9,39 * * * *"   # izbjegni sudar s ostalima
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call BSC contribution ingest
+        run: |
+          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/contrib/bsc" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
