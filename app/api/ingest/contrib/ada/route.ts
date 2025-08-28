@@ -5,9 +5,11 @@ import { createClient } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 
 type Json = Record<string, any>;
-const DECIMALS = 6; // lovelace -> ADA
+const DECIMALS = 6;               // lovelace -> ADA
 const PAGE_COUNT = 100;
-const MAX_PAGES = Number(process.env.ADA_PAGES || "6"); // koliko stranica po walletu max
+const MAX_PAGES = Number(process.env.ADA_PAGES || "6"); // do 600 tx po walletu
+
+const CURSOR_KEY = "ada_contrib_last_scanned";
 
 function J(body: Json = {}, status = 200) {
   return NextResponse.json(body, { status });
@@ -29,22 +31,20 @@ function supa() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-// ----- NowNodes Blockfrost proxy -----
+// -------- NowNodes Blockfrost proxy --------
+// OVDJE NE DODAJEMO /api/v0  — baza već odgovara Blockfrost API-ju
 function bfBase(): string {
-  // očekujemo ADA_BLOCKFROST_URL = https://ada-blockfrost.nownodes.io
-  const host = (process.env.ADA_BLOCKFROST_URL || "https://ada-blockfrost.nownodes.io").replace(/\/+$/, "");
-  return `${host}/api/v0`;
+  return (process.env.ADA_BLOCKFROST_URL || "https://ada-blockfrost.nownodes.io").replace(/\/+$/, "");
 }
 function bfHeaders(): Record<string, string> {
   const key = need("NOWNODES_API_KEY");
-  // Šaljemo i NowNodes i Blockfrost-style header
   return {
     "api-key": key,
-    "project_id": key,
+    "project_id": key, // Blockfrost-style
   };
 }
 async function bfGET<T = any>(path: string): Promise<T> {
-  const url = `${bfBase()}${path}`;
+  const url = `${bfBase()}${path.startsWith("/") ? path : `/${path}`}`;
   const res = await fetch(url, { method: "GET", headers: bfHeaders(), cache: "no-store" });
   const text = await res.text();
   if (!res.ok) {
@@ -67,7 +67,7 @@ export async function POST(req: Request) {
 
     // env guard
     need("NOWNODES_API_KEY");
-    // ADA_BLOCKFROST_URL je opcionalan (postoji default)
+    // ADA_BLOCKFROST_URL optional (default gore)
 
     const sb = supa();
 
@@ -78,12 +78,12 @@ export async function POST(req: Request) {
       .eq("is_active", true)
       .eq("chain", "cardano");
     if (wErr) throw wErr;
+
     const active = (wallets || []).filter((w) => !!w.address);
     if (!active.length) return ok({ scanned: 0, inserted: 0, note: "No active Cardano wallets" });
 
-    // cursor u settings
-    const CUR = "ada_contrib_last_scanned";
-    const { data: st } = await sb.from("settings").select("value").eq("key", CUR).maybeSingle();
+    // cursor (nije kritičan za dohvat, služi za telemetriju)
+    const { data: st } = await sb.from("settings").select("value").eq("key", CURSOR_KEY).maybeSingle();
     const prev = Number(st?.value?.n ?? 0);
 
     // latest height
@@ -92,8 +92,6 @@ export async function POST(req: Request) {
     if (!latest) return err("ADA: failed to resolve latest block");
 
     let scannedCalls = 0;
-    let candidates = 0;
-
     const rows: Array<{
       wallet_id: string;
       tx_hash: string;
@@ -106,7 +104,7 @@ export async function POST(req: Request) {
       const addr = String(w.address);
       let page = 1;
 
-      // dohvat transakcija BEZ 'from/to' filtera (kompatibilnost s proxyjem)
+      // BEZ from/to — maksimalna kompatibilnost s proxyjem
       while (page <= MAX_PAGES) {
         scannedCalls++;
         const list = await bfGET<any[]>(
@@ -118,12 +116,10 @@ export async function POST(req: Request) {
           const txHash = String(item?.tx_hash || "");
           if (!txHash) continue;
 
-          // detalji transakcije (visina i vrijeme)
-          const tx = await bfGET<any>(`/txs/${txHash}`);
+          const tx = await bfGET<any>(`/txs/${txHash}`); // meta (uklj. block_time)
           const block_time = Number(tx?.block_time || Date.now());
           const whenISO = new Date(block_time * 1000).toISOString();
 
-          // utxos -> zbroji lovelace isplaćen na našu adresu
           const utxos = await bfGET<any>(`/txs/${txHash}/utxos`);
           const outputs: any[] = utxos?.outputs || [];
           if (!outputs.length) continue;
@@ -140,7 +136,6 @@ export async function POST(req: Request) {
           }
 
           if (sum > 0n) {
-            candidates++;
             rows.push({
               wallet_id: String(w.id),
               tx_hash: txHash,
@@ -169,8 +164,8 @@ export async function POST(req: Request) {
       if (insErr) throw insErr;
     }
 
-    // spremi cursor – gurni na 'latest' da napredujemo
-    await sb.from("settings").upsert({ key: CUR, value: { n: latest }, updated_at: new Date().toISOString() });
+    // spremi cursor na latest (telemetrija/progress)
+    await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: latest }, updated_at: new Date().toISOString() });
 
     return ok({
       latest,
