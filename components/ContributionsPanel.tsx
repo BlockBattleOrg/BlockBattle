@@ -10,7 +10,7 @@ type RecentRow = { chain: string; amount: number; tx: string; timestamp: string 
 const DECIMALS: Record<string, number> = {
   BTC: 8, LTC: 8, DOGE: 8,
   ETH: 18, OP: 18, ARB: 18, POL: 18, AVAX: 18,
-  DOT: 10, ADA: 6, ATOM: 6, XRP: 6, SOL: 9, XLM: 7, TRX: 6,
+  DOT: 10, BSC: 6, ATOM: 6, XRP: 6, SOL: 9, XLM: 7, TRX: 6,
 };
 
 // normaliziraj nazive (MATIC/POLYGON → POL)
