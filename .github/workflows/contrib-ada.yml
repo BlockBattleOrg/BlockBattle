@@ -2,7 +2,7 @@ name: Contribution Ingest (ADA)
 
 on:
   schedule:
-    - cron: "4,19,34,49 * * * *"   # svaka ~15 min, offsetirano od ostalih
+    - cron: "4,19,34,49 * * * *"   # ~15 min, offset
   workflow_dispatch:
 
 concurrency:
