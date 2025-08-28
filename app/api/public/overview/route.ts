@@ -7,7 +7,7 @@ export const runtime = 'nodejs';
 
 const CHAINS = [
   'BTC','LTC','DOGE','ETH','OP','ARB','POL','AVAX',
-  'DOT','ADA','ATOM','XRP','SOL','XLM','TRX',
+  'DOT','BSC','ATOM','XRP','SOL','XLM','TRX',
 ] as const;
 type Chain = typeof CHAINS[number];
 

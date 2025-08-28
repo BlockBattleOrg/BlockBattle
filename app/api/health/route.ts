@@ -5,7 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-const CHAINS = ['BTC','LTC','DOGE','ETH','OP','ARB','POL','AVAX','DOT','ADA','ATOM','XRP','SOL','XLM','TRX'] as const;
+const CHAINS = ['BTC','LTC','DOGE','ETH','OP','ARB','POL','AVAX','DOT','BSC','ATOM','XRP','SOL','XLM','TRX'] as const;
 const keyH = (c: string) => `${c.toLowerCase()}_last_height`;
 const keyB = (c: string) => `${c.toLowerCase()}_last_block`;
 
