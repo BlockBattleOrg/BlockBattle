@@ -1,0 +1,20 @@
+name: Contribution Ingest (ADA)
+
+on:
+  schedule:
+    - cron: "4,19,34,49 * * * *"   # svaka ~15 min, offsetirano od ostalih
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call ADA contribution ingest
+        run: |
+          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/contrib/ada" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
