@@ -1,0 +1,16 @@
+name: Contribution Ingest (ATOM)
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call ATOM contribution ingest
+        run: |
+          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/contrib/atom" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
