@@ -3,45 +3,44 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 /**
- * ATOM (Cosmos Hub) contributions ingest (NowNodes LCD-compatible).
+ * ATOM (Cosmos Hub) contributions ingest via NowNodes LCD.
  *
- * Strategy (low-risk, rate-limit friendly):
- * - For each active ATOM wallet, fetch up to N pages of txs where the wallet is the recipient.
- * - Parse MsgSend (and MultiSend outputs) addressed to our wallet.
- * - Insert one contribution per tx hash (per wallet) if not already present.
+ * - Za SVAKI aktivni ATOM wallet dohvaća recent transakcije gdje je recipient = naš wallet.
+ * - Parsira MsgSend i MsgMultiSend i zbroji uATOM -> pretvara u ATOM (decimals = 6).
+ * - Upisuje u public.contributions (idempotentno po (wallet_id, tx_hash)).
  *
- * LCD compatibility:
- *  - Uses /cosmos/tx/v1beta1/txs?events=transfer.recipient='addr'
- *  - Paginates with pagination.next_key
- *
- * ENV expected:
+ * ENV:
  *  - SUPABASE_URL
  *  - SUPABASE_SERVICE_ROLE_KEY
  *  - NOWNODES_API_KEY
- *  - ATOM_LCD_URL or ATOM_REST_URL or COSMOS_LCD_URL   (e.g. https://cosmos.nownodes.io)
+ *  - ATOM_LCD_URL  ili  ATOM_REST_URL  ili  COSMOS_LCD_URL   (npr. https://cosmos.nownodes.io)
  *  - CRON_SECRET (header: x-cron-secret)
  */
 
 type WalletRow = {
   id: string;
   address: string;
-  chain: string; // 'atom'
+  chain: string;      // 'atom'
   is_active: boolean;
-  currencies?: { decimals?: number; symbol?: string }[];
 };
 
 const LCD_BASE =
-  (process.env.ATOM_LCD_URL || process.env.ATOM_REST_URL || process.env.COSMOS_LCD_URL || "").trim();
-const API_KEY = (process.env.NOWNODES_API_KEY || "").trim();
+  (process.env.ATOM_LCD_URL ||
+    process.env.ATOM_REST_URL ||
+    process.env.COSMOS_LCD_URL ||
+    "").trim();
 
+const API_KEY = (process.env.NOWNODES_API_KEY || "").trim();
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim();
 const SUPABASE_SERVICE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
-
 const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
 
 const PAGE_LIMIT = 50;       // txs per page
-const MAX_PAGES_PER_WAL = 3; // safety to avoid excessive scans (tune later)
+const MAX_PAGES_PER_WAL = 3; // safety (kasnije možemo povećati)
 const HTTP_TIMEOUT_MS = 15000;
+
+const ATOM_DECIMALS = 6;     // Cosmos Hub: uatom -> ATOM (1e6)
+const ATOM_DENOM = "uatom";
 
 function jsonError(status: number, message: string) {
   return NextResponse.json({ ok: false, error: message }, { status });
@@ -49,23 +48,25 @@ function jsonError(status: number, message: string) {
 
 async function lcd(path: string, qs?: Record<string, string | number | undefined | null>) {
   if (!LCD_BASE) throw new Error("Missing ATOM LCD base URL env (ATOM_LCD_URL | ATOM_REST_URL | COSMOS_LCD_URL)");
-  const u = new URL(path.replace(/^\/+/, ""), LCD_BASE.endsWith("/") ? LCD_BASE : LCD_BASE + "/");
+
+  const base = LCD_BASE.endsWith("/") ? LCD_BASE : LCD_BASE + "/";
+  const u = new URL(path.replace(/^\/+/, ""), base);
   if (qs) {
     for (const [k, v] of Object.entries(qs)) {
       if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, String(v));
     }
   }
+
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
   try {
     const res = await fetch(u.toString(), {
       method: "GET",
       headers: {
-        "Accept": "application/json",
-        "api-key": API_KEY || "",       // NowNodes header
+        Accept: "application/json",
+        "api-key": API_KEY || "", // NowNodes header
       },
       signal: ctrl.signal,
-      // Note: NowNodes ponekad traži i project_id (Blockfrost stil); ovdje nije potrebno za Cosmos LCD
     });
     if (!res.ok) {
       const text = await res.text();
@@ -78,14 +79,14 @@ async function lcd(path: string, qs?: Record<string, string | number | undefined
 }
 
 async function getActiveAtomWallets(supabase: ReturnType<typeof createClient>): Promise<WalletRow[]> {
-  // wallets.chain je lowercase ('atom'); join na currencies za decimals
+  // BEZ join-a na currencies (nema FK relacije), samo čitamo wallets.*:
   const { data, error } = await supabase
     .from("wallets")
-    .select("id,address,chain,is_active,currencies(decimals,symbol)")
+    .select("id,address,chain,is_active")
     .eq("chain", "atom");
 
   if (error) throw error;
-  return (data || []).filter(w => w.is_active);
+  return (data || []).filter((w) => w.is_active && !!w.address);
 }
 
 type TxResponse = {
@@ -99,8 +100,8 @@ type TxBodyMsg = {
   from_address?: string;
   to_address?: string;
   amount?: { denom: string; amount: string }[];
-  inputs?: { address: string; coins: { denom: string; amount: string }[] }[];   // for MsgMultiSend
-  outputs?: { address: string; coins: { denom: string; amount: string }[] }[];  // for MsgMultiSend
+  inputs?: { address: string; coins: { denom: string; amount: string }[] }[];
+  outputs?: { address: string; coins: { denom: string; amount: string }[] }[];
 };
 
 type Tx = {
@@ -113,7 +114,7 @@ type TxsSearchResp = {
   pagination?: { next_key?: string | null };
 };
 
-function sumCoinsToAddr(msgs: TxBodyMsg[] | undefined, ourAddr: string, atomDenom = "uatom"): bigint {
+function sumCoinsToAddr(msgs: TxBodyMsg[] | undefined, ourAddr: string): bigint {
   if (!msgs?.length) return 0n;
   let total = 0n;
 
@@ -122,11 +123,10 @@ function sumCoinsToAddr(msgs: TxBodyMsg[] | undefined, ourAddr: string, atomDeno
 
     // /cosmos.bank.v1beta1.MsgSend
     if (t.endsWith("MsgSend")) {
-      if (m.to_address && m.to_address === ourAddr && Array.isArray(m.amount)) {
+      if (m.to_address === ourAddr && Array.isArray(m.amount)) {
         for (const c of m.amount) {
-          if ((c.denom || "") === atomDenom) {
-            const n = BigInt(c.amount || "0");
-            total += n;
+          if ((c.denom || "") === ATOM_DENOM) {
+            total += BigInt(c.amount || "0");
           }
         }
       }
@@ -138,7 +138,7 @@ function sumCoinsToAddr(msgs: TxBodyMsg[] | undefined, ourAddr: string, atomDeno
         for (const out of m.outputs) {
           if (out.address === ourAddr) {
             for (const c of out.coins || []) {
-              if ((c.denom || "") === atomDenom) {
+              if ((c.denom || "") === ATOM_DENOM) {
                 total += BigInt(c.amount || "0");
               }
             }
@@ -158,7 +158,6 @@ async function insertIfNotExists(
   amount_tokens: number,
   block_time_iso: string
 ): Promise<boolean> {
-  // Provjeri postoji li već zapis za (wallet_id, tx_hash)
   const { data: existsRows, error: existsErr } = await supabase
     .from("contributions")
     .select("id")
@@ -174,7 +173,7 @@ async function insertIfNotExists(
     .insert({
       wallet_id,
       tx_hash,
-      amount: amount_tokens,  // stored in whole tokens (ATOM), decimals handled below
+      amount: amount_tokens, // u ATOM (ne uATOM)
       block_time: block_time_iso,
     });
 
@@ -202,13 +201,19 @@ export async function POST(req: Request) {
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-    // 1) Učitaj aktivne ATOM wallete
+    // 1) Active wallets
     const wallets = await getActiveAtomWallets(supabase);
     if (!wallets.length) {
-      return NextResponse.json({ ok: true, scanned_wallets: 0, inserted: 0, note: "No active ATOM wallets." });
+      return NextResponse.json({
+        ok: true,
+        scanned_wallets: 0,
+        scanned: 0,
+        inserted: 0,
+        note: "No active ATOM wallets.",
+      });
     }
 
-    // 2) Za svaki wallet povuci do MAX_PAGES_PER_WAL stranica recent tx-ova gdje je recipient
+    // 2) Scan per wallet
     let totalScanned = 0;
     let totalInserted = 0;
     const perWallet: Record<string, { scanned: number; inserted: number }> = {};
@@ -216,10 +221,8 @@ export async function POST(req: Request) {
     for (const w of wallets) {
       const walletId = w.id;
       const addr = (w.address || "").trim();
-      const decimals = Number(w.currencies?.[0]?.decimals ?? 6); // Cosmos Hub: 6
-      const denom = "uatom";
-
       if (!addr) continue;
+
       perWallet[addr] = { scanned: 0, inserted: 0 };
 
       let page = 0;
@@ -227,9 +230,9 @@ export async function POST(req: Request) {
 
       while (page < MAX_PAGES_PER_WAL) {
         const qs: Record<string, string> = {
-          "events": `transfer.recipient='${addr}'`,
-          "orderBy": "ORDER_BY_DESC",
-          "limit": String(PAGE_LIMIT),
+          events: `transfer.recipient='${addr}'`,
+          orderBy: "ORDER_BY_DESC",
+          limit: String(PAGE_LIMIT),
         };
         if (next_key) qs["pagination.key"] = next_key;
 
@@ -239,9 +242,9 @@ export async function POST(req: Request) {
         } catch (e: any) {
           return jsonError(502, `ATOM LCD error: ${String(e?.message || e)}`);
         }
+
         const txs = resp.txs || [];
         const txr = resp.tx_responses || [];
-
         if (!txs.length || !txr.length) break;
 
         for (let i = 0; i < Math.min(txs.length, txr.length); i++) {
@@ -251,10 +254,10 @@ export async function POST(req: Request) {
           totalScanned++;
 
           const msgs = tx?.body?.messages || [];
-          const sumU = sumCoinsToAddr(msgs, addr, denom);
+          const sumU = sumCoinsToAddr(msgs, addr);
           if (sumU <= 0n) continue;
 
-          const amountTokens = Number(sumU) / Math.pow(10, decimals);
+          const amountTokens = Number(sumU) / Math.pow(10, ATOM_DECIMALS);
           const inserted = await insertIfNotExists(supabase, walletId, tr.txhash, amountTokens, tr.timestamp);
           if (inserted) {
             perWallet[addr].inserted++;
@@ -275,7 +278,6 @@ export async function POST(req: Request) {
       inserted: totalInserted,
       per_wallet: perWallet,
     });
-
   } catch (e: any) {
     return jsonError(500, `ATOM ingest failed: ${String(e?.message || e)}`);
   }
