@@ -25,11 +25,13 @@ type AttemptLog = {
   ok: boolean;
   status: number;
   detail?: string;
+  phase: "lcd-events" | "lcd-query" | "rpc";
 };
 
 type PerWalletResultBase = {
   wallet: string;
   restBaseUsed: string;
+  rpcBaseUsed?: string | null;
   hasApiKey: boolean;
   attempts: AttemptLog[];
   status?: number;
@@ -113,52 +115,82 @@ async function fetchWithRetry(
   throw lastErr ?? new Error("Fetch failed");
 }
 
-/**
- * Build multiple candidate URLs for GET /cosmos/tx/v1beta1/txs with repeated `events`.
- * Some gateways are picky about quotes (single vs double) and pagination key (limit vs pagination.limit).
- */
-function buildCandidateUrls(base: string, address: string, limit: number): string[] {
+/** ---------- LCD (REST) candidates ---------- */
+function buildLcdEventsCandidates(base: string, address: string, limit: number): string[] {
   const restBase = base.endsWith("/") ? base.slice(0, -1) : base;
   const mk = (events: string[], opts: { usePaginationLimit?: boolean }) => {
     const u = new URL(`${restBase}/cosmos/tx/v1beta1/txs`);
     for (const ev of events) u.searchParams.append("events", ev);
     u.searchParams.set("order_by", "ORDER_BY_DESC");
-    if (opts.usePaginationLimit) {
-      u.searchParams.set("pagination.limit", String(limit));
-    } else {
-      u.searchParams.set("limit", String(limit));
-    }
+    if (opts.usePaginationLimit) u.searchParams.set("pagination.limit", String(limit));
+    else u.searchParams.set("limit", String(limit));
     return u.toString();
   };
 
   const single = `'${address}'`;
   const dbl = `"${address}"`;
 
-  const eventsTripletSingle = [
-    `message.module='bank'`,
-    `message.action='send'`,
-    `transfer.recipient=${single}`,
-  ];
-  const eventsTripletDouble = [
-    `message.module="bank"`,
-    `message.action="send"`,
-    `transfer.recipient=${dbl}`,
-  ];
+  const tripletSingle = [`message.module='bank'`, `message.action='send'`, `transfer.recipient=${single}`];
+  const tripletDouble = [`message.module="bank"`, `message.action="send"`, `transfer.recipient=${dbl}`];
 
   return [
-    // full triplet, single quotes
-    mk(eventsTripletSingle, { usePaginationLimit: false }),
-    mk(eventsTripletSingle, { usePaginationLimit: true }),
-    // full triplet, double quotes
-    mk(eventsTripletDouble, { usePaginationLimit: false }),
-    mk(eventsTripletDouble, { usePaginationLimit: true }),
-    // recipient only, single quotes
+    mk(tripletSingle, { usePaginationLimit: false }),
+    mk(tripletSingle, { usePaginationLimit: true }),
+    mk(tripletDouble, { usePaginationLimit: false }),
+    mk(tripletDouble, { usePaginationLimit: true }),
     mk([`transfer.recipient=${single}`], { usePaginationLimit: false }),
     mk([`transfer.recipient=${single}`], { usePaginationLimit: true }),
-    // recipient only, double quotes
     mk([`transfer.recipient=${dbl}`], { usePaginationLimit: false }),
     mk([`transfer.recipient=${dbl}`], { usePaginationLimit: true }),
+    // also try sender (for outgoing)
+    mk([`message.sender=${single}`], { usePaginationLimit: false }),
+    mk([`message.sender=${dbl}`], { usePaginationLimit: false }),
   ];
+}
+
+/** Some LCDs use `query=` (tendermint style) instead of `events=` */
+function buildLcdQueryCandidates(base: string, address: string, limit: number): string[] {
+  const restBase = base.endsWith("/") ? base.slice(0, -1) : base;
+  const mk = (q: string, usePaginationLimit = false) => {
+    const u = new URL(`${restBase}/cosmos/tx/v1beta1/txs`);
+    u.searchParams.set("query", q);
+    u.searchParams.set("order_by", "ORDER_BY_DESC");
+    if (usePaginationLimit) u.searchParams.set("pagination.limit", String(limit));
+    else u.searchParams.set("limit", String(limit));
+    return u.toString();
+  };
+
+  const q1 = `"transfer.recipient='${address}'"`;
+  const q2 = `"message.module='bank' AND message.action='send' AND transfer.recipient='${address}'"`;
+  const q3 = `"message.sender='${address}'"`; // outgoing
+
+  return [
+    mk(q1, false),
+    mk(q1, true),
+    mk(q2, false),
+    mk(q2, true),
+    mk(q3, false),
+    mk(q3, true),
+  ];
+}
+
+/** ---------- RPC (Tendermint) candidates ---------- */
+function buildRpcCandidates(rpcBase: string, address: string, perPage: number): string[] {
+  const base = rpcBase.endsWith("/") ? rpcBase.slice(0, -1) : rpcBase;
+  const mk = (q: string) => {
+    const u = new URL(`${base}/tx_search`);
+    u.searchParams.set("query", q);
+    u.searchParams.set("per_page", String(perPage));
+    u.searchParams.set("order_by", "desc");
+    return u.toString();
+  };
+
+  const q1 = `"transfer.recipient='${address}'"`;
+  const q2 = `"tm.event='Tx' AND transfer.recipient='${address}'"`;
+  const q3 = `"message.sender='${address}'"`;
+  const q4 = `"tm.event='Tx' AND message.sender='${address}'"`;
+
+  return [mk(q1), mk(q2), mk(q3), mk(q4)];
 }
 
 /** ---------- Supabase ---------- */
@@ -181,51 +213,40 @@ function getSupabaseServerClient() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-async function loadAtomCurrencyIdFromSupabase(): Promise<string[] /* currency ids */> {
+async function loadAtomCurrencyIds(): Promise<string[]> {
   const supabase = getSupabaseServerClient();
-  const { data, error } = await supabase
-    .from("currencies")
-    .select("id, symbol");
-
+  const { data, error } = await supabase.from("currencies").select("id,symbol");
   if (error) throw new Error(`Supabase currencies query failed: ${error.message}`);
-
-  const rows = (data || []) as Currency[];
-  const atom = rows.filter((c) => (c.symbol || "").toUpperCase() === "ATOM");
-  return atom.map((c) => c.id);
+  return (data || [])
+    .filter((c: any) => String(c.symbol || "").toUpperCase() === "ATOM")
+    .map((c: any) => c.id);
 }
 
 async function loadAtomWalletsFromSupabase(): Promise<Wallet[]> {
   const supabase = getSupabaseServerClient();
-
-  // 1) Try by currency_id (preferred)
-  const currencyIds = await loadAtomCurrencyIdFromSupabase();
+  const currencyIds = await loadAtomCurrencyIds();
 
   if (currencyIds.length > 0) {
     const { data, error } = await supabase
       .from("wallets")
-      .select("id, currency_id, address, chain, is_active")
+      .select("id,currency_id,address,chain,is_active")
       .in("currency_id", currencyIds)
-      .is("is_active", true); // only active
+      .is("is_active", true);
 
     if (error) throw new Error(`Supabase wallets query failed: ${error.message}`);
     const rows = (data || []) as Wallet[];
-    // If no active rows, fall through to chain-based fallback
-    if (rows.length > 0) {
-      return rows.filter((w) => Boolean(w.address));
-    }
+    if (rows.length > 0) return rows.filter((w) => Boolean(w.address));
   }
 
-  // 2) Fallback by chain
+  // Fallback by chain
   const { data: data2, error: error2 } = await supabase
     .from("wallets")
-    .select("id, currency_id, address, chain, is_active")
+    .select("id,currency_id,address,chain,is_active")
     .ilike("chain", "cosmos%")
-    .is("is_active", true); // only active
+    .is("is_active", true);
 
   if (error2) throw new Error(`Supabase wallets query failed: ${error2.message}`);
-
-  const rows2 = (data2 || []) as Wallet[];
-  return rows2.filter((w) => Boolean(w.address));
+  return (data2 || []).filter((w: any) => Boolean(w.address));
 }
 
 /** ---------- Handler ---------- */
@@ -280,9 +301,13 @@ export async function POST(req: NextRequest): Promise<Response> {
       );
     }
 
+    // RPC (Tendermint) base URL (optional fallback)
+    const rpcBase = (process.env.ATOM_RPC_URL || "").trim() || null;
+
     // NowNodes api-key header
-    const hasApiKey = Boolean((process.env.NOWNODES_API_KEY || "").trim());
-    const apiKeyHeader = (process.env.NOWNODES_API_KEY || "").trim();
+    const rawKey = (process.env.NOWNODES_API_KEY || "").trim();
+    const hasApiKey = Boolean(rawKey);
+    const apiKeyHeader = rawKey;
 
     // Limit per wallet
     const limitEnv = Number(process.env.ATOM_TX_LIMIT || "10");
@@ -311,7 +336,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             ok: false,
             error: "No wallets found",
             detail:
-              "Supabase query returned no active ATOM/cosmos wallets. Ensure `currencies.symbol = 'ATOM'` mapped to wallets.currency_id or set wallets.chain ~ 'cosmos%' with is_active=true.",
+              "Supabase returned no active ATOM/cosmos wallets. Ensure currencies.symbol='ATOM' is linked via wallets.currency_id or set wallets.chain ~ 'cosmos%' with is_active=true.",
             durationMs: Date.now() - startedAt,
           },
           200
@@ -319,80 +344,186 @@ export async function POST(req: NextRequest): Promise<Response> {
       }
     }
 
-    // Query LCD per wallet trying multiple candidate encodings
+    // Query per wallet with phased fallbacks
     const results: PerWalletResult[] = [];
     for (const address of wallets) {
       const t0 = Date.now();
-      const candidates = buildCandidateUrls(restBase, address, limit);
-
       const attempts: AttemptLog[] = [];
       let finalOk = false;
       let finalTxs: any[] = [];
       let finalStatus = 0;
       let finalDetail = "";
+      let usedRpcBase: string | null = null;
 
-      for (const queryUrl of candidates) {
-        try {
+      // Phase 1: LCD events=
+      for (const queryUrl of buildLcdEventsCandidates(restBase, address, limit)) {
+        const maskedKey = hasApiKey ? apiKeyHeader.replace(/.(?=.{4})/g, "*") : "";
+        const headers: Record<string, string> = {
+          accept: "application/json",
+          "cache-control": "no-store",
+          ...(hasApiKey ? { "api-key": apiKeyHeader } : {}),
+        };
+
+        const res = await fetchWithRetry(queryUrl, { method: "GET", headers }, 2, 250);
+        const ct = res.headers.get("content-type") || "";
+        if (!res.ok) {
+          const raw = ct.includes("application/json")
+            ? await res.json().catch(async () => ({ raw: await res.text() }))
+            : { raw: await res.text() };
+          const detail =
+            (raw && typeof raw === "object" && "message" in raw && (raw as any).message) ||
+            (raw && typeof raw === "object" && "error" in raw && (raw as any).error) ||
+            (raw && typeof raw === "object" && "raw" in raw && (raw as any).raw) ||
+            JSON.stringify(raw);
+
+          attempts.push({
+            url: queryUrl,
+            headers: { ...headers, ...(hasApiKey ? { "api-key": maskedKey } : {}) },
+            ok: false,
+            status: res.status,
+            detail: String(detail),
+            phase: "lcd-events",
+          });
+
+          // if NowNodes keeps saying "query cannot be empty", we'll fall back later
+          finalStatus = res.status;
+          finalDetail = String(detail);
+          continue;
+        }
+
+        const data = ct.includes("application/json") ? await res.json() : await res.text();
+        const txs =
+          (data && typeof data === "object" && (data as any).txs) ||
+          (data && typeof data === "object" && (data as any).tx_responses) ||
+          [];
+
+        attempts.push({
+          url: queryUrl,
+          headers: { ...headers, ...(hasApiKey ? { "api-key": maskedKey } : {}) },
+          ok: true,
+          status: res.status,
+          phase: "lcd-events",
+        });
+
+        finalOk = true;
+        finalTxs = Array.isArray(txs) ? txs : [];
+        finalStatus = res.status;
+        break;
+      }
+
+      // Phase 2: LCD query= fallback
+      if (!finalOk) {
+        for (const queryUrl of buildLcdQueryCandidates(restBase, address, limit)) {
+          const maskedKey = hasApiKey ? apiKeyHeader.replace(/.(?=.{4})/g, "*") : "";
           const headers: Record<string, string> = {
             accept: "application/json",
             "cache-control": "no-store",
             ...(hasApiKey ? { "api-key": apiKeyHeader } : {}),
           };
 
-          const res = await fetchWithRetry(
-            queryUrl,
-            { method: "GET", headers },
-            2,
-            250
-          );
-
+          const res = await fetchWithRetry(queryUrl, { method: "GET", headers }, 2, 250);
           const ct = res.headers.get("content-type") || "";
-          const ok = res.ok;
-
-          if (!ok) {
+          if (!res.ok) {
             const raw = ct.includes("application/json")
               ? await res.json().catch(async () => ({ raw: await res.text() }))
               : { raw: await res.text() };
-
             const detail =
               (raw && typeof raw === "object" && "message" in raw && (raw as any).message) ||
               (raw && typeof raw === "object" && "error" in raw && (raw as any).error) ||
               (raw && typeof raw === "object" && "raw" in raw && (raw as any).raw) ||
               JSON.stringify(raw);
 
-            attempts.push({ url: queryUrl, headers, ok, status: res.status, detail: String(detail) });
+            attempts.push({
+              url: queryUrl,
+              headers: { ...headers, ...(hasApiKey ? { "api-key": maskedKey } : {}) },
+              ok: false,
+              status: res.status,
+              detail: String(detail),
+              phase: "lcd-query",
+            });
+
             finalStatus = res.status;
             finalDetail = String(detail);
-            continue; // try next candidate
+            continue;
           }
 
-          // Success path
-          const data = ct.includes("application/json")
-            ? await res.json()
-            : await res.text();
-
+          const data = ct.includes("application/json") ? await res.json() : await res.text();
           const txs =
             (data && typeof data === "object" && (data as any).txs) ||
             (data && typeof data === "object" && (data as any).tx_responses) ||
             [];
 
-          attempts.push({ url: queryUrl, headers, ok: true, status: res.status });
+          attempts.push({
+            url: queryUrl,
+            headers: { ...headers, ...(hasApiKey ? { "api-key": maskedKey } : {}) },
+            ok: true,
+            status: res.status,
+            phase: "lcd-query",
+          });
+
           finalOk = true;
           finalTxs = Array.isArray(txs) ? txs : [];
           finalStatus = res.status;
-          break; // stop on first success
-        } catch (err: any) {
+          break;
+        }
+      }
+
+      // Phase 3: RPC /tx_search fallback (if configured)
+      if (!finalOk && rpcBase) {
+        usedRpcBase = rpcBase;
+        for (const queryUrl of buildRpcCandidates(rpcBase, address, limit)) {
+          const headers: Record<string, string> = {
+            accept: "application/json",
+            "cache-control": "no-store",
+            ...(hasApiKey ? { "api-key": apiKeyHeader } : {}),
+          };
+
+          const res = await fetchWithRetry(queryUrl, { method: "GET", headers }, 2, 250);
+          const ct = res.headers.get("content-type") || "";
+          if (!res.ok) {
+            const raw = ct.includes("application/json")
+              ? await res.json().catch(async () => ({ raw: await res.text() }))
+              : { raw: await res.text() };
+            const detail =
+              (raw && typeof raw === "object" && "message" in raw && (raw as any).message) ||
+              (raw && typeof raw === "object" && "error" in raw && (raw as any).error) ||
+              (raw && typeof raw === "object" && "raw" in raw && (raw as any).raw) ||
+              JSON.stringify(raw);
+
+            attempts.push({
+              url: queryUrl,
+              headers,
+              ok: false,
+              status: res.status,
+              detail: String(detail),
+              phase: "rpc",
+            });
+
+            finalStatus = res.status;
+            finalDetail = String(detail);
+            continue;
+          }
+
+          const data = ct.includes("application/json") ? await res.json() : await res.text();
+          // Tendermint tx_search returns { result: { txs: [...] } } or { txs: [...] } depending on proxy
+          // Normalize to array
+          const txs =
+            (data && typeof data === "object" && (data as any).result && (data as any).result.txs) ||
+            (data && typeof data === "object" && (data as any).txs) ||
+            [];
+
           attempts.push({
             url: queryUrl,
-            headers: {
-              accept: "application/json",
-              ...(hasApiKey ? { "api-key": apiKeyHeader } : {}),
-            },
-            ok: false,
-            status: 0,
-            detail: err?.message ?? String(err),
+            headers,
+            ok: true,
+            status: res.status,
+            phase: "rpc",
           });
-          finalDetail = err?.message ?? String(err);
+
+          finalOk = true;
+          finalTxs = Array.isArray(txs) ? txs : [];
+          finalStatus = res.status;
+          break;
         }
       }
 
@@ -406,6 +537,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           txs: finalTxs,
           status: finalStatus,
           restBaseUsed: restBase,
+          rpcBaseUsed: usedRpcBase ?? null,
           hasApiKey,
           attempts,
           ms,
@@ -415,9 +547,10 @@ export async function POST(req: NextRequest): Promise<Response> {
           wallet: address,
           ok: false,
           error: "LCD query failed",
-          detail: finalDetail || "All candidate query encodings failed",
+          detail: finalDetail || "All candidate query encodings failed (events=, query=, and rpc tx_search).",
           status: finalStatus || undefined,
           restBaseUsed: restBase,
+          rpcBaseUsed: usedRpcBase ?? null,
           hasApiKey,
           attempts,
           ms,
