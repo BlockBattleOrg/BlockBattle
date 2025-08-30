@@ -9,16 +9,7 @@ export const runtime = "nodejs";
 type Wallet = {
   address: string;
   chain?: string | null;
-  symbol?: string | null;
   enabled?: boolean | null;
-};
-
-type OrderBy = "ORDER_BY_UNSPECIFIED" | "ORDER_BY_ASC" | "ORDER_BY_DESC";
-
-type TxSearchBody = {
-  events: string[];
-  order_by: OrderBy;
-  pagination?: { limit?: string; count_total?: boolean };
 };
 
 type PerWalletResultBase = {
@@ -27,7 +18,6 @@ type PerWalletResultBase = {
   hasApiKey: boolean;
   queryUrl: string;
   eventsRaw: string[];
-  requestBody: TxSearchBody;
   status?: number;
   ms: number;
 };
@@ -110,33 +100,33 @@ async function fetchWithRetry(
 }
 
 /**
- * Build POST /cosmos/tx/v1beta1/txs body for searching by events.
- * Using POST avoids URL encoding pitfalls that cause "query cannot be empty"
- * on some gateways. The gRPC-gateway accepts this JSON payload.
+ * Build a GET /cosmos/tx/v1beta1/txs URL using repeated `events` params.
+ * Many gateways behave best when you include module/action along with recipient.
  */
-function buildTxSearchPost(
+function buildTxSearchUrl(
   base: string,
   address: string,
   limit: number
-): {
-  url: string;
-  eventsRaw: string[];
-  body: TxSearchBody;
-} {
+): { url: string; eventsRaw: string[] } {
   const restBase = base.endsWith("/") ? base.slice(0, -1) : base;
-  const url = `${restBase}/cosmos/tx/v1beta1/txs`;
+  const u = new URL(`${restBase}/cosmos/tx/v1beta1/txs`);
 
-  // You can expand with: message.module='bank', message.action='send', etc.
-  const events = [`transfer.recipient='${address}'`];
+  // Use multiple event filters (common for bank send txs)
+  const events = [
+    `message.module='bank'`,
+    `message.action='send'`,
+    `transfer.recipient='${address}'`,
+  ];
 
-  // Explicitly type the object so TS keeps the literal type for order_by.
-  const body: TxSearchBody = {
-    events,
-    order_by: "ORDER_BY_DESC",
-    pagination: { limit: String(limit), count_total: false },
-  };
+  // Add each event as a separate query param `events=...`
+  for (const ev of events) {
+    u.searchParams.append("events", ev);
+  }
+  // Sorting and pagination (some LCDs accept limit or pagination.limit; NowNodes supports limit)
+  u.searchParams.set("order_by", "ORDER_BY_DESC");
+  u.searchParams.set("limit", String(limit));
 
-  return { url, eventsRaw: events, body };
+  return { url: u.toString(), eventsRaw: events };
 }
 
 /** ---------- Supabase ---------- */
@@ -154,12 +144,8 @@ function getSupabaseServerClient() {
 
   if (!url) throw new Error("SUPABASE_URL is not set");
 
-  // Prefer service role for backend cron jobs; fallback to anon if RLS allows.
   const key = serviceRole || anon;
-  if (!key)
-    throw new Error(
-      "Neither SUPABASE_SERVICE_ROLE_KEY nor SUPABASE_ANON_KEY is set"
-    );
+  if (!key) throw new Error("Neither SUPABASE_SERVICE_ROLE_KEY nor SUPABASE_ANON_KEY is set");
 
   return createClient(url, key, { auth: { persistSession: false } });
 }
@@ -167,12 +153,11 @@ function getSupabaseServerClient() {
 async function loadAtomWalletsFromSupabase(): Promise<Wallet[]> {
   const supabase = getSupabaseServerClient();
 
-  // Adjust to your schema if needed:
+  // Query only columns that exist. Filter by chain ~ 'cosmos'.
   const { data, error } = await supabase
     .from("wallets")
-    .select("address, chain, symbol, enabled")
-    .ilike("chain", "cosmos")
-    .ilike("symbol", "atom");
+    .select("address, chain, enabled")
+    .ilike("chain", "cosmos%");
 
   if (error) throw new Error(`Supabase wallets query failed: ${error.message}`);
 
@@ -189,7 +174,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   const startedAt = Date.now();
 
   try {
-    // Gate with secret to protect quotas and service-role usage
+    // Secret gate
     const providedSecret = req.headers.get("x-cron-secret") || "";
     const expectedSecret = process.env.CRON_SECRET || "";
     if (!expectedSecret) {
@@ -215,8 +200,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       );
     }
 
-    // Resolve REST (LCD) base URL from env
-    // Primary: ATOM_REST_URL (your Vercel env), Fallback: ATOM_LCD_URL (legacy)
+    // REST (LCD) base URL
     const restBase =
       (process.env.ATOM_REST_URL || "").trim() ||
       (process.env.ATOM_LCD_URL || "").trim();
@@ -237,6 +221,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       );
     }
 
+    // NowNodes api-key header
     const hasApiKey = Boolean((process.env.NOWNODES_API_KEY || "").trim());
     const apiKeyHeader = (process.env.NOWNODES_API_KEY || "").trim();
 
@@ -251,7 +236,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const bodyAddress = bodyIn?.address || "";
     const addressOverride = (qsAddress || bodyAddress).trim();
 
-    // Wallet set (from Supabase or single override)
+    // Wallet set
     let wallets: string[] = [];
     let mode: IngestOk["mode"] = "bulk-from-supabase";
 
@@ -267,7 +252,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             ok: false,
             error: "No wallets found",
             detail:
-              "Supabase table `wallets` returned no ATOM/cosmos addresses. Ensure rows exist and match filters.",
+              "Supabase table `wallets` returned no cosmos addresses. Ensure rows exist and match filters.",
             durationMs: Date.now() - startedAt,
           },
           200
@@ -275,26 +260,23 @@ export async function POST(req: NextRequest): Promise<Response> {
       }
     }
 
-    // Query LCD per wallet using POST (gRPC-gateway)
+    // Query LCD per wallet using GET with repeated `events`
     const results: PerWalletResult[] = [];
     for (const address of wallets) {
       const t0 = Date.now();
-      const post = buildTxSearchPost(restBase, address, limit);
-      const queryUrl = post.url; // informational only (we use POST)
-      const requestBody = post.body;
-      const eventsRaw = post.eventsRaw;
+      const built = buildTxSearchUrl(restBase, address, limit);
+      const queryUrl = built.url;
+      const eventsRaw = built.eventsRaw;
 
       try {
         const res = await fetchWithRetry(
           queryUrl,
           {
-            method: "POST",
+            method: "GET",
             headers: {
-              "content-type": "application/json",
               ...(hasApiKey ? { "api-key": apiKeyHeader } : {}),
               "cache-control": "no-store",
             },
-            body: JSON.stringify(requestBody),
           },
           3,
           400
@@ -322,7 +304,6 @@ export async function POST(req: NextRequest): Promise<Response> {
             hasApiKey,
             queryUrl,
             eventsRaw,
-            requestBody,
             ms: Date.now() - t0,
           });
           continue;
@@ -332,7 +313,6 @@ export async function POST(req: NextRequest): Promise<Response> {
           ? await res.json()
           : await res.text();
 
-        // Cosmos v1beta1 typically returns `txs` or `tx_responses`
         const txs =
           (data && typeof data === "object" && (data as any).txs) ||
           (data && typeof data === "object" && (data as any).tx_responses) ||
@@ -346,7 +326,6 @@ export async function POST(req: NextRequest): Promise<Response> {
           hasApiKey,
           queryUrl,
           eventsRaw,
-          requestBody,
           txCount: Array.isArray(txs) ? txs.length : 0,
           txs: Array.isArray(txs) ? txs : [],
           ms: Date.now() - t0,
@@ -362,7 +341,6 @@ export async function POST(req: NextRequest): Promise<Response> {
           hasApiKey,
           queryUrl,
           eventsRaw,
-          requestBody,
           ms: Date.now() - t0,
         });
       }
