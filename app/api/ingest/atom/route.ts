@@ -13,24 +13,29 @@ type Wallet = {
   enabled?: boolean | null;
 };
 
-type PerWalletResult =
-  | {
-      wallet: string;
-      ok: true;
-      queryUrl: string;
-      txCount: number;
-      txs: unknown[];
-      status: number;
-      ms: number;
-    }
-  | {
-    wallet: string;
-    ok: false;
-    error: string;
-    detail?: string;
-    status?: number;
-    ms: number;
-  };
+type PerWalletResultBase = {
+  wallet: string;
+  queryUrl: string;
+  eventsRaw: string;
+  restBaseUsed: string;
+  hasApiKey: boolean;
+  status?: number;
+  ms: number;
+};
+
+type PerWalletResultSuccess = PerWalletResultBase & {
+  ok: true;
+  txCount: number;
+  txs: unknown[];
+};
+
+type PerWalletResultError = PerWalletResultBase & {
+  ok: false;
+  error: string;
+  detail?: string;
+};
+
+type PerWalletResult = PerWalletResultSuccess | PerWalletResultError;
 
 type IngestOk = {
   ok: true;
@@ -47,6 +52,7 @@ type IngestErr = {
   error: string;
   detail?: string;
   status?: number;
+  debug?: Record<string, unknown>;
   durationMs: number;
 };
 
@@ -96,18 +102,38 @@ async function fetchWithRetry(
 
 /**
  * Build Cosmos LCD tx search URL for "transfer.recipient = '<address>'".
- * IMPORTANT: Let URLSearchParams handle encoding; don't hand-encode "%3D".
+ *
+ * Notes:
+ * - Some LCD gateways (incl. NowNodes) expect the inner '=' to be URL-encoded (%3D),
+ *   otherwise they parse the query as empty -> "query cannot be empty".
+ * - Many modern endpoints also expect "pagination.limit" instead of "limit".
+ * We satisfy both to maximize compatibility.
  */
-function buildTxSearchUrl(base: string, address: string, limit: number): string {
-  const sep = base.endsWith("/") ? "" : "/";
-  const url = new URL(`${base}${sep}cosmos/tx/v1beta1/txs`);
-  const events = `transfer.recipient='${address}'`;
-  url.search = new URLSearchParams({
-    events,
-    order_by: "ORDER_BY_DESC",
-    limit: String(limit),
-  }).toString();
-  return url.toString();
+function buildTxSearchUrl(base: string, address: string, limit: number): {
+  url: string;
+  eventsRaw: string;
+} {
+  const restBase = base.endsWith("/") ? base.slice(0, -1) : base;
+
+  // events token with single quotes around address
+  const eventsRaw = `transfer.recipient='${address}'`;
+
+  // Encode '=' inside the value to be safe for gateways that require it.
+  // We'll manually assemble the query string to control encoding precisely.
+  const encodedEquals = "%3D";
+  const encodedQuote = "%27"; // single quote
+  const eventsValue = `transfer.recipient${encodedEquals}${encodedQuote}${encodeURIComponent(
+    address
+  )}${encodedQuote}`;
+
+  // Prefer pagination.limit; keep order_by for deterministic ordering.
+  const query =
+    `events=${eventsValue}` +
+    `&order_by=ORDER_BY_DESC` +
+    `&pagination.limit=${encodeURIComponent(String(limit))}`;
+
+  const url = `${restBase}/cosmos/tx/v1beta1/txs?${query}`;
+  return { url, eventsRaw };
 }
 
 /** ---------- Supabase ---------- */
@@ -177,26 +203,27 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     // Resolve REST (LCD) base URL from env
     // Primary: ATOM_REST_URL (your Vercel env), Fallback: ATOM_LCD_URL (legacy)
-    const lcdBase =
+    const restBase =
       (process.env.ATOM_REST_URL || "").trim() ||
       (process.env.ATOM_LCD_URL || "").trim();
-    if (!lcdBase) {
+    if (!restBase) {
       return json(
         <IngestErr>{
           ok: false,
           error: "Missing ATOM_REST_URL",
           detail:
             "Set ATOM_REST_URL (e.g., https://atom.nownodes.io) in environment. Fallback ATOM_LCD_URL is also supported.",
+          debug: {
+            ATOM_REST_URL: process.env.ATOM_REST_URL ?? null,
+            ATOM_LCD_URL: process.env.ATOM_LCD_URL ?? null,
+          },
           durationMs: Date.now() - startedAt,
         },
         500
       );
     }
 
-    // Optional RPC URL (not used here, but kept for future extensions)
-    // const rpcBase = (process.env.ATOM_RPC_URL || "").trim();
-
-    // NowNodes api-key header (optional)
+    const hasApiKey = Boolean((process.env.NOWNODES_API_KEY || "").trim());
     const apiKeyHeader = (process.env.NOWNODES_API_KEY || "").trim();
 
     // Limit per wallet
@@ -238,14 +265,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     const results: PerWalletResult[] = [];
     for (const address of wallets) {
       const t0 = Date.now();
+      const { url: queryUrl, eventsRaw } = buildTxSearchUrl(restBase, address, limit);
+
       try {
-        const queryUrl = buildTxSearchUrl(lcdBase, address, limit);
         const res = await fetchWithRetry(
           queryUrl,
           {
             method: "GET",
             headers: {
-              ...(apiKeyHeader ? { "api-key": apiKeyHeader } : {}),
+              ...(hasApiKey ? { "api-key": apiKeyHeader } : {}),
               "cache-control": "no-store",
             },
           },
@@ -269,8 +297,12 @@ export async function POST(req: NextRequest): Promise<Response> {
             wallet: address,
             ok: false,
             error: "LCD query failed",
-            detail: `LCD ${res.status}: ${detail}`,
+            detail: String(detail),
             status: res.status,
+            queryUrl,
+            eventsRaw,
+            restBaseUsed: restBase,
+            hasApiKey,
             ms: Date.now() - t0,
           });
           continue;
@@ -289,10 +321,13 @@ export async function POST(req: NextRequest): Promise<Response> {
         results.push({
           wallet: address,
           ok: true,
+          status: res.status,
           queryUrl,
+          eventsRaw,
+          restBaseUsed: restBase,
+          hasApiKey,
           txCount: Array.isArray(txs) ? txs.length : 0,
           txs: Array.isArray(txs) ? txs : [],
-          status: res.status,
           ms: Date.now() - t0,
         });
       } catch (err: any) {
@@ -301,6 +336,11 @@ export async function POST(req: NextRequest): Promise<Response> {
           ok: false,
           error: "Unhandled exception during LCD query",
           detail: err?.message ?? String(err),
+          status: undefined,
+          queryUrl,
+          eventsRaw,
+          restBaseUsed: restBase,
+          hasApiKey,
           ms: Date.now() - t0,
         });
       }
