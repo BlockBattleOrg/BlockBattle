@@ -1,0 +1,20 @@
+name: DOT Ingest
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"    # every 5 minutes
+  workflow_dispatch: {}       # manual trigger
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call DOT ingest via contrib proxy
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          # Hitting contrib proxy (mirrors status/body of core route):
+          curl --fail-with-body -sS -X POST "https://www.blockbattle.org/api/ingest/contrib/dot" \
+            -H "x-cron-secret: ${CRON_SECRET}"
+
