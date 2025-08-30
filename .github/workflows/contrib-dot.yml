@@ -1,4 +1,4 @@
-name: DOT Ingest
+name: Contribution Ingest (DOT)
 
 on:
   schedule:
