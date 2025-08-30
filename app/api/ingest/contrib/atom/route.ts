@@ -41,7 +41,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const origin = `${url.protocol}//${url.host}`;
     const target = new URL(`${origin}/api/ingest/atom`);
 
-    // Forward address override if present (either query or body)
+    // Forward address override if present
     const qsAddr = url.searchParams.get("address");
     if (qsAddr) target.searchParams.set("address", qsAddr);
 
@@ -53,7 +53,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       ...(secret ? { "x-cron-secret": secret } : {}),
     };
 
-    // Forward body if JSON (so caller can also send {"address": "..."} if they want)
+    // Forward body if JSON
     const body = await readJsonBody(req);
     const init: RequestInit = {
       method: "POST",
@@ -69,7 +69,6 @@ export async function POST(req: NextRequest): Promise<Response> {
       const data = await res.json();
       return json(data, res.status);
     } else {
-      // Non-JSON (shouldn't happen) — wrap as JSON
       const raw = await res.text();
       return json({ ok: false, passthrough: true, raw }, res.status);
     }
