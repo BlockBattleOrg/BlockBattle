@@ -13,13 +13,21 @@ type Wallet = {
   enabled?: boolean | null;
 };
 
+type OrderBy = "ORDER_BY_UNSPECIFIED" | "ORDER_BY_ASC" | "ORDER_BY_DESC";
+
+type TxSearchBody = {
+  events: string[];
+  order_by: OrderBy;
+  pagination?: { limit?: string; count_total?: boolean };
+};
+
 type PerWalletResultBase = {
   wallet: string;
   restBaseUsed: string;
   hasApiKey: boolean;
   queryUrl: string;
   eventsRaw: string[];
-  requestBody: unknown;
+  requestBody: TxSearchBody;
   status?: number;
   ms: number;
 };
@@ -113,20 +121,16 @@ function buildTxSearchPost(
 ): {
   url: string;
   eventsRaw: string[];
-  body: {
-    events: string[];
-    order_by: "ORDER_BY_UNSPECIFIED" | "ORDER_BY_ASC" | "ORDER_BY_DESC";
-    pagination?: { limit?: string; count_total?: boolean };
-  };
+  body: TxSearchBody;
 } {
   const restBase = base.endsWith("/") ? base.slice(0, -1) : base;
   const url = `${restBase}/cosmos/tx/v1beta1/txs`;
 
-  // You can add more constraints if desired:
-  // const events = [`message.module='bank'`, `message.action='send'`, `transfer.recipient='${address}'`];
+  // You can expand with: message.module='bank', message.action='send', etc.
   const events = [`transfer.recipient='${address}'`];
 
-  const body = {
+  // Explicitly type the object so TS keeps the literal type for order_by.
+  const body: TxSearchBody = {
     events,
     order_by: "ORDER_BY_DESC",
     pagination: { limit: String(limit), count_total: false },
