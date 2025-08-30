@@ -24,13 +24,13 @@ type PerWalletResult =
       ms: number;
     }
   | {
-      wallet: string;
-      ok: false;
-      error: string;
-      detail?: string;
-      status?: number;
-      ms: number;
-    };
+    wallet: string;
+    ok: false;
+    error: string;
+    detail?: string;
+    status?: number;
+    ms: number;
+  };
 
 type IngestOk = {
   ok: true;
@@ -96,17 +96,18 @@ async function fetchWithRetry(
 
 /**
  * Build Cosmos LCD tx search URL for "transfer.recipient = '<address>'".
- * We must URL-encode the single quotes around the address.
+ * IMPORTANT: Let URLSearchParams handle encoding; don't hand-encode "%3D".
  */
 function buildTxSearchUrl(base: string, address: string, limit: number): string {
-  const encodedAddress = encodeURIComponent(`'${address}'`); // %27<ADDR>%27
-  const params = new URLSearchParams({
-    events: `transfer.recipient%3D${encodedAddress}`, // keep `%3D` for '=' to avoid double encoding issues on some LCDs
+  const sep = base.endsWith("/") ? "" : "/";
+  const url = new URL(`${base}${sep}cosmos/tx/v1beta1/txs`);
+  const events = `transfer.recipient='${address}'`;
+  url.search = new URLSearchParams({
+    events,
     order_by: "ORDER_BY_DESC",
     limit: String(limit),
-  });
-  const sep = base.endsWith("/") ? "" : "/";
-  return `${base}${sep}cosmos/tx/v1beta1/txs?${params.toString()}`;
+  }).toString();
+  return url.toString();
 }
 
 /** ---------- Supabase ---------- */
@@ -116,41 +117,31 @@ function getSupabaseServerClient() {
   const anon = process.env.SUPABASE_ANON_KEY;
   if (!url) throw new Error("SUPABASE_URL is not set");
 
-  // Prefer service role (server-only) for backend cron jobs; fallback to anon if needed.
+  // Prefer service role for backend cron jobs; fallback to anon if RLS allows.
   const key = serviceRole || anon;
   if (!key) throw new Error("Neither SUPABASE_SERVICE_ROLE_KEY nor SUPABASE_ANON_KEY is set");
 
-  return createClient(url, key, {
-    auth: { persistSession: false },
-  });
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 async function loadAtomWalletsFromSupabase(): Promise<Wallet[]> {
   const supabase = getSupabaseServerClient();
 
-  // Adjust the query to match your schema:
-  // - table: wallets
-  // - columns: address (text), chain (text), symbol (text), enabled (bool)
-  // - filter: chain = 'cosmos' AND symbol = 'ATOM' AND (enabled IS TRUE OR enabled IS NULL)
+  // Adjust to your schema if needed:
   const { data, error } = await supabase
     .from("wallets")
     .select("address, chain, symbol, enabled")
     .ilike("chain", "cosmos")
     .ilike("symbol", "atom");
 
-  if (error) {
-    throw new Error(`Supabase wallets query failed: ${error.message}`);
-  }
+  if (error) throw new Error(`Supabase wallets query failed: ${error.message}`);
 
   const rows = (data || []) as Wallet[];
-  // Optional filter for enabled=true if you have it
-  const filtered = rows.filter(
+  return rows.filter(
     (w) =>
       w.address &&
       (w.enabled === null || w.enabled === undefined || w.enabled === true)
   );
-
-  return filtered;
 }
 
 /** ---------- Handler ---------- */
@@ -158,7 +149,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   const startedAt = Date.now();
 
   try {
-    // Secret gate (protects both LCD quotas and optional service role usage)
+    // Gate with secret to protect quotas and service-role usage
     const providedSecret = req.headers.get("x-cron-secret") || "";
     const expectedSecret = process.env.CRON_SECRET || "";
     if (!expectedSecret) {
@@ -184,33 +175,42 @@ export async function POST(req: NextRequest): Promise<Response> {
       );
     }
 
-    // Resolve LCD config
-    const lcdBase = (process.env.ATOM_LCD_URL || "").trim(); // e.g. https://atom.nownodes.io
+    // Resolve REST (LCD) base URL from env
+    // Primary: ATOM_REST_URL (your Vercel env), Fallback: ATOM_LCD_URL (legacy)
+    const lcdBase =
+      (process.env.ATOM_REST_URL || "").trim() ||
+      (process.env.ATOM_LCD_URL || "").trim();
     if (!lcdBase) {
       return json(
         <IngestErr>{
           ok: false,
-          error: "Missing ATOM_LCD_URL",
-          detail: "Set ATOM_LCD_URL (e.g., https://atom.nownodes.io) in environment.",
+          error: "Missing ATOM_REST_URL",
+          detail:
+            "Set ATOM_REST_URL (e.g., https://atom.nownodes.io) in environment. Fallback ATOM_LCD_URL is also supported.",
           durationMs: Date.now() - startedAt,
         },
         500
       );
     }
+
+    // Optional RPC URL (not used here, but kept for future extensions)
+    // const rpcBase = (process.env.ATOM_RPC_URL || "").trim();
+
+    // NowNodes api-key header (optional)
     const apiKeyHeader = (process.env.NOWNODES_API_KEY || "").trim();
 
     // Limit per wallet
     const limitEnv = Number(process.env.ATOM_TX_LIMIT || "10");
     const limit = Number.isFinite(limitEnv) && limitEnv > 0 ? limitEnv : 10;
 
-    // Address override (single-address mode)
+    // Single-address override (query/body)
     const url = new URL(req.url);
     const qsAddress = url.searchParams.get("address") || "";
     const body = await readJsonBody(req);
     const bodyAddress = body?.address || "";
     const addressOverride = (qsAddress || bodyAddress).trim();
 
-    // Compute wallets
+    // Wallet set (from Supabase or single override)
     let wallets: string[] = [];
     let mode: IngestOk["mode"] = "bulk-from-supabase";
 
@@ -234,7 +234,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       }
     }
 
-    // For each wallet, query LCD
+    // Query LCD per wallet
     const results: PerWalletResult[] = [];
     for (const address of wallets) {
       const t0 = Date.now();
@@ -280,6 +280,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           ? await res.json()
           : await res.text();
 
+        // Cosmos v1beta1 typically returns `txs` or `tx_responses`
         const txs =
           (data && typeof data === "object" && (data as any).txs) ||
           (data && typeof data === "object" && (data as any).tx_responses) ||
