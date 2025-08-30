@@ -15,10 +15,11 @@ type Wallet = {
 
 type PerWalletResultBase = {
   wallet: string;
-  queryUrl: string;
-  eventsRaw: string;
   restBaseUsed: string;
   hasApiKey: boolean;
+  queryUrl: string;
+  eventsRaw: string[];
+  requestBody: unknown;
   status?: number;
   ms: number;
 };
@@ -101,51 +102,60 @@ async function fetchWithRetry(
 }
 
 /**
- * Build Cosmos LCD tx search URL for "transfer.recipient = '<address>'".
- *
- * Notes:
- * - Some LCD gateways (incl. NowNodes) expect the inner '=' to be URL-encoded (%3D),
- *   otherwise they parse the query as empty -> "query cannot be empty".
- * - Many modern endpoints also expect "pagination.limit" instead of "limit".
- * We satisfy both to maximize compatibility.
+ * Build POST /cosmos/tx/v1beta1/txs body for searching by events.
+ * Using POST avoids URL encoding pitfalls that cause "query cannot be empty"
+ * on some gateways. The gRPC-gateway accepts this JSON payload.
  */
-function buildTxSearchUrl(base: string, address: string, limit: number): {
+function buildTxSearchPost(
+  base: string,
+  address: string,
+  limit: number
+): {
   url: string;
-  eventsRaw: string;
+  eventsRaw: string[];
+  body: {
+    events: string[];
+    order_by: "ORDER_BY_UNSPECIFIED" | "ORDER_BY_ASC" | "ORDER_BY_DESC";
+    pagination?: { limit?: string; count_total?: boolean };
+  };
 } {
   const restBase = base.endsWith("/") ? base.slice(0, -1) : base;
+  const url = `${restBase}/cosmos/tx/v1beta1/txs`;
 
-  // events token with single quotes around address
-  const eventsRaw = `transfer.recipient='${address}'`;
+  // You can add more constraints if desired:
+  // const events = [`message.module='bank'`, `message.action='send'`, `transfer.recipient='${address}'`];
+  const events = [`transfer.recipient='${address}'`];
 
-  // Encode '=' inside the value to be safe for gateways that require it.
-  // We'll manually assemble the query string to control encoding precisely.
-  const encodedEquals = "%3D";
-  const encodedQuote = "%27"; // single quote
-  const eventsValue = `transfer.recipient${encodedEquals}${encodedQuote}${encodeURIComponent(
-    address
-  )}${encodedQuote}`;
+  const body = {
+    events,
+    order_by: "ORDER_BY_DESC",
+    pagination: { limit: String(limit), count_total: false },
+  };
 
-  // Prefer pagination.limit; keep order_by for deterministic ordering.
-  const query =
-    `events=${eventsValue}` +
-    `&order_by=ORDER_BY_DESC` +
-    `&pagination.limit=${encodeURIComponent(String(limit))}`;
-
-  const url = `${restBase}/cosmos/tx/v1beta1/txs?${query}`;
-  return { url, eventsRaw };
+  return { url, eventsRaw: events, body };
 }
 
 /** ---------- Supabase ---------- */
 function getSupabaseServerClient() {
-  const url = process.env.SUPABASE_URL;
+  // Accept both server and NEXT_PUBLIC fallbacks
+  const url =
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    "";
+
   const serviceRole = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const anon = process.env.SUPABASE_ANON_KEY;
+  const anon =
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
   if (!url) throw new Error("SUPABASE_URL is not set");
 
   // Prefer service role for backend cron jobs; fallback to anon if RLS allows.
   const key = serviceRole || anon;
-  if (!key) throw new Error("Neither SUPABASE_SERVICE_ROLE_KEY nor SUPABASE_ANON_KEY is set");
+  if (!key)
+    throw new Error(
+      "Neither SUPABASE_SERVICE_ROLE_KEY nor SUPABASE_ANON_KEY is set"
+    );
 
   return createClient(url, key, { auth: { persistSession: false } });
 }
@@ -233,8 +243,8 @@ export async function POST(req: NextRequest): Promise<Response> {
     // Single-address override (query/body)
     const url = new URL(req.url);
     const qsAddress = url.searchParams.get("address") || "";
-    const body = await readJsonBody(req);
-    const bodyAddress = body?.address || "";
+    const bodyIn = await readJsonBody(req);
+    const bodyAddress = bodyIn?.address || "";
     const addressOverride = (qsAddress || bodyAddress).trim();
 
     // Wallet set (from Supabase or single override)
@@ -261,21 +271,26 @@ export async function POST(req: NextRequest): Promise<Response> {
       }
     }
 
-    // Query LCD per wallet
+    // Query LCD per wallet using POST (gRPC-gateway)
     const results: PerWalletResult[] = [];
     for (const address of wallets) {
       const t0 = Date.now();
-      const { url: queryUrl, eventsRaw } = buildTxSearchUrl(restBase, address, limit);
+      const post = buildTxSearchPost(restBase, address, limit);
+      const queryUrl = post.url; // informational only (we use POST)
+      const requestBody = post.body;
+      const eventsRaw = post.eventsRaw;
 
       try {
         const res = await fetchWithRetry(
           queryUrl,
           {
-            method: "GET",
+            method: "POST",
             headers: {
+              "content-type": "application/json",
               ...(hasApiKey ? { "api-key": apiKeyHeader } : {}),
               "cache-control": "no-store",
             },
+            body: JSON.stringify(requestBody),
           },
           3,
           400
@@ -299,10 +314,11 @@ export async function POST(req: NextRequest): Promise<Response> {
             error: "LCD query failed",
             detail: String(detail),
             status: res.status,
-            queryUrl,
-            eventsRaw,
             restBaseUsed: restBase,
             hasApiKey,
+            queryUrl,
+            eventsRaw,
+            requestBody,
             ms: Date.now() - t0,
           });
           continue;
@@ -322,10 +338,11 @@ export async function POST(req: NextRequest): Promise<Response> {
           wallet: address,
           ok: true,
           status: res.status,
-          queryUrl,
-          eventsRaw,
           restBaseUsed: restBase,
           hasApiKey,
+          queryUrl,
+          eventsRaw,
+          requestBody,
           txCount: Array.isArray(txs) ? txs.length : 0,
           txs: Array.isArray(txs) ? txs : [],
           ms: Date.now() - t0,
@@ -337,10 +354,11 @@ export async function POST(req: NextRequest): Promise<Response> {
           error: "Unhandled exception during LCD query",
           detail: err?.message ?? String(err),
           status: undefined,
-          queryUrl,
-          eventsRaw,
           restBaseUsed: restBase,
           hasApiKey,
+          queryUrl,
+          eventsRaw,
+          requestBody,
           ms: Date.now() - t0,
         });
       }
