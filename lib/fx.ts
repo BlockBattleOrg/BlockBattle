@@ -10,7 +10,10 @@ type PriceMap = Record<string, number>; // symbol -> usd price
 const COINGECKO_IDS: Record<string, string> = {
   BTC: "bitcoin",
   ETH: "ethereum",
-  POL: "polygon-pos", // MATIC (Polygon PoS)
+  // Polygon tokens
+  MATIC: "matic-network",                // Polygon PoS / MATIC
+  POL: "polygon-ecosystem-token",        // New Polygon Ecosystem Token
+
   OP: "optimism",
   ARB: "arbitrum",
   AVAX: "avalanche-2",
@@ -22,7 +25,7 @@ const COINGECKO_IDS: Record<string, string> = {
   LTC: "litecoin",
   DOGE: "dogecoin",
   TRX: "tron",
-  BSC: "binancecoin", // BNB Smart Chain native
+  BSC: "binancecoin" // BNB Smart Chain native
 };
 
 const COINGECKO_API_BASE =
