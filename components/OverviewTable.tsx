@@ -1,192 +1,129 @@
-// components/OverviewTable.tsx
+/* eslint-disable @next/next/no-img-element */
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import ParticipateModal from '@/components/ParticipateModal';
+import { useEffect, useState } from 'react';
 
-type OverviewRow = { chain: string; height: number | null; ok?: boolean | null };
-type OverviewResp = { ok: boolean; total: number; updated: number; rows: OverviewRow[]; error?: string };
+type Row = {
+  chain: string;
+  height: number | null;
+  status: 'ok' | 'stale' | 'issue';
+  ageHours: number | null;
+};
 
-type Wallet = { chain: string; address: string; note?: string | null };
+type Resp = {
+  ok: boolean;
+  total: number;
+  ok: number;
+  stale: number;
+  issue: number;
+  rows: Row[];
+};
 
-function classNames(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(' ');
+function badgeClasses(status: Row['status']) {
+  if (status === 'ok') return 'inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-200';
+  if (status === 'stale') return 'inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-200';
+  return 'inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-200';
 }
 
-function norm(symbol: string) {
-  const s = String(symbol || '').toUpperCase();
-  if (s === 'MATIC' || s === 'POLYGON') return 'POL';
-  return s;
+function badgeDot(status: Row['status']) {
+  const color = status === 'ok' ? 'bg-green-500' : status === 'stale' ? 'bg-amber-500' : 'bg-rose-500';
+  return <span className={`mr-1 inline-block h-2 w-2 rounded-full ${color}`} />;
 }
 
-function fmtHeight(h?: number | null) {
-  if (typeof h !== 'number' || !isFinite(h)) return '—';
-  return h.toLocaleString('en-US');
-}
-
-// Chain + logo s avatar pozadinom
-function ChainWithLogo({ chain }: { chain: string }) {
-  const c = norm(chain);
-  const [ok, setOk] = useState(true);
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gray-100">
-        {ok && (
-          <img
-            src={`/logos/crypto/${c}.svg`}
-            alt={`${c} logo`}
-            className="h-4 w-4"
-            onError={() => setOk(false)}
-          />
-        )}
-      </div>
-      <span className="font-mono">{c}</span>
-    </div>
-  );
+function logoSrc(symbol: string) {
+  return `/logos/crypto/${symbol.toUpperCase()}.svg`;
 }
 
 export default function OverviewTable() {
-  const [data, setData] = useState<OverviewRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<Resp | null>(null);
   const [err, setErr] = useState<string | null>(null);
-
-  const [open, setOpen] = useState(false);
-  const [wallet, setWallet] = useState<Wallet | null>(null);
-  const [walletLoading, setWalletLoading] = useState(false);
-  const [walletErr, setWalletErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        setLoading(true);
-        setErr(null);
-        const res = await fetch('/api/public/overview', { cache: 'no-store' });
-        const json: OverviewResp = await res.json();
-        if (!res.ok || json?.ok === false) throw new Error(json?.error || `HTTP ${res.status}`);
+        const r = await fetch('/api/public/overview', { cache: 'no-store' });
+        const j = await r.json();
         if (!alive) return;
-        setData(json.rows || []);
+        if (!j.ok) throw new Error(j.error || 'Failed to load');
+        setData(j as Resp);
       } catch (e: any) {
         if (!alive) return;
-        setErr(e?.message || 'Failed to load data');
-      } finally {
-        if (alive) setLoading(false);
+        setErr(e?.message || 'Failed to load');
       }
     })();
     return () => { alive = false; };
   }, []);
 
-  const rows = useMemo(() => (Array.isArray(data) ? data : []), [data]);
-
-  async function onParticipateClick(chain: string) {
-    try {
-      setWallet(null);
-      setWalletErr(null);
-      setWalletLoading(true);
-      setOpen(true);
-
-      const res = await fetch(`/api/public/wallet?chain=${encodeURIComponent(chain)}`, { cache: 'no-store' });
-      if (res.ok) {
-        const j = await res.json();
-        const w: Wallet | null =
-          (j?.wallet && j?.wallet?.address) ? { chain, address: j.wallet.address, note: j.wallet.note ?? null } : null;
-        setWallet(w);
-      } else {
-        setWallet(null);
-      }
-    } catch (e: any) {
-      setWalletErr(e?.message || 'Unable to load wallet');
-      setWallet(null);
-    } finally {
-      setWalletLoading(false);
-    }
-  }
-
-  if (loading) {
-    return (
-      <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-500">
-        Loading chain heights…
-      </div>
-    );
-  }
-  if (err) {
-    return (
-      <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-        Failed to load: {err}
-      </div>
-    );
-  }
-
   return (
-    <>
-      <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
-        <table className="w-full table-auto text-sm">
-          <thead className="bg-gray-50/80 text-left">
+    <section className="mt-6">
+      <h1 className="text-3xl font-semibold">BlockBattle</h1>
+      <p className="mt-1 text-gray-500">Live chain heights aggregated from scheduled ingestion.</p>
+
+      {err && (
+        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {err}
+        </div>
+      )}
+
+      <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 bg-white">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-50 text-left text-gray-600">
             <tr>
-              <th className="px-4 py-3 font-medium text-gray-600">Chain</th>
-              <th className="px-4 py-3 font-medium text-gray-600">Height</th>
-              <th className="px-4 py-3 font-medium text-gray-600">Status</th>
-              <th className="px-4 py-3 font-medium text-gray-600">Action</th>
+              <th className="px-4 py-3">Chain</th>
+              <th className="px-4 py-3">Height</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Action</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
-            {rows.map((r) => {
-              const chain = norm(r.chain);
-              const statusOk = r.ok ?? true;
-              return (
-                <tr key={chain}>
-                  <td className="px-4 py-3">
-                    <ChainWithLogo chain={chain} />
-                  </td>
-                  <td className="px-4 py-3 tabular-nums">{fmtHeight(r.height)}</td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={classNames(
-                        'inline-flex items-center gap-2 rounded-full px-2 py-1 text-xs',
-                        statusOk
-                          ? 'bg-green-50 text-green-700 ring-1 ring-inset ring-green-200'
-                          : 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200'
-                      )}
-                    >
-                      <span
-                        className={classNames(
-                          'h-2 w-2 rounded-full',
-                          statusOk ? 'bg-green-500' : 'bg-red-500'
-                        )}
-                      />
-                      {statusOk ? 'OK' : 'Issue'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <button
-                      onClick={() => onParticipateClick(chain)}
-                      className="rounded-full border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-800 shadow-sm hover:bg-gray-50"
-                    >
-                      Participate
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-            {rows.length === 0 && (
+          <tbody className="divide-y">
+            {!data && (
               <tr>
-                <td className="px-4 py-6 text-gray-500" colSpan={4}>
-                  No data.
+                <td className="px-4 py-4" colSpan={4}>
+                  <div className="h-4 w-32 animate-pulse rounded bg-gray-200" />
                 </td>
               </tr>
+            )}
+            {data?.rows?.map((r) => (
+              <tr key={r.chain}>
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-3">
+                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-gray-100 ring-1 ring-inset ring-gray-200">
+                      <img
+                        src={logoSrc(r.chain)}
+                        alt={r.chain}
+                        className="h-5 w-5"
+                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }}
+                      />
+                    </span>
+                    <span className="font-medium">{r.chain}</span>
+                  </div>
+                </td>
+                <td className="px-4 py-3 tabular-nums">{r.height?.toLocaleString('en-US') ?? '—'}</td>
+                <td className="px-4 py-3">
+                  <span className={badgeClasses(r.status)} title={r.ageHours != null ? `${r.ageHours.toFixed(2)}h old` : undefined}>
+                    {badgeDot(r.status)} {r.status === 'ok' ? 'OK' : r.status === 'stale' ? 'Stale' : 'Issue'}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <a
+                    className="rounded-full border px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
+                    href="#participate"
+                  >
+                    Participate
+                  </a>
+                </td>
+              </tr>
+            ))}
+            {data && data.rows.length === 0 && (
+              <tr><td className="px-4 py-4 text-gray-500" colSpan={4}>No chains.</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
-      <ParticipateModal
-        open={open}
-        onClose={() => setOpen(false)}
-        wallet={wallet}
-        loading={walletLoading}
-        error={walletErr}
-      />
-    </>
+      <p className="mt-2 text-xs text-gray-400">Source: /api/public/overview (no-store). Status: green ≤6h, yellow ≤24h, red &gt;24h.</p>
+    </section>
   );
 }
 
