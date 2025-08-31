@@ -4,49 +4,42 @@
 import { useEffect, useMemo, useState } from 'react';
 import ParticipateModal from '@/components/ParticipateModal';
 
-// API response types (držimo labavo kako ne bismo lomili postojeći kod)
 type OverviewRow = { chain: string; height: number | null; ok?: boolean | null };
 type OverviewResp = { ok: boolean; total: number; updated: number; rows: OverviewRow[]; error?: string };
 
-type Wallet = {
-  chain: string;
-  address: string;
-  note?: string | null;
-};
+type Wallet = { chain: string; address: string; note?: string | null };
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
 }
 
-// Normalizacija tickera (ako se negdje pojavi MATIC/POLYGON → POL)
 function norm(symbol: string) {
   const s = String(symbol || '').toUpperCase();
   if (s === 'MATIC' || s === 'POLYGON') return 'POL';
   return s;
 }
 
-// Prikaz broja visina lanca
 function fmtHeight(h?: number | null) {
   if (typeof h !== 'number' || !isFinite(h)) return '—';
   return h.toLocaleString('en-US');
 }
 
-// Mala ikona (SVG iz /public/logos/crypto). Ako nema fajla, sakrij samo ikonu, pokaži tekst.
+// Chain + logo s avatar pozadinom
 function ChainWithLogo({ chain }: { chain: string }) {
   const c = norm(chain);
   const [ok, setOk] = useState(true);
   return (
     <div className="flex items-center gap-2">
-      {ok && (
-        // koristimo obični <img> jer su assets iz /public; Next Image nije nužan ovdje
-        <img
-          src={`/logos/crypto/${c}.svg`}
-          alt={`${c} logo`}
-          className="h-5 w-5 rounded-sm"
-          onError={() => setOk(false)}
-          loading="eager"
-        />
-      )}
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gray-100">
+        {ok && (
+          <img
+            src={`/logos/crypto/${c}.svg`}
+            alt={`${c} logo`}
+            className="h-4 w-4"
+            onError={() => setOk(false)}
+          />
+        )}
+      </div>
       <span className="font-mono">{c}</span>
     </div>
   );
@@ -57,7 +50,6 @@ export default function OverviewTable() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // Participate modal state
   const [open, setOpen] = useState(false);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [walletLoading, setWalletLoading] = useState(false);
@@ -93,11 +85,9 @@ export default function OverviewTable() {
       setWalletLoading(true);
       setOpen(true);
 
-      // pokušaj dohvatiti wallet za taj chain; ako nemaš rutu, modal će se i dalje otvoriti bez adrese
       const res = await fetch(`/api/public/wallet?chain=${encodeURIComponent(chain)}`, { cache: 'no-store' });
       if (res.ok) {
         const j = await res.json();
-        // očekujemo { ok:true, wallet:{ chain, address, note? } }, ali ne lomimo ako je drugačije
         const w: Wallet | null =
           (j?.wallet && j?.wallet?.address) ? { chain, address: j.wallet.address, note: j.wallet.note ?? null } : null;
         setWallet(w);
@@ -142,7 +132,7 @@ export default function OverviewTable() {
           <tbody className="divide-y divide-gray-100">
             {rows.map((r) => {
               const chain = norm(r.chain);
-              const statusOk = r.ok ?? true; // ako API ne šalje ok, tretiramo kao OK
+              const statusOk = r.ok ?? true;
               return (
                 <tr key={chain}>
                   <td className="px-4 py-3">
@@ -189,7 +179,6 @@ export default function OverviewTable() {
         </table>
       </div>
 
-      {/* Modal (ostavljamo postojeći API i propse da ne razbijemo ništa) */}
       <ParticipateModal
         open={open}
         onClose={() => setOpen(false)}
