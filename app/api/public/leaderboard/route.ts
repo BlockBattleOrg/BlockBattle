@@ -1,142 +1,142 @@
-// app/api/public/leaderboard/route.ts
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+// app/api/public/contributions/leaderboard/route.ts
+// Public leaderboard: native totals + USD totals.
+// Uses service-role key if available (server-side), else falls back to anon.
+// No DB schema changes required.
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-// Try to be resilient to slightly different column names.
-// Expected columns (any of these shapes):
-// - chain: string (preferred) OR currency/symbol
-// - amount as smallest unit: sats/amount_sats/value_sats OR amount_native/amount
-// - decimals: int (when amount is in smallest unit but not sats)
-// - txid/hash (optional), timestamp/created_at (optional)
-type Row = Record<string, any>;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function getSupabase() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
-  if (!url || !key) {
-    throw new Error('Missing Supabase env: need SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).');
-  }
-  return createClient(url, key, { auth: { persistSession: false } });
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SRK = process.env.SUPABASE_SERVICE_ROLE_KEY || "";       // preferred (server)
+const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";  // fallback (public)
+
+const DEFAULT_SINCE_DAYS = parseInt(process.env.LEADERBOARD_SINCE_DAYS || "365", 10);
+const PAGE_SIZE = 2000;
+type OrderKey = "native" | "usd";
+
+type Row = { chain: string; total: number; usd_total: number; contributions: number };
+
+function makeClient() {
+  if (!SUPABASE_URL) throw new Error("Missing SUPABASE URL");
+  const key = SRK || ANON;
+  if (!key) throw new Error("Missing Supabase key (service_role or anon)");
+  return createClient(SUPABASE_URL, key, { auth: { persistSession: false } });
 }
 
-function pickChain(r: Row): string | null {
-  const c =
-    r.chain ?? r.symbol ?? r.currency ?? r.chain_symbol ?? r.chain_id ?? null;
-  return typeof c === 'string' && c.trim() ? c.trim().toUpperCase() : null;
-}
-
-function toNumber(x: any): number | null {
-  if (x == null) return null;
-  if (typeof x === 'number' && Number.isFinite(x)) return x;
-  if (typeof x === 'string' && x.trim() && Number.isFinite(Number(x))) return Number(x);
-  return null;
-}
-
-// Convert any known contribution shape to a float in native units (e.g., BTC, ETH).
-function pickAmountNative(r: Row): number {
-  // UTXO-style sats fields
-  const sats =
-    toNumber(r.sats) ??
-    toNumber(r.value_sats) ??
-    toNumber(r.valueSats) ??
-    null;
-  if (sats != null) return sats / 1e8; // BTC-like chains
-
-  // Generic "amount" in smallest units + decimals
-  const smallest =
-    toNumber(r.amount_native) ??
-    toNumber(r.amount) ??
-    toNumber(r.value) ??
-    null;
-  if (smallest != null) {
-    const decimals =
-      toNumber(r.decimals) ??
-      // common defaults per chain (fallback if decimals missing)
-      (pickChain(r) === 'ETH' || pickChain(r) === 'OP' || pickChain(r) === 'ARB' || pickChain(r) === 'POL' || pickChain(r) === 'AVAX'
-        ? 18
-        : 8);
-    return smallest / Math.pow(10, decimals ?? 8);
-  }
-
-  // Already a float?
-  const f =
-    toNumber(r.amount_native_float) ??
-    toNumber(r.amount_float) ??
-    null;
-  return f ?? 0;
-}
-
-function pickTimestampISO(r: Row): string | null {
-  const t =
-    r.timestamp ??
-    r.block_time ??
-    r.block_timestamp ??
-    r.created_at ??
-    null;
-  if (typeof t === 'string') return t;
-  if (typeof t === 'number' && Number.isFinite(t)) {
-    // assume unix seconds
-    return new Date((t > 1e12 ? t : t * 1000)).toISOString();
-  }
-  return null;
-}
-
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const supabase = getSupabase();
+    const url = new URL(req.url);
+    const orderParam = (url.searchParams.get("order") || "native").toLowerCase() as OrderKey;
+    const limitParam = parseInt(url.searchParams.get("limit") || "50", 10);
+    const sinceDays = parseInt(url.searchParams.get("sinceDays") || String(DEFAULT_SINCE_DAYS), 10);
 
-    // Pull recent contributions (cap at 10k to stay lean)
-    const { data, error } = await supabase
-      .from('contributions')
-      .select('*')
-      .limit(10000);
+    const order: OrderKey = orderParam === "usd" ? "usd" : "native";
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : 50;
+    const sinceISO = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
 
-    if (error) throw error;
+    const supabase = makeClient();
 
-    const rows: Row[] = Array.isArray(data) ? data : [];
+    // 1) Page through contributions (only needed fields)
+    type Contrib = { wallet_id: string; amount: number | null; amount_usd: number | null; created_at: string };
+    const contribs: Contrib[] = [];
+    let start = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from("contributions")
+        .select("wallet_id, amount, amount_usd, created_at")
+        .gte("created_at", sinceISO)
+        .order("id", { ascending: true })
+        .range(start, start + PAGE_SIZE - 1);
 
-    // Aggregate totals by chain
-    const totalsMap = new Map<string, { total: number; count: number }>();
-    const recent: Array<{ chain: string; amount: number; txid?: string; timestamp?: string | null }> = [];
+      if (error) {
+        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      }
+      if (!data || data.length === 0) break;
 
-    for (const r of rows) {
-      const chain = pickChain(r);
-      if (!chain) continue;
+      for (const r of data) {
+        contribs.push({
+          wallet_id: r.wallet_id,
+          amount: typeof r.amount === "number" ? r.amount : null,
+          amount_usd: typeof r.amount_usd === "number" ? r.amount_usd : null,
+          created_at: r.created_at,
+        });
+      }
 
-      const amount = pickAmountNative(r);
-      const txid = (r.txid ?? r.hash ?? r.tx_hash ?? r.transaction_hash) as string | undefined;
-      const ts = pickTimestampISO(r);
-
-      // Build recent list (take first N after loop)
-      recent.push({ chain, amount, txid, timestamp: ts });
-
-      const entry = totalsMap.get(chain) ?? { total: 0, count: 0 };
-      entry.total += amount;
-      entry.count += 1;
-      totalsMap.set(chain, entry);
+      if (data.length < PAGE_SIZE) break;
+      start += PAGE_SIZE;
+      if (start > 500000) break; // safety guard
     }
 
-    const totals = Array.from(totalsMap.entries())
-      .map(([chain, v]) => ({ chain, total: v.total, contribution_count: v.count }))
-      .sort((a, b) => b.total - a.total);
+    if (contribs.length === 0) {
+      return NextResponse.json({ ok: true, order, sinceDays, total: 0, rows: [] });
+    }
 
-    // Keep last 20 recent (by timestamp if present)
-    recent.sort((a, b) => {
-      const ta = a.timestamp ? Date.parse(a.timestamp) : 0;
-      const tb = b.timestamp ? Date.parse(b.timestamp) : 0;
-      return tb - ta;
+    const walletIds = Array.from(new Set(contribs.map((c) => c.wallet_id).filter(Boolean))) as string[];
+
+    // 2) wallets -> currency_id
+    type Wallet = { id: string; currency_id: string | number | null };
+    const { data: wallets, error: wErr } = await supabase
+      .from("wallets")
+      .select("id, currency_id")
+      .in("id", walletIds);
+    if (wErr) return NextResponse.json({ ok: false, error: wErr.message }, { status: 500 });
+
+    const walletToCurrency: Record<string, string | number> = {};
+    for (const w of (wallets || []) as Wallet[]) {
+      if (w?.id && w.currency_id != null) walletToCurrency[w.id] = w.currency_id;
+    }
+    const currencyIds = Array.from(new Set(Object.values(walletToCurrency)));
+
+    // 3) currencies -> symbol
+    type Currency = { id: string | number; symbol: string | null };
+    const { data: currencies, error: cErr } = await supabase
+      .from("currencies")
+      .select("id, symbol")
+      .in("id", currencyIds);
+    if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
+
+    const currencyToSymbol: Record<string | number, string> = {};
+    for (const c of (currencies || []) as Currency[]) {
+      if (c?.id != null && c?.symbol) currencyToSymbol[c.id] = c.symbol.toUpperCase();
+    }
+
+    // 4) Aggregate by symbol
+    const agg: Record<string, Row> = {};
+    for (const r of contribs) {
+      const curId = walletToCurrency[r.wallet_id];
+      const symbol = currencyToSymbol[curId];
+      if (!symbol) continue;
+
+      const entry = (agg[symbol] ||= { chain: symbol, total: 0, usd_total: 0, contributions: 0 });
+      if (typeof r.amount === "number" && Number.isFinite(r.amount)) entry.total += r.amount;
+      if (typeof r.amount_usd === "number" && Number.isFinite(r.amount_usd)) entry.usd_total += r.amount_usd;
+      entry.contributions += 1;
+    }
+
+    let rows = Object.values(agg);
+
+    // 5) Order & limit
+    if (order === "usd") rows.sort((a, b) => (b.usd_total || 0) - (a.usd_total || 0));
+    else rows.sort((a, b) => (b.total || 0) - (a.total || 0));
+    rows = rows.slice(0, limit);
+
+    return NextResponse.json({
+      ok: true,
+      order,
+      sinceDays,
+      total: rows.length,
+      rows: rows.map((r) => ({
+        chain: r.chain,
+        total: r.total,
+        contributions: r.contributions,
+        usd_total: r.usd_total,
+      })),
     });
-    const recentTop = recent.slice(0, 20);
-
-    return NextResponse.json(
-      { ok: true, totals, recent: recentTop },
-      { headers: { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=300' } }
-    );
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Unexpected error' }, { status: 500 });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
   }
 }
 
