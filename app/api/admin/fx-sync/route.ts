@@ -3,8 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { fetchUsdPrices } from "@/lib/fx";
 
-export const runtime = "nodejs";        // forsiraj Node runtime (ne Edge)
-export const dynamic = "force-dynamic"; // admin endpoint
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const CRON_SECRET = process.env.CRON_SECRET || "";
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -19,6 +19,11 @@ type ContribRow = {
 
 type WalletRow = {
   id: string;
+  currency_id: string | number | null;
+};
+
+type CurrencyRow = {
+  id: string | number;
   symbol: string | null;
 };
 
@@ -47,46 +52,63 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, updated: 0, message: "Nothing to do" });
   }
 
-  // 2) Dohvati sve pripadne wallete i njihove simbole
+  // 2) Dohvati wallete (wallet_id -> currency_id)
   const walletIds = Array.from(new Set(contribs.map((r) => r.wallet_id).filter(Boolean))) as string[];
   const { data: wallets, error: wErr } = await supabase
     .from("wallets")
-    .select("id, symbol")
+    .select("id, currency_id")
     .in("id", walletIds);
 
   if (wErr) {
     return NextResponse.json({ ok: false, error: wErr.message }, { status: 500 });
   }
 
-  const walletSymbol: Record<string, string> = {};
+  const walletCurrency: Record<string, string | number> = {};
   for (const w of (wallets || []) as WalletRow[]) {
-    if (w?.id && w?.symbol) walletSymbol[w.id] = w.symbol.toUpperCase();
+    if (w?.id && w?.currency_id != null) walletCurrency[w.id] = w.currency_id;
   }
 
-  // 3) Skupi unikatne simbole iz batcha i povuci njihove USD cijene
+  // 3) Dohvati pripadne valute (currency_id -> symbol)
+  const currencyIds = Array.from(new Set(Object.values(walletCurrency)));
+  const { data: currencies, error: curErr } = await supabase
+    .from("currencies")
+    .select("id, symbol")
+    .in("id", currencyIds);
+
+  if (curErr) {
+    return NextResponse.json({ ok: false, error: curErr.message }, { status: 500 });
+  }
+
+  const currencySymbol: Record<string | number, string> = {};
+  for (const c of (currencies || []) as CurrencyRow[]) {
+    if (c?.id != null && c?.symbol) currencySymbol[c.id] = c.symbol.toUpperCase();
+  }
+
+  // 4) Skupi simbole iz batcha i povuci njihove USD cijene
   const symbols = Array.from(
     new Set(
       contribs
-        .map((r) => walletSymbol[r.wallet_id])
+        .map((r) => currencySymbol[walletCurrency[r.wallet_id]])
         .filter((s): s is string => typeof s === "string" && s.length > 0)
     )
   );
   const prices = await fetchUsdPrices(symbols); // npr. { ETH: 2xxx.xx, POL: 0.xx, ... }
 
-  // 4) Izračunaj amount_usd = amount * price i pripremi upserte
-  const updates: { id: number; amount_usd: number }[] = [];
+  // 5) Izračunaj amount_usd = amount * price
+  const updates: { id: number; amount_usd: number; priced_at: string }[] = [];
   for (const r of contribs as ContribRow[]) {
-    const sym = walletSymbol[r.wallet_id];
+    const curId = walletCurrency[r.wallet_id];
+    const sym = currencySymbol[curId as any];
     if (!sym) continue;
     const p = prices[sym];
     if (!p || r.amount == null || !isFinite(r.amount)) continue;
     const usd = r.amount * p;
     if (isFinite(usd)) {
-      updates.push({ id: r.id, amount_usd: usd });
+      updates.push({ id: r.id, amount_usd: usd, priced_at: new Date().toISOString() });
     }
   }
 
-  // 5) Upsert u manjim chunkovima
+  // 6) Upsert u chunkovima
   let updated = 0;
   if (updates.length > 0) {
     const chunkSize = 100;
