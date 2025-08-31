@@ -1,98 +1,253 @@
 // app/api/admin/snapshot-heights/route.ts
-// Admin helper: pokreni heights ingest za SVE aktivne lance (po wallets ili ACTIVE_CHAINS)
-// i vrati sažetak rezultata. Nema hardkodiranih simbola (npr. ADA).
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+// Ensure this route is never cached at the edge
+export const dynamic = 'force-dynamic';
 
-function getSupabase() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
-  if (!url || !key) throw new Error("Missing Supabase env vars");
-  return createClient(url, key, { auth: { persistSession: false } });
+type HeightRow = {
+  day: string;      // YYYY-MM-DD
+  chain: string;    // symbol, e.g. BTC, MATIC, BNB
+  height: number;
+};
+
+const WALLET_CHAIN_TO_SYMBOL: Record<string, string> = {
+  bitcoin: 'BTC',
+  eth: 'ETH',
+  solana: 'SOL',
+  xrp: 'XRP',
+  dogecoin: 'DOGE',
+  pol: 'MATIC',
+  polkadot: 'DOT',
+  cosmos: 'ATOM',
+  tron: 'TRX',
+  litecoin: 'LTC',
+  stellar: 'XLM',
+  op: 'OP',
+  arb: 'ARB',
+  avax: 'AVAX',
+  bsc: 'BNB',
+};
+
+function utcToday(): string {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = `${d.getUTCMonth() + 1}`.padStart(2, '0');
+  const day = `${d.getUTCDate()}`.padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
-// Dohvati aktivne lance (lowercase) iz ACTIVE_CHAINS ili iz wallets→currencies.
-async function fetchActiveChains(supabase: any): Promise<string[]> {
-  const override = (process.env.ACTIVE_CHAINS || "").trim();
-  if (override) {
-    return override.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-  }
-  const { data: wallets, error: wErr } = await supabase
-    .from("wallets")
-    .select("currency_id, active");
-  if (wErr || !Array.isArray(wallets)) return [];
-
-  const use = wallets.some((w: any) => w?.active === true)
-    ? wallets.filter((w: any) => w?.active === true)
-    : wallets;
-
-  const ids = Array.from(new Set(use.map((w: any) => w?.currency_id).filter((x: any) => x != null)));
-  if (ids.length === 0) return [];
-
-  const { data: curr, error: cErr } = await supabase
-    .from("currencies")
-    .select("id, symbol")
-    .in("id", ids);
-  if (cErr || !Array.isArray(curr)) return [];
-
-  return curr.map((c: any) => String(c.symbol || "").toLowerCase()).filter(Boolean);
+function toSymbolMaybeFromWalletChain(chain: string | null | undefined): string | null {
+  if (!chain) return null;
+  const s = WALLET_CHAIN_TO_SYMBOL[String(chain).toLowerCase()];
+  return s ?? null;
 }
 
-async function hitIngest(chain: string) {
-  // Gađamo produkcijski domain; ako želiš dinamički, možeš koristiti VERCEL_URL/NEXT_PUBLIC_BASE_URL.
-  const url = `https://www.blockbattle.org/api/ingest/${chain}`;
-  const secret = process.env.CRON_SECRET || "";
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "x-cron-secret": secret },
-    next: { revalidate: 0 },
-    cache: "no-store",
+function okJson(body: any, status = 200) {
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      'Cache-Control': 'no-store',
+    },
   });
-
-  let body: any = null;
-  try { body = await res.json(); } catch { body = await res.text(); }
-
-  return { chain: chain.toUpperCase(), status: res.status, body };
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    // Jednostavna zaštita istim headerom kao CRON
-    const expected = process.env.CRON_SECRET || "";
-    const provided = req.headers.get("x-cron-secret") || "";
+    // --- auth via cron secret
+    const provided = req.headers.get('x-cron-secret') ?? '';
+    const expected = process.env.CRON_SECRET ?? '';
     if (!expected || provided !== expected) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+      return okJson({ ok: false, error: 'Missing or invalid cron secret' }, 401);
     }
 
-    const supabase = getSupabase();
-    const chains = await fetchActiveChains(supabase); // npr. ['btc','eth','pol',...]
-    if (chains.length === 0) {
-      return NextResponse.json({ ok: false, error: "No active chains (wallets) found" }, { status: 400 });
+    const url = new URL(req.url);
+    const day = url.searchParams.get('day') || utcToday();
+
+    // Supabase client (service role is ideal, anon also works for these selects if RLS permits)
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL as string,
+      (process.env.SUPABASE_SERVICE_ROLE_KEY ||
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) as string,
+      { auth: { persistSession: false } }
+    );
+
+    // --- 1) desired chain list (symbols) from ?chains=BTC,ETH,...
+    const qpChains = url.searchParams.get('chains');
+    let symbols: string[] | null = null;
+    if (qpChains) {
+      symbols = qpChains
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
     }
 
-    const results: Array<{ chain: string; status: number; body: any }> = [];
-    for (const c of chains) {
-      // sekvencijalno da ne zagušimo RPC-eve
-      // eslint-disable-next-line no-await-in-loop
-      const r = await hitIngest(c);
-      results.push(r);
+    // --- 2) else: from active wallets (join to currencies for symbol)
+    if (!symbols) {
+      // try join via currency_id to currencies.symbol
+      const { data: activeWallets, error: wErr } = await supabase
+        .from('wallets')
+        .select('chain, is_active, currency_id')
+        .eq('is_active', true);
+
+      if (wErr) {
+        // do not fail snapshot on read error; continue to next source
+        // console.error('wallets read error', wErr);
+      } else if (activeWallets && activeWallets.length > 0) {
+        // fetch symbols for these currency_ids
+        const ids = Array.from(
+          new Set(
+            activeWallets
+              .map((w) => w.currency_id)
+              .filter((x): x is string => Boolean(x))
+          )
+        );
+
+        let mapIdToSymbol = new Map<string, string>();
+        if (ids.length > 0) {
+          const { data: currencies } = await supabase
+            .from('currencies')
+            .select('id, symbol')
+            .in('id', ids);
+
+          if (currencies) {
+            for (const c of currencies) {
+              if (c?.id && c?.symbol) mapIdToSymbol.set(c.id, String(c.symbol).toUpperCase());
+            }
+          }
+        }
+
+        // Derive final symbols:
+        const derived = new Set<string>();
+        for (const w of activeWallets) {
+          // 1) prefer explicit currencies.symbol
+          if (w.currency_id && mapIdToSymbol.has(w.currency_id)) {
+            derived.add(mapIdToSymbol.get(w.currency_id)!);
+            continue;
+          }
+          // 2) fallback via wallet chain alias map
+          const sym = toSymbolMaybeFromWalletChain(w.chain);
+          if (sym) derived.add(sym);
+        }
+
+        if (derived.size > 0) {
+          symbols = Array.from(derived);
+        }
+      }
     }
 
-    const successCount = results.filter(r => r.status === 200 && r.body && r.body.ok === true).length;
-    const errorCount = results.length - successCount;
-    const total = results.length;
+    // --- 3) else: fallback to distinct heights_daily.chain
+    if (!symbols) {
+      const { data: fromHeights } = await supabase
+        .from('heights_daily')
+        .select('chain');
 
-    return NextResponse.json({ ok: true, total, successCount, errorCount, results });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
+      if (fromHeights && fromHeights.length > 0) {
+        symbols = Array.from(
+          new Set(fromHeights.map((r: any) => String(r.chain).toUpperCase()).filter(Boolean))
+        );
+      }
+    }
+
+    // --- 4) else: fallback to all currencies.symbol
+    if (!symbols) {
+      const { data: cur } = await supabase.from('currencies').select('symbol');
+      if (cur && cur.length > 0) {
+        symbols = cur.map((c: any) => String(c.symbol).toUpperCase()).filter(Boolean);
+      }
+    }
+
+    if (!symbols || symbols.length === 0) {
+      return okJson({ ok: false, error: 'No chains resolved for snapshot' }, 400);
+    }
+
+    // Prepare: read <SYMBOL>_last_height from settings
+    const keys = symbols.map((s) => `${s}_last_height`);
+    const { data: settings, error: sErr } = await supabase
+      .from('settings')
+      .select('key, value')
+      .in('key', keys);
+
+    if (sErr) {
+      return okJson({ ok: false, error: 'Failed to read settings', details: sErr.message }, 500);
+    }
+
+    // Build insert rows
+    const byKey = new Map<string, any>();
+    for (const row of settings ?? []) {
+      byKey.set(row.key, row.value);
+    }
+
+    const nowIso = new Date().toISOString();
+    const toInsert: HeightRow[] = [];
+    const skipped: { symbol: string; reason: string }[] = [];
+
+    for (const sym of symbols) {
+      const key = `${sym}_last_height`;
+      const val = byKey.get(key);
+
+      const height = Number(
+        val?.height ?? val?.value ?? val ?? Number.NaN
+      );
+      if (!Number.isFinite(height) || height <= 0) {
+        skipped.push({ symbol: sym, reason: `missing ${key}` });
+        continue;
+      }
+
+      toInsert.push({ day, chain: sym, height });
+    }
+
+    if (toInsert.length === 0) {
+      return okJson({
+        ok: false,
+        error: 'No valid heights found in settings',
+        day,
+        symbols,
+        skipped,
+      }, 400);
+    }
+
+    // Upsert rows one shot. PostgREST cannot express ON CONFLICT WHERE clause,
+    // so we do a small RPC or multi-step. Simplest: delete+insert for that day/chain set,
+    // or use supabase-js upsert (it maps to INSERT..ON CONFLICT DO UPDATE without WHERE).
+    // We'll accept "last write wins" since this route is single-writer, but we keep updated_at fresh.
+
+    // Delete existing rows for (day, chains) to avoid stale data.
+    const { error: delErr } = await supabase
+      .from('heights_daily')
+      .delete()
+      .eq('day', day)
+      .in('chain', toInsert.map((r) => r.chain));
+
+    if (delErr) {
+      // non-fatal; continue with insert
+    }
+
+    // Insert fresh snapshot
+    const { error: insErr } = await supabase
+      .from('heights_daily')
+      .insert(
+        toInsert.map((r) => ({
+          day: r.day,
+          chain: r.chain,
+          height: r.height,
+          updated_at: nowIso,
+        }))
+      );
+
+    if (insErr) {
+      return okJson({ ok: false, error: 'Insert failed', details: insErr.message, day, rows: toInsert.length }, 500);
+    }
+
+    return okJson({
+      ok: true,
+      day,
+      upserted: toInsert.length,
+      skipped,
+      symbols,
+    });
+  } catch (e: any) {
+    return okJson({ ok: false, error: String(e?.message || e) }, 500);
   }
-}
-
-// (Opcionalno) GET delegira na POST radi lakšeg testa iz browsera (i dalje traži x-cron-secret)
-export async function GET(req: NextRequest) {
-  return POST(req);
 }
 
