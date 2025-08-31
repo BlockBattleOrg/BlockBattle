@@ -1,19 +1,24 @@
-name: Contributions Ingest (ETH)
+name: Contribution Ingest (ETH)
 
 on:
-  workflow_dispatch: {}
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "11 */3 * * *"   # every 3 hours at minute 11 (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-eth
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Invoke ETH contributions ingest
-        env:
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      - name: Call ETH contribution ingest
         run: |
-          set -euo pipefail
-          curl -sS -X POST "https://www.blockbattle.org/api/ingest/contrib/eth" \
-            -H "x-cron-secret: ${CRON_SECRET}" | jq .
+          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/contrib/eth" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
 
