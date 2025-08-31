@@ -2,12 +2,11 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-// Ensure this route is never cached at the edge
 export const dynamic = 'force-dynamic';
 
 type HeightRow = {
-  day: string;      // YYYY-MM-DD
-  chain: string;    // symbol, e.g. BTC, MATIC, BNB
+  day: string;   // YYYY-MM-DD
+  chain: string; // symbol (BTC, MATIC, BNB, ...)
   height: number;
 };
 
@@ -29,32 +28,28 @@ const WALLET_CHAIN_TO_SYMBOL: Record<string, string> = {
   bsc: 'BNB',
 };
 
+const SYMBOL_TO_WALLET_CHAIN: Record<string, string> = Object.fromEntries(
+  Object.entries(WALLET_CHAIN_TO_SYMBOL).map(([k, v]) => [v, k])
+);
+
 function utcToday(): string {
   const d = new Date();
   const y = d.getUTCFullYear();
-  const m = `${d.getUTCMonth() + 1}`.padStart(2, '0');
-  const day = `${d.getUTCDate()}`.padStart(2, '0');
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
-}
-
-function toSymbolMaybeFromWalletChain(chain: string | null | undefined): string | null {
-  if (!chain) return null;
-  const s = WALLET_CHAIN_TO_SYMBOL[String(chain).toLowerCase()];
-  return s ?? null;
 }
 
 function okJson(body: any, status = 200) {
   return NextResponse.json(body, {
     status,
-    headers: {
-      'Cache-Control': 'no-store',
-    },
+    headers: { 'Cache-Control': 'no-store' },
   });
 }
 
 export async function POST(req: Request) {
   try {
-    // --- auth via cron secret
+    // 1) auth
     const provided = req.headers.get('x-cron-secret') ?? '';
     const expected = process.env.CRON_SECRET ?? '';
     if (!expected || provided !== expected) {
@@ -64,7 +59,7 @@ export async function POST(req: Request) {
     const url = new URL(req.url);
     const day = url.searchParams.get('day') || utcToday();
 
-    // Supabase client (service role is ideal, anon also works for these selects if RLS permits)
+    // 2) supabase client
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL as string,
       (process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -72,88 +67,57 @@ export async function POST(req: Request) {
       { auth: { persistSession: false } }
     );
 
-    // --- 1) desired chain list (symbols) from ?chains=BTC,ETH,...
-    const qpChains = url.searchParams.get('chains');
+    // 3) resolve symbols (priorities: ?chains → active wallets → heights_daily → currencies)
     let symbols: string[] | null = null;
+    const qpChains = url.searchParams.get('chains');
     if (qpChains) {
-      symbols = qpChains
-        .split(',')
-        .map((s) => s.trim().toUpperCase())
-        .filter(Boolean);
+      symbols = qpChains.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
     }
 
-    // --- 2) else: from active wallets (join to currencies for symbol)
     if (!symbols) {
-      // try join via currency_id to currencies.symbol
-      const { data: activeWallets, error: wErr } = await supabase
+      const { data: activeWallets } = await supabase
         .from('wallets')
         .select('chain, is_active, currency_id')
         .eq('is_active', true);
 
-      if (wErr) {
-        // do not fail snapshot on read error; continue to next source
-        // console.error('wallets read error', wErr);
-      } else if (activeWallets && activeWallets.length > 0) {
-        // fetch symbols for these currency_ids
+      if (activeWallets && activeWallets.length > 0) {
         const ids = Array.from(
-          new Set(
-            activeWallets
-              .map((w) => w.currency_id)
-              .filter((x): x is string => Boolean(x))
-          )
+          new Set(activeWallets.map(w => w.currency_id).filter((x): x is string => Boolean(x)))
         );
-
-        let mapIdToSymbol = new Map<string, string>();
+        const mapIdToSymbol = new Map<string, string>();
         if (ids.length > 0) {
-          const { data: currencies } = await supabase
+          const { data: cur } = await supabase
             .from('currencies')
             .select('id, symbol')
             .in('id', ids);
-
-          if (currencies) {
-            for (const c of currencies) {
-              if (c?.id && c?.symbol) mapIdToSymbol.set(c.id, String(c.symbol).toUpperCase());
-            }
+          for (const c of cur ?? []) {
+            if (c?.id && c?.symbol) mapIdToSymbol.set(c.id, String(c.symbol).toUpperCase());
           }
         }
-
-        // Derive final symbols:
         const derived = new Set<string>();
         for (const w of activeWallets) {
-          // 1) prefer explicit currencies.symbol
           if (w.currency_id && mapIdToSymbol.has(w.currency_id)) {
             derived.add(mapIdToSymbol.get(w.currency_id)!);
-            continue;
+          } else if (w.chain) {
+            const sym = WALLET_CHAIN_TO_SYMBOL[String(w.chain).toLowerCase()];
+            if (sym) derived.add(sym);
           }
-          // 2) fallback via wallet chain alias map
-          const sym = toSymbolMaybeFromWalletChain(w.chain);
-          if (sym) derived.add(sym);
         }
-
-        if (derived.size > 0) {
-          symbols = Array.from(derived);
-        }
+        if (derived.size > 0) symbols = Array.from(derived);
       }
     }
 
-    // --- 3) else: fallback to distinct heights_daily.chain
     if (!symbols) {
-      const { data: fromHeights } = await supabase
-        .from('heights_daily')
-        .select('chain');
-
+      const { data: fromHeights } = await supabase.from('heights_daily').select('chain');
       if (fromHeights && fromHeights.length > 0) {
-        symbols = Array.from(
-          new Set(fromHeights.map((r: any) => String(r.chain).toUpperCase()).filter(Boolean))
-        );
+        symbols = Array.from(new Set(fromHeights.map(r => String(r.chain).toUpperCase()).filter(Boolean)));
       }
     }
 
-    // --- 4) else: fallback to all currencies.symbol
     if (!symbols) {
       const { data: cur } = await supabase.from('currencies').select('symbol');
       if (cur && cur.length > 0) {
-        symbols = cur.map((c: any) => String(c.symbol).toUpperCase()).filter(Boolean);
+        symbols = cur.map(c => String(c.symbol).toUpperCase()).filter(Boolean);
       }
     }
 
@@ -161,36 +125,86 @@ export async function POST(req: Request) {
       return okJson({ ok: false, error: 'No chains resolved for snapshot' }, 400);
     }
 
-    // Prepare: read <SYMBOL>_last_height from settings
-    const keys = symbols.map((s) => `${s}_last_height`);
-    const { data: settings, error: sErr } = await supabase
+    // 4) read heights from settings (primary) + fallbacks
+    // primary keys: <SYMBOL>_last_height
+    const symbolKeys = symbols.map(s => `${s}_last_height`);
+
+    // fallback keys: <walletChain>_last_height (lowercase)
+    const walletChainKeys = symbols
+      .map(s => SYMBOL_TO_WALLET_CHAIN[s])
+      .filter(Boolean)
+      .map(c => `${c}_last_height`);
+
+    const allKeys = Array.from(new Set([...symbolKeys, ...walletChainKeys]));
+
+    const { data: sRows, error: sErr } = await supabase
       .from('settings')
       .select('key, value')
-      .in('key', keys);
+      .in('key', allKeys);
 
     if (sErr) {
       return okJson({ ok: false, error: 'Failed to read settings', details: sErr.message }, 500);
     }
 
-    // Build insert rows
     const byKey = new Map<string, any>();
-    for (const row of settings ?? []) {
-      byKey.set(row.key, row.value);
-    }
+    for (const r of sRows ?? []) byKey.set(r.key, r.value);
 
     const nowIso = new Date().toISOString();
     const toInsert: HeightRow[] = [];
     const skipped: { symbol: string; reason: string }[] = [];
 
-    for (const sym of symbols) {
-      const key = `${sym}_last_height`;
-      const val = byKey.get(key);
+    // helper: extract numeric height from a settings value of any shape
+    const readHeight = (val: any): number | null => {
+      if (val == null) return null;
+      if (typeof val === 'number') return Number.isFinite(val) && val > 0 ? val : null;
+      if (typeof val === 'string') {
+        const n = Number(val);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      }
+      if (typeof val === 'object') {
+        const candidates = [val.height, val.value, val.latest, val.last, val.h];
+        for (const c of candidates) {
+          const n = Number(c);
+          if (Number.isFinite(n) && n > 0) return n;
+        }
+      }
+      return null;
+    };
 
-      const height = Number(
-        val?.height ?? val?.value ?? val ?? Number.NaN
-      );
-      if (!Number.isFinite(height) || height <= 0) {
-        skipped.push({ symbol: sym, reason: `missing ${key}` });
+    // fallback: latest known height in heights_daily (any day) for symbol
+    const fallbackFromHeightsDaily = async (sym: string): Promise<number | null> => {
+      const { data: rows } = await supabase
+        .from('heights_daily')
+        .select('height, updated_at, day')
+        .eq('chain', sym)
+        .order('updated_at', { ascending: false })
+        .limit(1);
+      const h = rows?.[0]?.height;
+      return typeof h === 'number' && h > 0 ? h : null;
+    };
+
+    for (const sym of symbols) {
+      const primaryKey = `${sym}_last_height`;
+      const walletChain = SYMBOL_TO_WALLET_CHAIN[sym]; // e.g. MATIC -> pol
+      const fallbackKey = walletChain ? `${walletChain}_last_height` : null;
+
+      let height: number | null = null;
+
+      // A) settings primary: SYMBOL_last_height
+      height = readHeight(byKey.get(primaryKey));
+
+      // B) settings fallback: walletChain_last_height
+      if (height == null && fallbackKey) {
+        height = readHeight(byKey.get(fallbackKey));
+      }
+
+      // C) last known in heights_daily for this symbol
+      if (height == null) {
+        height = await fallbackFromHeightsDaily(sym);
+      }
+
+      if (height == null) {
+        skipped.push({ symbol: sym, reason: `missing ${primaryKey}${fallbackKey ? ` & ${fallbackKey}` : ''}` });
         continue;
       }
 
@@ -198,36 +212,24 @@ export async function POST(req: Request) {
     }
 
     if (toInsert.length === 0) {
-      return okJson({
-        ok: false,
-        error: 'No valid heights found in settings',
-        day,
-        symbols,
-        skipped,
-      }, 400);
+      return okJson({ ok: false, error: 'No valid heights in settings or fallback', day, symbols, skipped }, 400);
     }
 
-    // Upsert rows one shot. PostgREST cannot express ON CONFLICT WHERE clause,
-    // so we do a small RPC or multi-step. Simplest: delete+insert for that day/chain set,
-    // or use supabase-js upsert (it maps to INSERT..ON CONFLICT DO UPDATE without WHERE).
-    // We'll accept "last write wins" since this route is single-writer, but we keep updated_at fresh.
-
-    // Delete existing rows for (day, chains) to avoid stale data.
+    // 5) upsert strategy: delete same-day rows for those chains, then insert fresh
     const { error: delErr } = await supabase
       .from('heights_daily')
       .delete()
       .eq('day', day)
-      .in('chain', toInsert.map((r) => r.chain));
+      .in('chain', toInsert.map(r => r.chain));
 
     if (delErr) {
-      // non-fatal; continue with insert
+      // non-fatal; continue to insert
     }
 
-    // Insert fresh snapshot
     const { error: insErr } = await supabase
       .from('heights_daily')
       .insert(
-        toInsert.map((r) => ({
+        toInsert.map(r => ({
           day: r.day,
           chain: r.chain,
           height: r.height,
@@ -239,13 +241,7 @@ export async function POST(req: Request) {
       return okJson({ ok: false, error: 'Insert failed', details: insErr.message, day, rows: toInsert.length }, 500);
     }
 
-    return okJson({
-      ok: true,
-      day,
-      upserted: toInsert.length,
-      skipped,
-      symbols,
-    });
+    return okJson({ ok: true, day, upserted: toInsert.length, skipped, symbols });
   } catch (e: any) {
     return okJson({ ok: false, error: String(e?.message || e) }, 500);
   }
