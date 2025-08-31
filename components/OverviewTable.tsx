@@ -6,17 +6,18 @@ type Status = 'ok' | 'stale' | 'issue';
 
 type Row = {
   symbol: string;
+  name: string | null;
   height: number | null;
-  updatedAt: string | null;
   status: Status;
+  logoUrl: string | null;
 };
 
 type Resp = {
-  ok: boolean;        // API status flag
-  total: number;      // ukupno redaka u "rows"
-  okCount: number;    // broj OK chainova
-  staleCount: number; // broj STALE chainova
-  issueCount: number; // broj ISSUE chainova
+  ok: boolean;
+  total: number;
+  okCount: number;
+  staleCount: number;
+  issueCount: number;
   rows: Row[];
   error?: string;
 };
@@ -38,8 +39,8 @@ export default function OverviewTable() {
             setData(json);
             setErr(null);
           } else {
-            setData(null);
             setErr(json.error ?? 'Unknown error');
+            setData(null);
           }
         }
       } catch (e: any) {
@@ -51,9 +52,7 @@ export default function OverviewTable() {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   if (loading) {
@@ -74,6 +73,13 @@ export default function OverviewTable() {
   }
 
   const rows = data?.rows ?? [];
+
+  const badge = (s: Status) =>
+    s === 'ok'
+      ? 'rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700'
+      : s === 'stale'
+      ? 'rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700'
+      : 'rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700';
 
   return (
     <div className="w-full space-y-4">
@@ -96,38 +102,37 @@ export default function OverviewTable() {
         <table className="min-w-full text-sm">
           <thead className="bg-gray-50 text-left">
             <tr>
-              <th className="px-4 py-2 font-medium text-gray-600">Symbol</th>
+              <th className="px-4 py-2 font-medium text-gray-600">Chain</th>
               <th className="px-4 py-2 font-medium text-gray-600">Height</th>
-              <th className="px-4 py-2 font-medium text-gray-600">Updated</th>
               <th className="px-4 py-2 font-medium text-gray-600">Status</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.symbol} className="border-t">
-                <td className="px-4 py-2 font-medium">{r.symbol}</td>
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-2">
+                    {r.logoUrl ? (
+                      // SVG iz public/ se može poslužiti s običnim <img>
+                      <img
+                        src={r.logoUrl}
+                        alt={`${r.symbol} logo`}
+                        className="h-5 w-5"
+                        loading="lazy"
+                      />
+                    ) : null}
+                    <span className="font-medium">{r.symbol}</span>
+                  </div>
+                </td>
                 <td className="px-4 py-2 tabular-nums">{r.height ?? '—'}</td>
                 <td className="px-4 py-2">
-                  {r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '—'}
-                </td>
-                <td className="px-4 py-2">
-                  <span
-                    className={
-                      r.status === 'ok'
-                        ? 'rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700'
-                        : r.status === 'stale'
-                        ? 'rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700'
-                        : 'rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700'
-                    }
-                  >
-                    {r.status.toUpperCase()}
-                  </span>
+                  <span className={badge(r.status)}>{r.status.toUpperCase()}</span>
                 </td>
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-4 py-8 text-center text-gray-500">
+                <td colSpan={3} className="px-4 py-8 text-center text-gray-500">
                   No rows.
                 </td>
               </tr>
@@ -136,9 +141,7 @@ export default function OverviewTable() {
         </table>
       </div>
 
-      <div className="text-xs text-gray-500">
-        Total: {data?.total ?? 0}
-      </div>
+      <div className="text-xs text-gray-500">Total: {data?.total ?? 0}</div>
     </div>
   );
 }
