@@ -1,34 +1,27 @@
-name: Ingest BTC (every 30 min)
+name: Ingest BTC (hourly)
 
 on:
   schedule:
-    - cron: "*/30 * * * *" # every 30 minutes
+    - cron: "1 * * * *"   # once per hour at minute 01 (UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest-btc
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Call BTC ingestion endpoint on Vercel
+      - name: Call BTC height ingest
         run: |
           set -e
           echo "Calling https://www.blockbattle.org/api/ingest/btc ..."
-          for i in 1 2 3; do
-            response=$(curl -s -o response.txt -w "%{http_code}" -X POST "https://www.blockbattle.org/api/ingest/btc" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")
-
-            cat response.txt
-
-            if [ "$response" -eq 200 ]; then
-              echo "BTC ingestion succeeded."
-              exit 0
-            else
-              echo "HTTP $response"
-              echo "Retry in $((i * 5))s..."
-              sleep $((i * 5))
-            fi
-          done
-
-          echo "Failed to run ingestion after retries."
-          exit 1
+          resp="$(curl -sSf -X POST "https://www.blockbattle.org/api/ingest/btc" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")"
+          echo "$resp"
 
