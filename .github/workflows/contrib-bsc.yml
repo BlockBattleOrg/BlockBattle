@@ -2,12 +2,20 @@ name: Contribution Ingest (BSC)
 
 on:
   schedule:
-    - cron: "9,39 * * * *"   # izbjegni sudar s ostalima
-  workflow_dispatch: {}
+    - cron: "47 */3 * * *"   # every 3 hours at minute 47 (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-bsc
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Call BSC contribution ingest
         run: |

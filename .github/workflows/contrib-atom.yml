@@ -2,12 +2,20 @@ name: Contribution Ingest (ATOM)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes
+    - cron: "32 */3 * * *"   # every 3 hours at minute 32 (UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-atom
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Call ATOM contribution ingest
         run: |

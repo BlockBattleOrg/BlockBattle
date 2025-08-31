@@ -1,17 +1,27 @@
-name: Ingest (BSC)
+name: Ingest BSC (hourly)
 
 on:
   schedule:
-    # svake 5 minute, ali pomaknuto da se ne sudara s drugima
-    - cron: "11,16,21,26,31,36,41,46,51,56 * * * *"
-  workflow_dispatch: {}
+    - cron: "46 * * * *"   # once per hour at minute 46 (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest-bsc
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Call BSC height ingest
         run: |
-          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/bsc" \
-            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+          set -e
+          echo "Calling https://www.blockbattle.org/api/ingest/bsc ..."
+          resp="$(curl -sSf -X POST "https://www.blockbattle.org/api/ingest/bsc" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")"
+          echo "$resp"
 

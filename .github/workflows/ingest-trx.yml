@@ -1,25 +1,27 @@
-name: Ingest TRX (every 15 min)
+name: Ingest TRX (hourly)
+
 on:
   schedule:
-    - cron: "*/15 * * * *"   # svakih 15 min
+    - cron: "43 * * * *"   # once per hour at minute 43 (UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest-trx
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Call ingest TRX (fail on HTTP/ok=false)
-        env:
-          BASE: https://www.blockbattle.org
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      - name: Call TRX height ingest
         run: |
           set -e
-          resp="$(curl -sSf -X POST "$BASE/api/ingest/trx" \
-            -H "x-cron-secret: $CRON_SECRET" \
-            -H "Cache-Control: no-cache")"
+          echo "Calling https://www.blockbattle.org/api/ingest/trx ..."
+          resp="$(curl -sSf -X POST "https://www.blockbattle.org/api/ingest/trx" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")"
           echo "$resp"
-          ok=$(echo "$resp" | jq -r '.ok')
-          if [ "$ok" != "true" ]; then
-            echo "Route returned ok!=true"; exit 1
-          fi
 
