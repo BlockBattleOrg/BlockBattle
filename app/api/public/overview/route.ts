@@ -15,15 +15,13 @@ const REVERSE_ALIAS: Record<string, string> = Object.fromEntries(
 );
 
 type Row = {
-  symbol: string;
+  symbol: string;                    // e.g., MATIC (display symbol)
   height: number | null;
   updatedAt: string | null;
-  // IMPORTANT: lower-case for CSS classes in the legacy UI
-  status: 'ok' | 'stale' | 'issue';
-  // Uppercase label for display
+  status: 'ok' | 'stale' | 'issue';  // lowercase for CSS classes
   statusText: 'OK' | 'STALE' | 'ISSUE';
-  // Public path under /public/logos/crypto/
-  logo: string;
+  icon: string;                      // << basename SVG-a, npr. POL, BSC, BTC ...
+  // (UI obično radi src={`/logos/crypto/${icon}.svg`})
 };
 
 function utcToday(): string {
@@ -41,12 +39,10 @@ function computeStatusText(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE
   return 'ISSUE';
 }
 
-// Logos live in /public/logos/crypto/
-function logoFor(symbol: string): string {
-  const upper = symbol.toUpperCase();
-  const alias = REVERSE_ALIAS[upper]; // MATIC -> POL, BNB -> BSC
-  const file = `${alias ?? upper}.svg`;
-  return `/logos/crypto/${file}`;
+// basename ikone: MATIC -> POL, BNB -> BSC, ostalo = symbol
+function iconBasename(displaySymbol: string): string {
+  const upper = displaySymbol.toUpperCase();
+  return REVERSE_ALIAS[upper] ?? upper;
 }
 
 function noStoreJson(body: any, status = 200) {
@@ -63,12 +59,12 @@ export async function GET() {
 
     const today = utcToday();
 
-    // Allowlist from currencies (e.g., excludes ADA if not present)
+    // allowlist from currencies (npr. nema ADA ako nije u currencies)
     const { data: curRows, error: curErr } = await supabase.from('currencies').select('symbol');
     if (curErr) return noStoreJson({ ok: false, error: curErr.message }, 500);
     const allowed = new Set<string>((curRows ?? []).map(c => String(c.symbol).toUpperCase()));
 
-    // Today's snapshot (primary)
+    // današnji snapshot
     const { data: todayRows, error: todayErr } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
@@ -96,7 +92,7 @@ export async function GET() {
 
     for (const r of todayRows ?? []) consume(r.chain, r.height, r.updated_at);
 
-    // Fallback to latest-known (any day) for symbols missing today
+    // fallback: najnoviji (bilo koji dan) za simbole koji danas fale
     const have = new Set(Object.keys(bySymbol));
     const { data: latestAny } = await supabase
       .from('heights_daily')
@@ -110,17 +106,17 @@ export async function GET() {
       consume(r.chain, r.height, r.updated_at);
     }
 
-    // Build rows (sorted) + counts
+    // rows + counts
     const rows: Row[] = Object.keys(bySymbol).sort().map((s) => {
       const entry = bySymbol[s] ?? { height: null, updatedAt: null };
       const statusText = computeStatusText(entry.updatedAt);
       return {
-        symbol: s,
+        symbol: s,                               // npr. MATIC
         height: entry.height,
         updatedAt: entry.updatedAt,
-        statusText,
-        status: statusText.toLowerCase() as Row['status'],
-        logo: logoFor(s),
+        statusText,                              // "OK"
+        status: statusText.toLowerCase() as Row['status'], // "ok"
+        icon: iconBasename(s),                   // npr. "POL" → /logos/crypto/POL.svg
       };
     });
 
