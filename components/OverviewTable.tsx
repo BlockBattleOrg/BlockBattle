@@ -6,7 +6,7 @@ import ParticipateModal from './ParticipateModal';
 type Status = 'ok' | 'stale' | 'issue';
 
 type Row = {
-  symbol: string;           // display symbol (BTC, MATIC, BNB…)
+  symbol: string;           // BTC, MATIC, BNB…
   height: number | null;
   status: Status;
   logoUrl: string | null;   // /logos/crypto/BTC.svg
@@ -47,8 +47,75 @@ const SYMBOL_TO_CHAIN: Record<string, string> = {
   ARB: 'arb',
   AVAX: 'avax',
   BNB: 'bsc',
-  // npr. ADA: 'cardano',
+  // ADA: 'cardano', // po potrebi
 };
+
+// Pokušaj izvući wallet iz različitih oblika odgovora
+function coerceWallet(json: any, fallbackChain: string): Wallet | null {
+  if (!json) return null;
+
+  const normalize = (w: any): Wallet | null => {
+    if (!w) return null;
+    const address = w.address ?? w.addr ?? null;
+    const chain = w.chain ?? fallbackChain;
+    if (!address) return null;
+    return {
+      chain: String(chain),
+      address: String(address),
+      memo_tag: w.memo_tag ?? w.tag ?? null,
+      explorer_template: w.explorer_template ?? w.explorer ?? null,
+      uri_scheme: w.uri_scheme ?? w.scheme ?? null,
+    };
+  };
+
+  // 1) { ok:true, wallet:{...} }
+  if (json.wallet) {
+    const w = normalize(json.wallet);
+    if (w) return w;
+  }
+
+  // 2) { ok:true, address:"...", chain:"..." }
+  if (json.address || json.chain) {
+    const w = normalize(json);
+    if (w) return w;
+  }
+
+  // 3) { ok:true, data:{...} } ili { ok:true, result:{...} }
+  if (json.data) {
+    const w = normalize(json.data);
+    if (w) return w;
+  }
+  if (json.result) {
+    // ponekad je result array
+    if (Array.isArray(json.result)) {
+      for (const it of json.result) {
+        const w = normalize(it);
+        if (w) return w;
+      }
+    } else {
+      const w = normalize(json.result);
+      if (w) return w;
+    }
+  }
+
+  // 4) { ok:true, wallets:[...] }
+  if (Array.isArray(json.wallets)) {
+    // prvo aktivni ako postoji
+    const active = json.wallets.find((w: any) => w?.is_active === true) ?? json.wallets[0];
+    const w = normalize(active);
+    if (w) return w;
+  }
+
+  // 5) { ok:true } ali u drugom polju
+  for (const key of ['payload', 'value']) {
+    if (json[key]) {
+      const w = normalize(json[key]);
+      if (w) return w;
+    }
+  }
+
+  return null;
+}
 
 export default function OverviewTable() {
   const [data, setData] = React.useState<Resp | null>(null);
@@ -96,20 +163,20 @@ export default function OverviewTable() {
       });
       const json = await res.json();
 
-      if (json?.ok && json?.wallet) {
-        setWallet(json.wallet as Wallet);
-      } else if (json?.ok && (json?.address || json?.chain)) {
-        // fallback ako API ne vraća wrapper "wallet"
-        const w: Wallet = {
-          chain: (json.chain ?? chainParam) as string,
-          address: String(json.address),
-          memo_tag: json.memo_tag ?? null,
-          explorer_template: json.explorer_template ?? null,
-          uri_scheme: json.uri_scheme ?? null,
-        };
-        setWallet(w);
-      } else {
+      // Pomogni si u konzoli
+      // eslint-disable-next-line no-console
+      console.debug('[wallet api response]', chainParam, json);
+
+      if (json?.ok === false) {
         setWalletError(json?.error ?? 'No wallet configured for this chain yet.');
+      } else {
+        const coerced = coerceWallet(json, chainParam);
+        if (coerced) {
+          setWallet(coerced);
+          setWalletError(null);
+        } else {
+          setWalletError(json?.error ?? 'No wallet configured for this chain yet.');
+        }
       }
     } catch (e: any) {
       setWalletError(String(e?.message || e));
