@@ -1,16 +1,26 @@
 // app/api/admin/fx-sync/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { fetchUsdPrices, loadCurrencyMeta, toUsd } from "@/lib/fx";
+import { fetchUsdPrices } from "@/lib/fx";
+
+export const runtime = "nodejs";        // forsiraj Node runtime (ne Edge)
+export const dynamic = "force-dynamic"; // admin endpoint
 
 const CRON_SECRET = process.env.CRON_SECRET || "";
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
-// How many rows to update per invocation
 const BATCH_SIZE = parseInt(process.env.FX_SYNC_BATCH_SIZE || "100", 10);
 
-export const dynamic = "force-dynamic";
+type ContribRow = {
+  id: number;
+  wallet_id: string;
+  amount: number | null;
+};
+
+type WalletRow = {
+  id: string;
+  symbol: string | null;
+};
 
 export async function POST(req: NextRequest) {
   const hdr = req.headers.get("x-cron-secret") || "";
@@ -22,46 +32,63 @@ export async function POST(req: NextRequest) {
     auth: { persistSession: false },
   });
 
-  // 1) Pull a batch of contributions without USD
-  const { data: rows, error } = await supabase
+  // 1) Uzmemo batch contributions gdje je amount_usd NULL
+  const { data: contribs, error: cErr } = await supabase
     .from("contributions")
-    .select("id, symbol, amount_native")
+    .select("id, wallet_id, amount")
     .is("amount_usd", null)
     .order("id", { ascending: true })
     .limit(BATCH_SIZE);
 
-  if (error) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  if (cErr) {
+    return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
   }
-  if (!rows || rows.length === 0) {
+  if (!contribs || contribs.length === 0) {
     return NextResponse.json({ ok: true, updated: 0, message: "Nothing to do" });
   }
 
-  const symbols = Array.from(new Set(rows.map((r) => r.symbol?.toUpperCase()).filter(Boolean))) as string[];
+  // 2) Dohvati sve pripadne wallete i njihove simbole
+  const walletIds = Array.from(new Set(contribs.map((r) => r.wallet_id).filter(Boolean))) as string[];
+  const { data: wallets, error: wErr } = await supabase
+    .from("wallets")
+    .select("id, symbol")
+    .in("id", walletIds);
 
-  // 2) Load decimals per symbol
-  const meta = await loadCurrencyMeta(supabase, symbols);
+  if (wErr) {
+    return NextResponse.json({ ok: false, error: wErr.message }, { status: 500 });
+  }
 
-  // 3) Fetch prices
-  const prices = await fetchUsdPrices(symbols);
+  const walletSymbol: Record<string, string> = {};
+  for (const w of (wallets || []) as WalletRow[]) {
+    if (w?.id && w?.symbol) walletSymbol[w.id] = w.symbol.toUpperCase();
+  }
 
-  // 4) Compute USD values and build updates
-  type UpdateRow = { id: number; amount_usd: number };
-  const updates: UpdateRow[] = [];
-  for (const r of rows) {
-    const sym = r.symbol?.toUpperCase();
+  // 3) Skupi unikatne simbole iz batcha i povuci njihove USD cijene
+  const symbols = Array.from(
+    new Set(
+      contribs
+        .map((r) => walletSymbol[r.wallet_id])
+        .filter((s): s is string => typeof s === "string" && s.length > 0)
+    )
+  );
+  const prices = await fetchUsdPrices(symbols); // npr. { ETH: 2xxx.xx, POL: 0.xx, ... }
+
+  // 4) Izračunaj amount_usd = amount * price i pripremi upserte
+  const updates: { id: number; amount_usd: number }[] = [];
+  for (const r of contribs as ContribRow[]) {
+    const sym = walletSymbol[r.wallet_id];
     if (!sym) continue;
-    const decimals = meta[sym]?.decimals ?? 18;
-    const usd = toUsd(sym, String(r.amount_native ?? "0"), decimals, prices);
-    if (usd !== null && isFinite(usd)) {
+    const p = prices[sym];
+    if (!p || r.amount == null || !isFinite(r.amount)) continue;
+    const usd = r.amount * p;
+    if (isFinite(usd)) {
       updates.push({ id: r.id, amount_usd: usd });
     }
   }
 
-  // 5) Upsert via RPC (faster in batch) or fallback to per-row updates
+  // 5) Upsert u manjim chunkovima
   let updated = 0;
   if (updates.length > 0) {
-    // Break into chunks of 100 for safety
     const chunkSize = 100;
     for (let i = 0; i < updates.length; i += chunkSize) {
       const chunk = updates.slice(i, i + chunkSize);
@@ -78,10 +105,9 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
-    scanned: rows.length,
+    scanned: contribs.length,
     updated,
     symbols,
-    prices,
   });
 }
 
