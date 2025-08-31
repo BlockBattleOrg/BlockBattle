@@ -11,21 +11,9 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const BATCH_SIZE = parseInt(process.env.FX_SYNC_BATCH_SIZE || "100", 10);
 
-type ContribRow = {
-  id: number;
-  wallet_id: string;
-  amount: number | null;
-};
-
-type WalletRow = {
-  id: string;
-  currency_id: string | number | null;
-};
-
-type CurrencyRow = {
-  id: string | number;
-  symbol: string | null;
-};
+type ContribRow = { id: number; wallet_id: string; amount: number | null };
+type WalletRow = { id: string; currency_id: string | number | null };
+type CurrencyRow = { id: string | number; symbol: string | null };
 
 export async function POST(req: NextRequest) {
   const hdr = req.headers.get("x-cron-secret") || "";
@@ -37,7 +25,7 @@ export async function POST(req: NextRequest) {
     auth: { persistSession: false },
   });
 
-  // 1) Uzmemo batch contributions gdje je amount_usd NULL
+  // 1) Batch contributions bez USD
   const { data: contribs, error: cErr } = await supabase
     .from("contributions")
     .select("id, wallet_id, amount")
@@ -45,91 +33,66 @@ export async function POST(req: NextRequest) {
     .order("id", { ascending: true })
     .limit(BATCH_SIZE);
 
-  if (cErr) {
-    return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
-  }
+  if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
   if (!contribs || contribs.length === 0) {
     return NextResponse.json({ ok: true, updated: 0, message: "Nothing to do" });
   }
 
-  // 2) Dohvati wallete (wallet_id -> currency_id)
-  const walletIds = Array.from(new Set(contribs.map((r) => r.wallet_id).filter(Boolean))) as string[];
+  // 2) wallets -> currency_id
+  const walletIds = Array.from(new Set(contribs.map(r => r.wallet_id).filter(Boolean))) as string[];
   const { data: wallets, error: wErr } = await supabase
     .from("wallets")
     .select("id, currency_id")
     .in("id", walletIds);
-
-  if (wErr) {
-    return NextResponse.json({ ok: false, error: wErr.message }, { status: 500 });
-  }
+  if (wErr) return NextResponse.json({ ok: false, error: wErr.message }, { status: 500 });
 
   const walletCurrency: Record<string, string | number> = {};
   for (const w of (wallets || []) as WalletRow[]) {
     if (w?.id && w?.currency_id != null) walletCurrency[w.id] = w.currency_id;
   }
 
-  // 3) Dohvati pripadne valute (currency_id -> symbol)
+  // 3) currencies -> symbol
   const currencyIds = Array.from(new Set(Object.values(walletCurrency)));
   const { data: currencies, error: curErr } = await supabase
     .from("currencies")
     .select("id, symbol")
     .in("id", currencyIds);
-
-  if (curErr) {
-    return NextResponse.json({ ok: false, error: curErr.message }, { status: 500 });
-  }
+  if (curErr) return NextResponse.json({ ok: false, error: curErr.message }, { status: 500 });
 
   const currencySymbol: Record<string | number, string> = {};
   for (const c of (currencies || []) as CurrencyRow[]) {
     if (c?.id != null && c?.symbol) currencySymbol[c.id] = c.symbol.toUpperCase();
   }
 
-  // 4) Skupi simbole iz batcha i povuci njihove USD cijene
+  // 4) cijene
   const symbols = Array.from(
-    new Set(
-      contribs
-        .map((r) => currencySymbol[walletCurrency[r.wallet_id]])
-        .filter((s): s is string => typeof s === "string" && s.length > 0)
-    )
+    new Set(contribs.map(r => currencySymbol[walletCurrency[r.wallet_id]]).filter((s): s is string => !!s))
   );
-  const prices = await fetchUsdPrices(symbols); // npr. { ETH: 2xxx.xx, POL: 0.xx, ... }
+  const prices = await fetchUsdPrices(symbols);
 
-  // 5) Izračunaj amount_usd = amount * price
+  // 5) izračun
   const updates: { id: number; amount_usd: number; priced_at: string }[] = [];
   for (const r of contribs as ContribRow[]) {
-    const curId = walletCurrency[r.wallet_id];
-    const sym = currencySymbol[curId as any];
-    if (!sym) continue;
-    const p = prices[sym];
-    if (!p || r.amount == null || !isFinite(r.amount)) continue;
+    const sym = currencySymbol[walletCurrency[r.wallet_id]];
+    const p = prices[sym as keyof typeof prices];
+    if (!sym || !p || r.amount == null || !isFinite(r.amount)) continue;
     const usd = r.amount * p;
-    if (isFinite(usd)) {
-      updates.push({ id: r.id, amount_usd: usd, priced_at: new Date().toISOString() });
-    }
+    if (isFinite(usd)) updates.push({ id: r.id, amount_usd: usd, priced_at: new Date().toISOString() });
   }
 
-  // 6) Upsert u chunkovima
+  // 6) siguran UPDATE po ID-u (nema upserta)
   let updated = 0;
-  if (updates.length > 0) {
-    const chunkSize = 100;
-    for (let i = 0; i < updates.length; i += chunkSize) {
-      const chunk = updates.slice(i, i + chunkSize);
-      const { error: upErr } = await supabase
-        .from("contributions")
-        .upsert(chunk, { onConflict: "id", ignoreDuplicates: false })
-        .select("id");
-      if (upErr) {
-        return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
-      }
-      updated += chunk.length;
+  for (const u of updates) {
+    const { error: updErr } = await supabase
+      .from("contributions")
+      .update({ amount_usd: u.amount_usd, priced_at: u.priced_at })
+      .eq("id", u.id);
+    if (updErr) {
+      return NextResponse.json({ ok: false, error: updErr.message, failed_id: u.id }, { status: 500 });
     }
+    updated++;
   }
 
-  return NextResponse.json({
-    ok: true,
-    scanned: contribs.length,
-    updated,
-    symbols,
-  });
+  return NextResponse.json({ ok: true, scanned: contribs.length, updated, symbols });
 }
 
