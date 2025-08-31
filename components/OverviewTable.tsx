@@ -22,6 +22,14 @@ type Resp = {
   error?: string;
 };
 
+type Wallet = {
+  chain: string;
+  address: string;
+  memo_tag?: string | null;
+  explorer_template?: string | null;
+  uri_scheme?: string | null;
+};
+
 /** currencies.symbol -> wallets.chain (lowercase iz tablice wallets) */
 const SYMBOL_TO_CHAIN: Record<string, string> = {
   BTC: 'bitcoin',
@@ -47,10 +55,11 @@ export default function OverviewTable() {
   const [loading, setLoading] = React.useState(true);
   const [err, setErr] = React.useState<string | null>(null);
 
-  // Modal state – samo što modal treba
+  // Modal state – ono što ParticipateModal očekuje
   const [modalOpen, setModalOpen] = React.useState(false);
-  const [modalSymbol, setModalSymbol] = React.useState<string | null>(null);
-  const [modalChain, setModalChain] = React.useState<string | null>(null);
+  const [wallet, setWallet] = React.useState<Wallet | null>(null);
+  const [walletError, setWalletError] = React.useState<string | null>(null);
+  const [walletLoading, setWalletLoading] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -72,12 +81,41 @@ export default function OverviewTable() {
     return () => { cancelled = true; };
   }, []);
 
-  // Klik na Participate -> samo odredi chain i proslijedi modalu
-  const openModal = (symbol: string) => {
-    const chain = SYMBOL_TO_CHAIN[symbol] ?? symbol.toLowerCase();
-    setModalSymbol(symbol);
-    setModalChain(chain);
+  // Klik na Participate -> fetch walleta i predaj modalu
+  const openModal = async (symbol: string) => {
+    const chainParam = SYMBOL_TO_CHAIN[symbol] ?? symbol.toLowerCase();
+
     setModalOpen(true);
+    setWallet(null);
+    setWalletError(null);
+    setWalletLoading(true);
+
+    try {
+      const res = await fetch(`/api/public/wallets?chain=${encodeURIComponent(chainParam)}`, {
+        cache: 'no-store',
+      });
+      const json = await res.json();
+
+      if (json?.ok && json?.wallet) {
+        setWallet(json.wallet as Wallet);
+      } else if (json?.ok && (json?.address || json?.chain)) {
+        // fallback ako API ne vraća wrapper "wallet"
+        const w: Wallet = {
+          chain: (json.chain ?? chainParam) as string,
+          address: String(json.address),
+          memo_tag: json.memo_tag ?? null,
+          explorer_template: json.explorer_template ?? null,
+          uri_scheme: json.uri_scheme ?? null,
+        };
+        setWallet(w);
+      } else {
+        setWalletError(json?.error ?? 'No wallet configured for this chain yet.');
+      }
+    } catch (e: any) {
+      setWalletError(String(e?.message || e));
+    } finally {
+      setWalletLoading(false);
+    }
   };
 
   const badge = (s: Status) =>
@@ -109,7 +147,7 @@ export default function OverviewTable() {
             <div className="text-xs text-gray-500">OK</div>
             <div className="text-2xl font-semibold">{data?.okCount ?? 0}</div>
           </div>
-        <div className="rounded-2xl border p-4">
+          <div className="rounded-2xl border p-4">
             <div className="text-xs text-gray-500">STALE</div>
             <div className="text-2xl font-semibold">{data?.staleCount ?? 0}</div>
           </div>
@@ -167,12 +205,13 @@ export default function OverviewTable() {
         </div>
       </div>
 
-      {/* Modal koji sam radi fetch prema /api/public/wallets?chain=... */}
+      {/* Modal očekuje {open, onClose, wallet, loading, error} */}
       <ParticipateModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        chain={modalChain ?? undefined}
-        symbol={modalSymbol ?? undefined}
+        wallet={wallet}
+        loading={walletLoading}
+        error={walletError}
       />
     </>
   );
