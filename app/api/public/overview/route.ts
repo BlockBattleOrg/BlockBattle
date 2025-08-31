@@ -24,8 +24,8 @@ type Row = {
   height: number | null;          // latest known height
   updatedAt: string | null;       // ISO UTC
   status: 'OK' | 'STALE' | 'ISSUE';
-  statusLower: 'ok' | 'stale' | 'issue';
-  logo: string;                   // /logos/crypto/<FILE>.svg
+  statusClass: 'ok' | 'stale' | 'issue';
+  logo: string;                   // /logo/crypto/<FILE>.svg
 };
 
 function utcToday(): string {
@@ -46,11 +46,12 @@ function computeStatus(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE' {
   return 'ISSUE';
 }
 
+// NOTE: logos žive u `public/logo/crypto/` (ne `logos/`)
 function logoFor(symbol: string): string {
   const upper = symbol.toUpperCase();
-  const alias = REVERSE_ALIAS[upper];
+  const alias = REVERSE_ALIAS[upper];       // MATIC -> POL, BNB -> BSC
   const file = `${alias ?? upper}.svg`;
-  return `/logos/crypto/${file}`;
+  return `/logo/crypto/${file}`;
 }
 
 function noStoreJson(body: any, status = 200) {
@@ -71,7 +72,7 @@ export async function GET() {
 
     const today = utcToday();
 
-    // ---- 0) Load allowed symbols from currencies (authoritative allowlist) ----
+    // ---- 0) Allowlist: only symbols that exist in currencies (npr. nema ADA) ----
     const { data: curRows, error: curErr } = await supabase
       .from('currencies')
       .select('symbol');
@@ -81,7 +82,7 @@ export async function GET() {
     }
     const allowed = new Set<string>((curRows ?? []).map(c => String(c.symbol).toUpperCase()));
 
-    // ---- 1) Today's snapshot (primary) ----
+    // ---- 1) Današnji snapshot iz heights_daily (primarno) ----
     const { data: todayRows, error: todayErr } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
@@ -102,7 +103,7 @@ export async function GET() {
       if (!chain) return;
 
       const display = DISPLAY_ALIAS[chain] ?? chain; // POL->MATIC, BSC->BNB
-      if (!allowed.has(display)) return;             // filter out non-supported (e.g., ADA)
+      if (!allowed.has(display)) return;             // filtriraj unsupported (npr. ADA)
 
       const heightNum = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
       const height = Number.isFinite(heightNum) ? heightNum : null;
@@ -113,7 +114,7 @@ export async function GET() {
         bySymbol[display] = { height, updatedAt };
         return;
       }
-      // keep most recent updatedAt
+      // zadrži noviji zapis
       const prevT = prev.updatedAt ? Date.parse(prev.updatedAt) : -Infinity;
       const curT = updatedAt ? Date.parse(updatedAt) : -Infinity;
       if (curT > prevT) bySymbol[display] = { height, updatedAt };
@@ -121,7 +122,7 @@ export async function GET() {
 
     for (const r of todayRows ?? []) consume(r.chain, r.height, r.updated_at);
 
-    // ---- 2) Fallback to latest known (any day) for symbols missing today ----
+    // ---- 2) Fallback: najnoviji (bilo koji dan) za simbole koji danas fale ----
     const have = new Set(Object.keys(bySymbol));
     const { data: latestAny } = await supabase
       .from('heights_daily')
@@ -132,24 +133,24 @@ export async function GET() {
     for (const r of latestAny ?? []) {
       const raw = String(r.chain ?? '').toUpperCase();
       const display = DISPLAY_ALIAS[raw] ?? raw;
-      if (!allowed.has(display)) continue; // skip unsupported
-      if (have.has(display)) continue;     // already have today's
+      if (!allowed.has(display)) continue;
+      if (have.has(display)) continue;
       consume(r.chain, r.height, r.updated_at);
     }
 
-    // ---- 3) Build rows and counters ----
+    // ---- 3) Rows + counts ----
     const rows: Row[] = Object.keys(bySymbol)
       .sort()
       .map((s) => {
         const entry = bySymbol[s] ?? { height: null, updatedAt: null };
-        const status = computeStatus(entry.updatedAt);
+        const st = computeStatus(entry.updatedAt);
         return {
           symbol: s,
           height: entry.height,
           updatedAt: entry.updatedAt,
-          status,
-          statusLower: status.toLowerCase() as Row['statusLower'],
-          logo: logoFor(s),
+          status: st,
+          statusClass: st.toLowerCase() as Row['statusClass'],
+          logo: logoFor(s), // /logo/crypto/<SYMBOL or POL/BSC>.svg
         };
       });
 
