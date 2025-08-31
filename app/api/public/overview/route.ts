@@ -4,9 +4,30 @@ import { createClient } from '@supabase/supabase-js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// ---- Local types (server-only) ----
+type Status = 'ok' | 'stale' | 'issue';
+type Row = {
+  symbol: string;
+  height: number | null;
+  updatedAt: string | null;
+  status: Status;
+};
+type Resp = {
+  ok: boolean;
+  total: number;
+  okCount: number;
+  staleCount: number;
+  issueCount: number;
+  rows: Row[];
+  error?: string;
+};
+// -----------------------------------
+
 function getSupabase() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+  const url =
+    process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
   if (!url || !key) throw new Error('Missing Supabase env vars');
   return createClient(url, key, { auth: { persistSession: false } });
 }
@@ -20,7 +41,11 @@ function parseActiveChainsEnv(): string[] | null {
     .filter(Boolean);
 }
 
-function statusFromUpdatedAt(updatedAt: string | null, staleMins = 10, issueMins = 60): 'ok' | 'stale' | 'issue' {
+function statusFromUpdatedAt(
+  updatedAt: string | null,
+  staleMins = 10,
+  issueMins = 60
+): Status {
   if (!updatedAt) return 'issue';
   const now = Date.now();
   const ts = new Date(updatedAt).getTime();
@@ -40,10 +65,20 @@ export async function GET(_req: NextRequest) {
       .select('currency_id, is_active');
 
     if (wErr) {
-      return NextResponse.json({ ok: false, error: `wallets: ${wErr.message}` }, { status: 500 });
+      return NextResponse.json<Resp>(
+        { ok: false, error: `wallets: ${wErr.message}`, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] },
+        { status: 500 }
+      );
     }
     if (!Array.isArray(wallets) || wallets.length === 0) {
-      return NextResponse.json({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
+      return NextResponse.json<Resp>({
+        ok: true,
+        total: 0,
+        okCount: 0,
+        staleCount: 0,
+        issueCount: 0,
+        rows: [],
+      });
     }
 
     const use = wallets.some((w: any) => w?.is_active === true)
@@ -55,7 +90,14 @@ export async function GET(_req: NextRequest) {
     );
 
     if (currencyIds.length === 0) {
-      return NextResponse.json({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
+      return NextResponse.json<Resp>({
+        ok: true,
+        total: 0,
+        okCount: 0,
+        staleCount: 0,
+        issueCount: 0,
+        rows: [],
+      });
     }
 
     // 2) currencies -> symbols
@@ -65,29 +107,41 @@ export async function GET(_req: NextRequest) {
       .in('id', currencyIds);
 
     if (cErr) {
-      return NextResponse.json({ ok: false, error: `currencies: ${cErr.message}` }, { status: 500 });
+      return NextResponse.json<Resp>(
+        { ok: false, error: `currencies: ${cErr.message}`, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] },
+        { status: 500 }
+      );
     }
 
     const envSymbols = parseActiveChainsEnv(); // optional override
-    const symbols = envSymbols ?? Array.from(new Set((currencies ?? []).map((c: any) => String(c.symbol).toUpperCase())));
+    const symbols = envSymbols ?? Array.from(
+      new Set((currencies ?? []).map((c: any) => String(c.symbol).toUpperCase()))
+    );
 
     if (symbols.length === 0) {
-      return NextResponse.json({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
+      return NextResponse.json<Resp>({
+        ok: true,
+        total: 0,
+        okCount: 0,
+        staleCount: 0,
+        issueCount: 0,
+        rows: [],
+      });
     }
 
     // 3) heights for selected symbols
-    //   Pretpostavka sheme: table "heights" s kolonama:
-    //   - symbol (TEXT, npr. 'BTC')
-    //   - height (BIGINT/NUMERIC)
-    //   - updated_at (TIMESTAMPTZ)
-    //   Ako je tvoja shema drugačija (npr. "chain_symbol" ili "last_seen_at"), samo promijeni imena ispod.
+    //   Pretpostavljena shema:
+    //   table "heights" s kolonama: symbol (TEXT), height (NUMERIC/BIGINT), updated_at (TIMESTAMPTZ).
     const { data: heights, error: hErr } = await supabase
       .from('heights')
       .select('symbol, height, updated_at')
       .in('symbol', symbols);
 
     if (hErr) {
-      return NextResponse.json({ ok: false, error: `heights: ${hErr.message}` }, { status: 500 });
+      return NextResponse.json<Resp>(
+        { ok: false, error: `heights: ${hErr.message}`, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] },
+        { status: 500 }
+      );
     }
 
     // 4) build rows & counts
@@ -99,7 +153,7 @@ export async function GET(_req: NextRequest) {
       bySymbol[s] = { height, updatedAt };
     });
 
-    const rows = symbols.map<Row>((s) => {
+    const rows: Row[] = symbols.map((s) => {
       const entry = bySymbol[s] ?? { height: null, updatedAt: null };
       return {
         symbol: s,
@@ -113,7 +167,7 @@ export async function GET(_req: NextRequest) {
     const staleCount = rows.filter((r) => r.status === 'stale').length;
     const issueCount = rows.filter((r) => r.status === 'issue').length;
 
-    return NextResponse.json({
+    return NextResponse.json<Resp>({
       ok: true,
       total: rows.length,
       okCount,
@@ -122,7 +176,10 @@ export async function GET(_req: NextRequest) {
       rows,
     });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json<Resp>(
+      { ok: false, error: String(e?.message || e), total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] },
+      { status: 500 }
+    );
   }
 }
 
