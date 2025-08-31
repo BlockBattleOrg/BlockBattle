@@ -1,119 +1,128 @@
-// app/api/public/overview/route.ts
-// Heights overview with per-chain freshness flag (ok/stale/issue).
-// Filtrira chainove prema wallets (ili ACTIVE_CHAINS override).
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 function getSupabase() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
-  if (!url || !key) throw new Error("Missing Supabase env vars");
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+  if (!url || !key) throw new Error('Missing Supabase env vars');
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-// Pragovi (u satima)
-const FRESH_OK_HOURS = parseInt(process.env.OVERVIEW_FRESH_OK_HOURS || "6", 10);       // zeleno
-const FRESH_STALE_HOURS = parseInt(process.env.OVERVIEW_FRESH_STALE_HOURS || "24", 10); // žuto do 24h
+function parseActiveChainsEnv(): string[] | null {
+  const raw = process.env.ACTIVE_CHAINS;
+  if (!raw) return null;
+  return raw
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
 
-type HeightRow = { chain: string; height: number | null; updated_at?: string | null };
-
-/** Vrati skup dozvoljenih simbola (uppercase) iz wallets/currencies ili iz ACTIVE_CHAINS env-a. */
-async function fetchActiveSymbols(supabase: any): Promise<Set<string>> {
-  const override = (process.env.ACTIVE_CHAINS || "").trim();
-  if (override) {
-    return new Set(
-      override.split(",").map(s => s.trim().toUpperCase()).filter(Boolean)
-    );
-  }
-
-  // wallets.active (ako postoji) → preferiraj true; inače uzmi sve iz wallets
-  const { data: wallets, error: wErr } = await supabase
-    .from("wallets")
-    .select("currency_id, active");
-  if (wErr || !Array.isArray(wallets)) return new Set();
-
-  const use = wallets.some((w: any) => w?.active === true)
-    ? wallets.filter((w: any) => w?.active === true)
-    : wallets;
-
-  const ids = Array.from(new Set(use.map((w: any) => w?.currency_id).filter((x: any) => x != null)));
-  if (ids.length === 0) return new Set();
-
-  const { data: curr, error: cErr } = await supabase
-    .from("currencies")
-    .select("id, symbol")
-    .in("id", ids);
-
-  if (cErr || !Array.isArray(curr)) return new Set();
-  return new Set(curr.map((c: any) => String(c.symbol || "").toUpperCase()).filter(Boolean));
+function statusFromUpdatedAt(updatedAt: string | null, staleMins = 10, issueMins = 60): 'ok' | 'stale' | 'issue' {
+  if (!updatedAt) return 'issue';
+  const now = Date.now();
+  const ts = new Date(updatedAt).getTime();
+  const diffMin = (now - ts) / 60000;
+  if (diffMin >= issueMins) return 'issue';
+  if (diffMin >= staleMins) return 'stale';
+  return 'ok';
 }
 
 export async function GET(_req: NextRequest) {
   try {
     const supabase = getSupabase();
 
-    // 1) allow-list iz wallets (ili ACTIVE_CHAINS override)
-    const allowed = await fetchActiveSymbols(supabase);
+    // 1) Wallets -> currency ids (respect is_active)
+    const { data: wallets, error: wErr } = await supabase
+      .from('wallets')
+      .select('currency_id, is_active');
 
-    // 2) povuci heights
-    const { data, error } = await supabase
-      .from("heights_daily")
-      .select("chain, height, updated_at")
-      .order("chain", { ascending: true })
-      .limit(1000);
-
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    if (wErr) {
+      return NextResponse.json({ ok: false, error: `wallets: ${wErr.message}` }, { status: 500 });
+    }
+    if (!Array.isArray(wallets) || wallets.length === 0) {
+      return NextResponse.json({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
     }
 
-    const now = Date.now();
+    const use = wallets.some((w: any) => w?.is_active === true)
+      ? wallets.filter((w: any) => w?.is_active === true)
+      : wallets;
 
-    // 3) filtriranje i reduce na najnoviji zapis po chainu
-    const filtered = (data || [])
-      .map((r: any) => ({
-        chain: String(r.chain || "").toUpperCase(),
-        height: (r as HeightRow).height ?? null,
-        ts: r?.updated_at ? Date.parse(r.updated_at) : undefined,
-      }))
-      .filter(r => allowed.size === 0 ? true : allowed.has(r.chain))
-      .reduce<Record<string, { height: number | null; ts?: number }>>((acc, r) => {
-        const prev = acc[r.chain];
-        if (!prev || ((r.ts ?? 0) > (prev.ts ?? 0))) acc[r.chain] = { height: r.height, ts: r.ts };
-        return acc;
-      }, {});
+    const currencyIds: number[] = Array.from(
+      new Set(use.map((w: any) => w?.currency_id).filter((x: any) => x != null))
+    );
 
-    const rows = Object.entries(filtered).map(([chain, v]) => {
-      let status: "ok" | "stale" | "issue" = "ok";
-      let ageHours: number | null = null;
+    if (currencyIds.length === 0) {
+      return NextResponse.json({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
+    }
 
-      if (typeof v.ts === "number") {
-        const ageMs = now - v.ts;
-        ageHours = Math.max(0, ageMs / 36e5);
-        if (ageHours > FRESH_STALE_HOURS) status = "issue";     // >24h
-        else if (ageHours > FRESH_OK_HOURS) status = "stale";   // 6–24h
-        else status = "ok";                                     // ≤6h
-      }
+    // 2) currencies -> symbols
+    const { data: currencies, error: cErr } = await supabase
+      .from('currencies')
+      .select('id, symbol')
+      .in('id', currencyIds);
 
-      return { chain, height: v.height, status, ageHours };
+    if (cErr) {
+      return NextResponse.json({ ok: false, error: `currencies: ${cErr.message}` }, { status: 500 });
+    }
+
+    const envSymbols = parseActiveChainsEnv(); // optional override
+    const symbols = envSymbols ?? Array.from(new Set((currencies ?? []).map((c: any) => String(c.symbol).toUpperCase())));
+
+    if (symbols.length === 0) {
+      return NextResponse.json({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
+    }
+
+    // 3) heights for selected symbols
+    //   Pretpostavka sheme: table "heights" s kolonama:
+    //   - symbol (TEXT, npr. 'BTC')
+    //   - height (BIGINT/NUMERIC)
+    //   - updated_at (TIMESTAMPTZ)
+    //   Ako je tvoja shema drugačija (npr. "chain_symbol" ili "last_seen_at"), samo promijeni imena ispod.
+    const { data: heights, error: hErr } = await supabase
+      .from('heights')
+      .select('symbol, height, updated_at')
+      .in('symbol', symbols);
+
+    if (hErr) {
+      return NextResponse.json({ ok: false, error: `heights: ${hErr.message}` }, { status: 500 });
+    }
+
+    // 4) build rows & counts
+    const bySymbol: Record<string, { height: number | null; updatedAt: string | null }> = {};
+    (heights ?? []).forEach((h: any) => {
+      const s = String(h.symbol).toUpperCase();
+      const height = h.height == null ? null : Number(h.height);
+      const updatedAt = h.updated_at ?? null;
+      bySymbol[s] = { height, updatedAt };
     });
 
-    const counts = {
-      okCount: rows.filter(r => r.status === "ok").length,
-      staleCount: rows.filter(r => r.status === "stale").length,
-      issueCount: rows.filter(r => r.status === "issue").length,
-    };
+    const rows = symbols.map<Row>((s) => {
+      const entry = bySymbol[s] ?? { height: null, updatedAt: null };
+      return {
+        symbol: s,
+        height: entry.height,
+        updatedAt: entry.updatedAt,
+        status: statusFromUpdatedAt(entry.updatedAt),
+      };
+    });
+
+    const okCount = rows.filter((r) => r.status === 'ok').length;
+    const staleCount = rows.filter((r) => r.status === 'stale').length;
+    const issueCount = rows.filter((r) => r.status === 'issue').length;
 
     return NextResponse.json({
       ok: true,
       total: rows.length,
-      ...counts,
+      okCount,
+      staleCount,
+      issueCount,
       rows,
     });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
   }
 }
 

@@ -1,129 +1,145 @@
-/* eslint-disable @next/next/no-img-element */
 'use client';
 
-import { useEffect, useState } from 'react';
+import React from 'react';
+
+type Status = 'ok' | 'stale' | 'issue';
 
 type Row = {
-  chain: string;
+  symbol: string;
   height: number | null;
-  status: 'ok' | 'stale' | 'issue';
-  ageHours: number | null;
+  updatedAt: string | null;
+  status: Status;
 };
 
 type Resp = {
-  ok: boolean;
-  total: number;
-  ok: number;
-  stale: number;
-  issue: number;
+  ok: boolean;        // API status flag
+  total: number;      // ukupno redaka u "rows"
+  okCount: number;    // broj OK chainova
+  staleCount: number; // broj STALE chainova
+  issueCount: number; // broj ISSUE chainova
   rows: Row[];
+  error?: string;
 };
 
-function badgeClasses(status: Row['status']) {
-  if (status === 'ok') return 'inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-200';
-  if (status === 'stale') return 'inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-200';
-  return 'inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-200';
-}
-
-function badgeDot(status: Row['status']) {
-  const color = status === 'ok' ? 'bg-green-500' : status === 'stale' ? 'bg-amber-500' : 'bg-rose-500';
-  return <span className={`mr-1 inline-block h-2 w-2 rounded-full ${color}`} />;
-}
-
-function logoSrc(symbol: string) {
-  return `/logos/crypto/${symbol.toUpperCase()}.svg`;
-}
-
 export default function OverviewTable() {
-  const [data, setData] = useState<Resp | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [data, setData] = React.useState<Resp | null>(null);
+  const [loading, setLoading] = React.useState<boolean>(true);
+  const [err, setErr] = React.useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
+  React.useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const r = await fetch('/api/public/overview', { cache: 'no-store' });
-        const j = await r.json();
-        if (!alive) return;
-        if (!j.ok) throw new Error(j.error || 'Failed to load');
-        setData(j as Resp);
+        setLoading(true);
+        const res = await fetch('/api/public/overview', { cache: 'no-store' });
+        const json = (await res.json()) as Resp;
+        if (!cancelled) {
+          if (json.ok) {
+            setData(json);
+            setErr(null);
+          } else {
+            setData(null);
+            setErr(json.error ?? 'Unknown error');
+          }
+        }
       } catch (e: any) {
-        if (!alive) return;
-        setErr(e?.message || 'Failed to load');
+        if (!cancelled) {
+          setErr(String(e?.message || e));
+          setData(null);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
-    return () => { alive = false; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
+  if (loading) {
+    return (
+      <div className="w-full rounded-2xl border border-gray-200 p-6">
+        <div className="text-sm text-gray-500">Loading overview…</div>
+      </div>
+    );
+  }
+
+  if (err) {
+    return (
+      <div className="w-full rounded-2xl border border-red-200 bg-red-50 p-6">
+        <div className="font-medium text-red-700">Overview error</div>
+        <div className="text-sm text-red-600">{err}</div>
+      </div>
+    );
+  }
+
+  const rows = data?.rows ?? [];
+
   return (
-    <section className="mt-6">
-      <h1 className="text-3xl font-semibold">BlockBattle</h1>
-      <p className="mt-1 text-gray-500">Live chain heights aggregated from scheduled ingestion.</p>
-
-      {err && (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {err}
+    <div className="w-full space-y-4">
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-2xl border p-4">
+          <div className="text-xs text-gray-500">OK</div>
+          <div className="text-2xl font-semibold">{data?.okCount ?? 0}</div>
         </div>
-      )}
+        <div className="rounded-2xl border p-4">
+          <div className="text-xs text-gray-500">STALE</div>
+          <div className="text-2xl font-semibold">{data?.staleCount ?? 0}</div>
+        </div>
+        <div className="rounded-2xl border p-4">
+          <div className="text-xs text-gray-500">ISSUE</div>
+          <div className="text-2xl font-semibold">{data?.issueCount ?? 0}</div>
+        </div>
+      </div>
 
-      <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 bg-white">
+      <div className="overflow-x-auto rounded-2xl border">
         <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-600">
+          <thead className="bg-gray-50 text-left">
             <tr>
-              <th className="px-4 py-3">Chain</th>
-              <th className="px-4 py-3">Height</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Action</th>
+              <th className="px-4 py-2 font-medium text-gray-600">Symbol</th>
+              <th className="px-4 py-2 font-medium text-gray-600">Height</th>
+              <th className="px-4 py-2 font-medium text-gray-600">Updated</th>
+              <th className="px-4 py-2 font-medium text-gray-600">Status</th>
             </tr>
           </thead>
-          <tbody className="divide-y">
-            {!data && (
-              <tr>
-                <td className="px-4 py-4" colSpan={4}>
-                  <div className="h-4 w-32 animate-pulse rounded bg-gray-200" />
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.symbol} className="border-t">
+                <td className="px-4 py-2 font-medium">{r.symbol}</td>
+                <td className="px-4 py-2 tabular-nums">{r.height ?? '—'}</td>
+                <td className="px-4 py-2">
+                  {r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '—'}
                 </td>
-              </tr>
-            )}
-            {data?.rows?.map((r) => (
-              <tr key={r.chain}>
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-3">
-                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-gray-100 ring-1 ring-inset ring-gray-200">
-                      <img
-                        src={logoSrc(r.chain)}
-                        alt={r.chain}
-                        className="h-5 w-5"
-                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }}
-                      />
-                    </span>
-                    <span className="font-medium">{r.chain}</span>
-                  </div>
-                </td>
-                <td className="px-4 py-3 tabular-nums">{r.height?.toLocaleString('en-US') ?? '—'}</td>
-                <td className="px-4 py-3">
-                  <span className={badgeClasses(r.status)} title={r.ageHours != null ? `${r.ageHours.toFixed(2)}h old` : undefined}>
-                    {badgeDot(r.status)} {r.status === 'ok' ? 'OK' : r.status === 'stale' ? 'Stale' : 'Issue'}
-                  </span>
-                </td>
-                <td className="px-4 py-3">
-                  <a
-                    className="rounded-full border px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
-                    href="#participate"
+                <td className="px-4 py-2">
+                  <span
+                    className={
+                      r.status === 'ok'
+                        ? 'rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700'
+                        : r.status === 'stale'
+                        ? 'rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700'
+                        : 'rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700'
+                    }
                   >
-                    Participate
-                  </a>
+                    {r.status.toUpperCase()}
+                  </span>
                 </td>
               </tr>
             ))}
-            {data && data.rows.length === 0 && (
-              <tr><td className="px-4 py-4 text-gray-500" colSpan={4}>No chains.</td></tr>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-4 py-8 text-center text-gray-500">
+                  No rows.
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
       </div>
 
-      <p className="mt-2 text-xs text-gray-400">Source: /api/public/overview (no-store). Status: green ≤6h, yellow ≤24h, red &gt;24h.</p>
-    </section>
+      <div className="text-xs text-gray-500">
+        Total: {data?.total ?? 0}
+      </div>
+    </div>
   );
 }
 
