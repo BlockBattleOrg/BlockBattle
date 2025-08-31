@@ -4,36 +4,29 @@ import { createClient } from '@supabase/supabase-js';
 
 export const dynamic = 'force-dynamic';
 
-// Freshness thresholds
 const OK_HOURS = 6;
 const STALE_HOURS = 24;
 
-// DB may contain POL/BSC – display them as MATIC/BNB
 const DISPLAY_ALIAS: Record<string, string> = {
   POL: 'MATIC',
   BSC: 'BNB',
 };
-
-// reverse for logo filenames (MATIC -> POL.svg, BNB -> BSC.svg)
 const REVERSE_ALIAS: Record<string, string> = Object.fromEntries(
   Object.entries(DISPLAY_ALIAS).map(([k, v]) => [v, k])
 );
 
 type Row = {
-  symbol: string;                 // e.g., BTC, MATIC, BNB
-  height: number | null;          // latest known height
-  updatedAt: string | null;       // ISO UTC
+  symbol: string;
+  height: number | null;
+  updatedAt: string | null;
   status: 'OK' | 'STALE' | 'ISSUE';
   statusClass: 'ok' | 'stale' | 'issue';
-  logo: string;                   // /logo/crypto/<FILE>.svg
+  logo: string;
 };
 
 function utcToday(): string {
   const d = new Date();
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
 function computeStatus(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE' {
@@ -46,54 +39,35 @@ function computeStatus(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE' {
   return 'ISSUE';
 }
 
-// NOTE: logos žive u `public/logo/crypto/` (ne `logos/`)
+// sad gleda u public/logos/crypto/
 function logoFor(symbol: string): string {
   const upper = symbol.toUpperCase();
-  const alias = REVERSE_ALIAS[upper];       // MATIC -> POL, BNB -> BSC
+  const alias = REVERSE_ALIAS[upper];
   const file = `${alias ?? upper}.svg`;
-  return `/logo/crypto/${file}`;
+  return `/logos/crypto/${file}`;
 }
 
 function noStoreJson(body: any, status = 200) {
-  return NextResponse.json(body, {
-    status,
-    headers: { 'Cache-Control': 'no-store' },
-  });
+  return NextResponse.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
 export async function GET() {
   try {
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL as string,
-      (process.env.SUPABASE_SERVICE_ROLE_KEY ||
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) as string,
+      (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) as string,
       { auth: { persistSession: false } }
     );
 
     const today = utcToday();
 
-    // ---- 0) Allowlist: only symbols that exist in currencies (npr. nema ADA) ----
-    const { data: curRows, error: curErr } = await supabase
-      .from('currencies')
-      .select('symbol');
-
-    if (curErr) {
-      return noStoreJson({ ok: false, error: 'Failed to read currencies', details: curErr.message }, 500);
-    }
+    const { data: curRows } = await supabase.from('currencies').select('symbol');
     const allowed = new Set<string>((curRows ?? []).map(c => String(c.symbol).toUpperCase()));
 
-    // ---- 1) Današnji snapshot iz heights_daily (primarno) ----
-    const { data: todayRows, error: todayErr } = await supabase
+    const { data: todayRows } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
       .eq('day', today);
-
-    if (todayErr) {
-      return noStoreJson(
-        { ok: false, error: 'Failed to read heights_daily (today)', details: todayErr.message },
-        500
-      );
-    }
 
     type Acc = { height: number | null; updatedAt: string | null };
     const bySymbol: Record<string, Acc> = {};
@@ -101,58 +75,43 @@ export async function GET() {
     const consume = (chainRaw: any, heightRaw: any, updatedAtRaw: any) => {
       const chain = String(chainRaw ?? '').toUpperCase();
       if (!chain) return;
-
-      const display = DISPLAY_ALIAS[chain] ?? chain; // POL->MATIC, BSC->BNB
-      if (!allowed.has(display)) return;             // filtriraj unsupported (npr. ADA)
-
-      const heightNum = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
-      const height = Number.isFinite(heightNum) ? heightNum : null;
+      const display = DISPLAY_ALIAS[chain] ?? chain;
+      if (!allowed.has(display)) return;
+      const height = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
       const updatedAt = updatedAtRaw ? new Date(updatedAtRaw).toISOString() : null;
-
       const prev = bySymbol[display];
-      if (!prev) {
-        bySymbol[display] = { height, updatedAt };
-        return;
+      if (!prev || (updatedAt && Date.parse(updatedAt) > Date.parse(prev.updatedAt ?? ''))) {
+        bySymbol[display] = { height: Number.isFinite(height) ? height : null, updatedAt };
       }
-      // zadrži noviji zapis
-      const prevT = prev.updatedAt ? Date.parse(prev.updatedAt) : -Infinity;
-      const curT = updatedAt ? Date.parse(updatedAt) : -Infinity;
-      if (curT > prevT) bySymbol[display] = { height, updatedAt };
     };
 
     for (const r of todayRows ?? []) consume(r.chain, r.height, r.updated_at);
 
-    // ---- 2) Fallback: najnoviji (bilo koji dan) za simbole koji danas fale ----
     const have = new Set(Object.keys(bySymbol));
     const { data: latestAny } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
       .order('updated_at', { ascending: false })
       .limit(400);
-
     for (const r of latestAny ?? []) {
       const raw = String(r.chain ?? '').toUpperCase();
       const display = DISPLAY_ALIAS[raw] ?? raw;
-      if (!allowed.has(display)) continue;
-      if (have.has(display)) continue;
+      if (!allowed.has(display) || have.has(display)) continue;
       consume(r.chain, r.height, r.updated_at);
     }
 
-    // ---- 3) Rows + counts ----
-    const rows: Row[] = Object.keys(bySymbol)
-      .sort()
-      .map((s) => {
-        const entry = bySymbol[s] ?? { height: null, updatedAt: null };
-        const st = computeStatus(entry.updatedAt);
-        return {
-          symbol: s,
-          height: entry.height,
-          updatedAt: entry.updatedAt,
-          status: st,
-          statusClass: st.toLowerCase() as Row['statusClass'],
-          logo: logoFor(s), // /logo/crypto/<SYMBOL or POL/BSC>.svg
-        };
-      });
+    const rows: Row[] = Object.keys(bySymbol).sort().map((s) => {
+      const entry = bySymbol[s] ?? { height: null, updatedAt: null };
+      const st = computeStatus(entry.updatedAt);
+      return {
+        symbol: s,
+        height: entry.height,
+        updatedAt: entry.updatedAt,
+        status: st,
+        statusClass: st.toLowerCase() as Row['statusClass'],
+        logo: logoFor(s),
+      };
+    });
 
     const counts = rows.reduce(
       (acc, r) => {
