@@ -7,21 +7,29 @@ export const dynamic = 'force-dynamic';
 const OK_HOURS = 6;
 const STALE_HOURS = 24;
 
-// DB can store POL/BSC; display as MATIC/BNB
+// DB može imati POL/BSC; za prikaz želimo MATIC/BNB
 const DISPLAY_ALIAS: Record<string, string> = { POL: 'MATIC', BSC: 'BNB' };
-// reverse for logo filenames (MATIC -> POL.svg, BNB -> BSC.svg)
+// obrnuto za datoteke ikona (MATIC -> POL.svg, BNB -> BSC.svg)
 const REVERSE_ALIAS: Record<string, string> = Object.fromEntries(
   Object.entries(DISPLAY_ALIAS).map(([k, v]) => [v, k])
 );
 
 type Row = {
-  symbol: string;                    // e.g., MATIC (display symbol)
+  symbol: string;                    // npr. MATIC (za UI prikaz)
   height: number | null;
   updatedAt: string | null;
-  status: 'ok' | 'stale' | 'issue';  // lowercase for CSS classes
+  // status za CSS klase (lowercase)
+  status: 'ok' | 'stale' | 'issue';
+  // status za label (uppercase)
   statusText: 'OK' | 'STALE' | 'ISSUE';
-  icon: string;                      // << basename SVG-a, npr. POL, BSC, BTC ...
-  // (UI obično radi src={`/logos/crypto/${icon}.svg`})
+
+  // —— IKONE (više naziva za potpunu kompatibilnost) ——
+  icon: string;                      // basename SVG-a (BTC, ETH, POL, BSC, …)
+  logo: string;                      // /logos/crypto/<icon>.svg
+  iconUrl: string;                   // isto kao logo
+  logoUrl: string;                   // isto kao logo
+  image: string;                     // isto kao logo
+  img: string;                       // isto kao logo
 };
 
 function utcToday(): string {
@@ -39,32 +47,39 @@ function computeStatusText(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE
   return 'ISSUE';
 }
 
-// basename ikone: MATIC -> POL, BNB -> BSC, ostalo = symbol
+// basename SVG-a: MATIC -> POL, BNB -> BSC, ostalo = symbol
 function iconBasename(displaySymbol: string): string {
   const upper = displaySymbol.toUpperCase();
   return REVERSE_ALIAS[upper] ?? upper;
 }
 
 function noStoreJson(body: any, status = 200) {
-  return NextResponse.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+  return NextResponse.json(body, {
+    status,
+    headers: { 'Cache-Control': 'no-store' },
+  });
 }
 
 export async function GET() {
   try {
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL as string,
-      (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) as string,
+      (process.env.SUPABASE_SERVICE_ROLE_KEY ||
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) as string,
       { auth: { persistSession: false } }
     );
 
     const today = utcToday();
 
-    // allowlist from currencies (npr. nema ADA ako nije u currencies)
-    const { data: curRows, error: curErr } = await supabase.from('currencies').select('symbol');
+    // Allowlist simbola iz currencies (npr. nema ADA ako nije tamo)
+    const { data: curRows, error: curErr } = await supabase
+      .from('currencies')
+      .select('symbol');
     if (curErr) return noStoreJson({ ok: false, error: curErr.message }, 500);
+
     const allowed = new Set<string>((curRows ?? []).map(c => String(c.symbol).toUpperCase()));
 
-    // današnji snapshot
+    // Današnji snapshot iz heights_daily (primarno)
     const { data: todayRows, error: todayErr } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
@@ -77,11 +92,13 @@ export async function GET() {
     const consume = (chainRaw: any, heightRaw: any, updatedAtRaw: any) => {
       const chain = String(chainRaw ?? '').toUpperCase();
       if (!chain) return;
-      const display = DISPLAY_ALIAS[chain] ?? chain; // POL->MATIC, BSC->BNB
+
+      // POL->MATIC, BSC->BNB za UI prikaz
+      const display = DISPLAY_ALIAS[chain] ?? chain;
       if (!allowed.has(display)) return;
 
-      const num = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
-      const height = Number.isFinite(num) ? num : null;
+      const hNum = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
+      const height = Number.isFinite(hNum) ? hNum : null;
       const updatedAt = updatedAtRaw ? new Date(updatedAtRaw).toISOString() : null;
 
       const prev = bySymbol[display];
@@ -92,13 +109,14 @@ export async function GET() {
 
     for (const r of todayRows ?? []) consume(r.chain, r.height, r.updated_at);
 
-    // fallback: najnoviji (bilo koji dan) za simbole koji danas fale
+    // Fallback: najnoviji zapis (bilo koji dan) za simbole koji danas fale
     const have = new Set(Object.keys(bySymbol));
     const { data: latestAny } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
       .order('updated_at', { ascending: false })
       .limit(400);
+
     for (const r of latestAny ?? []) {
       const raw = String(r.chain ?? '').toUpperCase();
       const display = DISPLAY_ALIAS[raw] ?? raw;
@@ -106,17 +124,24 @@ export async function GET() {
       consume(r.chain, r.height, r.updated_at);
     }
 
-    // rows + counts
+    // Rows + counts
     const rows: Row[] = Object.keys(bySymbol).sort().map((s) => {
       const entry = bySymbol[s] ?? { height: null, updatedAt: null };
       const statusText = computeStatusText(entry.updatedAt);
+      const icon = iconBasename(s);
+      const path = `/logos/crypto/${icon}.svg`;
       return {
-        symbol: s,                               // npr. MATIC
+        symbol: s,
         height: entry.height,
         updatedAt: entry.updatedAt,
-        statusText,                              // "OK"
-        status: statusText.toLowerCase() as Row['status'], // "ok"
-        icon: iconBasename(s),                   // npr. "POL" → /logos/crypto/POL.svg
+        statusText,
+        status: statusText.toLowerCase() as Row['status'],
+        icon,                 // npr. POL za MATIC, BSC za BNB
+        logo: path,           // svi aliasi ispod vode na isto
+        iconUrl: path,
+        logoUrl: path,
+        image: path,
+        img: path,
       };
     });
 
