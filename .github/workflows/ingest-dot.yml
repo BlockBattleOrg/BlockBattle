@@ -1,19 +1,27 @@
-name: Ingest DOT
+name: Ingest DOT (hourly)
+
 on:
   schedule:
-    - cron: "*/15 * * * *"    # every 15 minutes (adjust if needed)
+    - cron: "25 * * * *"   # once per hour at minute 25 (UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest-dot
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Call ingest DOT
-        env:
-          BASE: https://www.blockbattle.org
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      - name: Call DOT height ingest
         run: |
-          curl -sS -X POST "$BASE/api/ingest/dot" \
-            -H "x-cron-secret: $CRON_SECRET" \
-            -H "Cache-Control: no-cache"
+          set -e
+          echo "Calling https://www.blockbattle.org/api/ingest/dot ..."
+          resp="$(curl -sSf -X POST "https://www.blockbattle.org/api/ingest/dot" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")"
+          echo "$resp"
 

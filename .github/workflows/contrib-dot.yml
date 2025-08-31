@@ -2,19 +2,23 @@ name: Contribution Ingest (DOT)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"    # every 5 minutes
-  workflow_dispatch: {}       # manual trigger
+    - cron: "26 */3 * * *"   # every 3 hours at minute 26 (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-dot
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Call DOT ingest via contrib proxy
-        env:
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      - name: Call DOT contribution ingest
         run: |
-          set -euo pipefail
-          # Hitting contrib proxy (mirrors status/body of core route):
-          curl --fail-with-body -sS -X POST "https://www.blockbattle.org/api/ingest/contrib/dot" \
-            -H "x-cron-secret: ${CRON_SECRET}"
+          curl -fsS -X POST "https://www.blockbattle.org/api/ingest/contrib/dot" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
 
