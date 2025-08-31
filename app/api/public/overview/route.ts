@@ -4,12 +4,11 @@ import { createClient } from '@supabase/supabase-js';
 
 export const dynamic = 'force-dynamic';
 
-// Status thresholds
+// Freshness thresholds
 const OK_HOURS = 6;
 const STALE_HOURS = 24;
 
-// Aliases coming from legacy naming in DB snapshots
-// We display symbols, so map POL->MATIC, BSC->BNB
+// DB may contain POL/BSC – display them as MATIC/BNB
 const DISPLAY_ALIAS: Record<string, string> = {
   POL: 'MATIC',
   BSC: 'BNB',
@@ -17,8 +16,8 @@ const DISPLAY_ALIAS: Record<string, string> = {
 
 type Row = {
   symbol: string;                 // e.g., BTC, MATIC, BNB
-  height: number | null;          // latest height we have
-  updatedAt: string | null;       // ISO string in UTC
+  height: number | null;          // latest known height
+  updatedAt: string | null;       // ISO UTC
   status: 'OK' | 'STALE' | 'ISSUE';
 };
 
@@ -49,7 +48,7 @@ function noStoreJson(body: any, status = 200) {
 
 export async function GET() {
   try {
-    // Supabase client (service role preferred; anon works for read if RLS allows)
+    // Supabase client (service role if available; anon is fine if RLS allows read)
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL as string,
       (process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -59,7 +58,7 @@ export async function GET() {
 
     const today = utcToday();
 
-    // 1) Primary source: today's snapshot from heights_daily
+    // 1) Today's snapshot (primary)
     const { data: todayRows, error: todayErr } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
@@ -72,7 +71,7 @@ export async function GET() {
       );
     }
 
-    // Normalize and keep the most recent per display symbol
+    // Aggregate latest per display symbol
     type Acc = { height: number | null; updatedAt: string | null };
     const bySymbol: Record<string, Acc> = {};
 
@@ -80,46 +79,44 @@ export async function GET() {
       const chain = String(chainRaw ?? '').toUpperCase();
       if (!chain) return;
       const symbol = DISPLAY_ALIAS[chain] ?? chain;
-      const height = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
-      const hVal = Number.isFinite(height) ? height : null;
+      const heightNum =
+        typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
+      const height = Number.isFinite(heightNum) ? heightNum : null;
       const updatedAt = updatedAtRaw ? new Date(updatedAtRaw).toISOString() : null;
 
       const prev = bySymbol[symbol];
       if (!prev) {
-        bySymbol[symbol] = { height: hVal, updatedAt };
+        bySymbol[symbol] = { height, updatedAt };
         return;
       }
-      // keep the most recent updatedAt
+      // keep most recent
       const prevT = prev.updatedAt ? Date.parse(prev.updatedAt) : -Infinity;
       const curT = updatedAt ? Date.parse(updatedAt) : -Infinity;
-      if (curT > prevT) bySymbol[symbol] = { height: hVal, updatedAt };
+      if (curT > prevT) bySymbol[symbol] = { height, updatedAt };
     };
 
     for (const r of todayRows ?? []) {
       consume(r.chain, r.height, r.updated_at);
     }
 
-    // 2) Fallback: if some symbols are missing today, fill them from latest known rows (any day)
-    //    This ensures the UI never goes blank right after first run.
+    // 2) Fallback to latest known (any day) for symbols missing today
     const haveSymbols = new Set(Object.keys(bySymbol));
-    const { data: latestAny, error: anyErr } = await supabase
+    const { data: latestAny } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
       .order('updated_at', { ascending: false })
       .limit(400); // safety cap
 
-    if (!anyErr && latestAny) {
-      for (const r of latestAny) {
-        const raw = String(r.chain ?? '').toUpperCase();
-        const symbol = DISPLAY_ALIAS[raw] ?? raw;
-        if (haveSymbols.has(symbol)) continue; // we already have today's row
-        consume(r.chain, r.height, r.updated_at);
-      }
+    for (const r of latestAny ?? []) {
+      const raw = String(r.chain ?? '').toUpperCase();
+      const symbol = DISPLAY_ALIAS[raw] ?? raw;
+      if (haveSymbols.has(symbol)) continue;
+      consume(r.chain, r.height, r.updated_at);
     }
 
-    // 3) Build rows and counters
+    // 3) Build rows and counts
     const rows: Row[] = Object.keys(bySymbol)
-      .sort() // alphabetical by symbol
+      .sort()
       .map((s) => {
         const entry = bySymbol[s] ?? { height: null, updatedAt: null };
         return {
@@ -130,7 +127,7 @@ export async function GET() {
         };
       });
 
-    const totals = rows.reduce(
+    const counts = rows.reduce(
       (acc, r) => {
         if (r.status === 'OK') acc.ok += 1;
         else if (r.status === 'STALE') acc.stale += 1;
@@ -140,10 +137,24 @@ export async function GET() {
       { ok: 0, stale: 0, issue: 0 }
     );
 
+    // 4) Return with multiple counter aliases (to be compatible with older UI code)
     return noStoreJson({
       ok: true,
       day: today,
-      totals: { ...totals, total: rows.length },
+
+      // legacy/simple fields
+      ok: counts.ok,
+      stale: counts.stale,
+      issue: counts.issue,
+
+      // alt names some UIs expect
+      okCount: counts.ok,
+      staleCount: counts.stale,
+      issueCount: counts.issue,
+
+      // structured totals
+      totals: { ...counts, total: rows.length },
+
       rows,
       source: 'heights_daily',
     });
