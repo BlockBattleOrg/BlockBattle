@@ -1,6 +1,6 @@
-// app/api/admin/snapshoot-heights/route.ts
+// app/api/admin/snapshot-heights/route.ts
 // Admin helper: pokreni heights ingest za SVE aktivne lance (po wallets ili ACTIVE_CHAINS)
-// i vrati sažetak rezultata. Nema hardkodirane ADA.
+// i vrati sažetak rezultata. Nema hardkodiranih simbola (npr. ADA).
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
@@ -14,32 +14,36 @@ function getSupabase() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-async function fetchActiveSymbols(supabase: any): Promise<string[]> {
+// Dohvati aktivne lance (lowercase) iz ACTIVE_CHAINS ili iz wallets→currencies.
+async function fetchActiveChains(supabase: any): Promise<string[]> {
   const override = (process.env.ACTIVE_CHAINS || "").trim();
   if (override) {
     return override.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
   }
-  const { data: wallets, error: wErr } = await supabase.from("wallets").select("currency_id, active");
+  const { data: wallets, error: wErr } = await supabase
+    .from("wallets")
+    .select("currency_id, active");
   if (wErr || !Array.isArray(wallets)) return [];
+
   const use = wallets.some((w: any) => w?.active === true)
     ? wallets.filter((w: any) => w?.active === true)
     : wallets;
+
   const ids = Array.from(new Set(use.map((w: any) => w?.currency_id).filter((x: any) => x != null)));
   if (ids.length === 0) return [];
-  const { data: curr, error: cErr } = await supabase.from("currencies").select("id, symbol").in("id", ids);
+
+  const { data: curr, error: cErr } = await supabase
+    .from("currencies")
+    .select("id, symbol")
+    .in("id", ids);
   if (cErr || !Array.isArray(curr)) return [];
+
   return curr.map((c: any) => String(c.symbol || "").toLowerCase()).filter(Boolean);
 }
 
 async function hitIngest(chain: string) {
-  const base = process.env.NEXT_PUBLIC_BASE_URL || process.env.BASE_URL || "";
-  const origin = base || process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "";
-  const host = origin || ""; // ako nema, koristi apsolutni URL ispod
-
-  const url = host
-    ? `${host}/api/ingest/${chain}`
-    : `https://www.blockbattle.org/api/ingest/${chain}`;
-
+  // Gađamo produkcijski domain; ako želiš dinamički, možeš koristiti VERCEL_URL/NEXT_PUBLIC_BASE_URL.
+  const url = `https://www.blockbattle.org/api/ingest/${chain}`;
   const secret = process.env.CRON_SECRET || "";
   const res = await fetch(url, {
     method: "POST",
@@ -56,41 +60,38 @@ async function hitIngest(chain: string) {
 
 export async function POST(req: NextRequest) {
   try {
-    // Opcionalna zaštita istim headerom kao cron
-    const secret = req.headers.get("x-cron-secret");
+    // Jednostavna zaštita istim headerom kao CRON
     const expected = process.env.CRON_SECRET || "";
-    if (!expected || secret !== expected) {
+    const provided = req.headers.get("x-cron-secret") || "";
+    if (!expected || provided !== expected) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
     const supabase = getSupabase();
-    const chains = await fetchActiveSymbols(supabase); // npr. ['btc','eth','pol',...]
+    const chains = await fetchActiveChains(supabase); // npr. ['btc','eth','pol',...]
     if (chains.length === 0) {
       return NextResponse.json({ ok: false, error: "No active chains (wallets) found" }, { status: 400 });
     }
 
-    const results: any[] = [];
-    // sekvencijalno (ako želiš paralelno: Promise.allSettled)
+    const results: Array<{ chain: string; status: number; body: any }> = [];
     for (const c of chains) {
-      // mala pauza da ne “zaburstamo” endpoint-e
+      // sekvencijalno da ne zagušimo RPC-eve
       // eslint-disable-next-line no-await-in-loop
       const r = await hitIngest(c);
       results.push(r);
     }
 
-    const summary = {
-      ok: results.filter(r => r.status === 200 && (r.body?.ok === true)).length,
-      total: results.length,
-      errors: results.filter(r => !(r.status === 200 && (r.body?.ok === true))).length,
-    };
+    const successCount = results.filter(r => r.status === 200 && r.body && r.body.ok === true).length;
+    const errorCount = results.length - successCount;
+    const total = results.length;
 
-    return NextResponse.json({ ok: true, ...summary, results });
+    return NextResponse.json({ ok: true, total, successCount, errorCount, results });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
   }
 }
 
-// (Po želji) GET delegira na POST radi lakšeg testa iz browsera
+// (Opcionalno) GET delegira na POST radi lakšeg testa iz browsera (i dalje traži x-cron-secret)
 export async function GET(req: NextRequest) {
   return POST(req);
 }
