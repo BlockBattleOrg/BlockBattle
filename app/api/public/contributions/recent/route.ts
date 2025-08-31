@@ -1,10 +1,11 @@
 // app/api/public/contributions/recent/route.ts
 // Recent contributions: last N rows with { chain, amount, amount_usd, tx, timestamp }.
-// - Uses legacy env resolution (SERVICE_ROLE preferred, ANON fallback).
-// - Paginira po ID-ju (bez ovisnosti o created_at).
+// If amount_usd is NULL, we compute USD on-the-fly using lib/fx.ts (real-time display).
+// No schema changes.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { fetchUsdPrices, loadCurrencyMeta, toUsd } from "@/lib/fx";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,9 +14,7 @@ function getSupabase() {
   const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
   if (!url || !key) {
-    throw new Error(
-      "Missing Supabase env: need SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)."
-    );
+    throw new Error("Missing Supabase env: need SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).");
   }
   return createClient(url, key, { auth: { persistSession: false } });
 }
@@ -26,10 +25,10 @@ type ContribRow = {
   amount: number | null;
   amount_usd: number | null;
   tx_hash: string | null;
-  timestamp?: string | null; // ako postoji u shemi
+  timestamp?: string | null; // if exists in schema
 };
 type WalletRow = { id: string; currency_id: string | number | null };
-type CurrencyRow = { id: string | number; symbol: string | null };
+type CurrencyRow = { id: string | number; symbol: string | null; decimals?: number | null };
 
 export async function GET(req: NextRequest) {
   try {
@@ -39,7 +38,7 @@ export async function GET(req: NextRequest) {
 
     const supabase = getSupabase();
 
-    // 1) Zadnjih N po ID desc, pokušaj s `timestamp` kolonom, padni na varijantu bez nje
+    // 1) last N by id desc (try selecting timestamp if present)
     let rows: ContribRow[] = [];
     {
       const { data, error } = await supabase
@@ -56,7 +55,6 @@ export async function GET(req: NextRequest) {
           .select("id, wallet_id, amount, amount_usd, tx_hash")
           .order("id", { ascending: false })
           .limit(limit);
-
         if (err2) return NextResponse.json({ ok: false, error: err2.message }, { status: 500 });
         rows = (data2 || []) as ContribRow[];
       }
@@ -64,7 +62,7 @@ export async function GET(req: NextRequest) {
 
     if (!rows.length) return NextResponse.json({ ok: true, total: 0, rows: [] });
 
-    // 2) wallets -> currency_id
+    // 2) wallet -> currency
     const walletIds = Array.from(new Set(rows.map(r => r.wallet_id).filter(Boolean))) as string[];
     const { data: wallets, error: wErr } = await supabase
       .from("wallets")
@@ -78,28 +76,57 @@ export async function GET(req: NextRequest) {
     }
     const currencyIds = Array.from(new Set(Object.values(walletToCurrency)));
 
-    // 3) currency -> symbol
+    // 3) currency -> symbol, decimals
     const { data: currencies, error: cErr } = await supabase
       .from("currencies")
-      .select("id, symbol")
+      .select("id, symbol, decimals")
       .in("id", currencyIds);
     if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
 
     const currencyToSymbol: Record<string | number, string> = {};
+    const currencyMeta: Record<string | number, { decimals: number }> = {};
     for (const c of (currencies || []) as CurrencyRow[]) {
-      if (c?.id != null && c?.symbol) currencyToSymbol[c.id] = c.symbol.toUpperCase();
+      if (c?.id != null && c?.symbol) {
+        currencyToSymbol[c.id] = c.symbol.toUpperCase();
+        currencyMeta[c.id] = { decimals: c.decimals ?? 18 };
+      }
     }
 
-    // 4) mapiranje u response
+    // 4) compute USD for those missing using live prices
+    const neededSymbols = Array.from(
+      new Set(
+        rows
+          .filter(r => (r.amount_usd == null) && r.amount != null)
+          .map(r => currencyToSymbol[walletToCurrency[r.wallet_id]])
+          .filter(Boolean) as string[]
+      )
+    );
+
+    let prices: Record<string, number> = {};
+    if (neededSymbols.length > 0) {
+      // we have chain symbols already (from currencies), so go straight to price fetch
+      prices = await fetchUsdPrices(neededSymbols);
+    }
+
     const result = rows.map((r) => {
       const curId = walletToCurrency[r.wallet_id];
       const symbol = currencyToSymbol[curId] || null;
+      let usd = r.amount_usd;
+
+      if (usd == null && typeof r.amount === "number" && symbol) {
+        const meta = currencyMeta[curId];
+        if (meta) {
+          const calc = toUsd(symbol, String(r.amount), meta.decimals, prices);
+          if (typeof calc === "number" && isFinite(calc)) usd = calc;
+        }
+      }
+
       return {
-        chain: symbol,                   // 'ETH', 'POL', ...
-        amount: r.amount ?? null,        // nativna količina
-        amount_usd: r.amount_usd ?? null,// USD vrijednost (može biti null ako fx-sync još nije popunio)
-        tx: r.tx_hash ?? null,           // hash transakcije
-        timestamp: r.timestamp ?? null,  // ako kolona postoji
+        chain: symbol,
+        amount: r.amount ?? null,
+        amount_usd: usd ?? null,
+        tx: r.tx_hash ?? null,
+        timestamp: r.timestamp ?? null,
       };
     });
 
