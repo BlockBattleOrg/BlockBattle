@@ -6,7 +6,6 @@ type Status = 'ok' | 'stale' | 'issue';
 
 type Row = {
   symbol: string;
-  name: string | null;
   height: number | null;
   status: Status;
   logoUrl: string | null;
@@ -113,12 +112,12 @@ export default function OverviewTable() {
                 <td className="px-4 py-2">
                   <div className="flex items-center gap-2">
                     {r.logoUrl ? (
-                      // SVG iz public/ se može poslužiti s običnim <img>
                       <img
                         src={r.logoUrl}
-                        alt={`${r.symbol} logo`}
+                        alt=""            // alt prazan da ne ispisuje tekst kad logo nedostaje
                         className="h-5 w-5"
                         loading="lazy"
+                        aria-hidden="true"
                       />
                     ) : null}
                     <span className="font-medium">{r.symbol}</span>
