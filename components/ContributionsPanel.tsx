@@ -1,10 +1,9 @@
-// components/ContributionsPanel.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
 
-type LBRow   = { chain: string; total: number; contributions: number };
-type RecentRow = { chain: string; amount: number; tx: string; timestamp: string };
+type LBRow = { chain: string; total: number; contributions: number; usd_total?: number | null };
+type RecentRow = { chain: string; amount: number; tx: string; timestamp?: string | null; amount_usd?: number | null };
 
 // koliko decimala prikazati po chainu (native units)
 const DECIMALS: Record<string, number> = {
@@ -21,18 +20,16 @@ function normChain(x: string) {
 }
 
 // format s punim brojem decimala (bez znanstvene notacije, bez “0” za sitne iznose)
-function formatAmount(amount: number, chain: string) {
+function formatNative(amount: number, chain: string) {
   const c = normChain(chain);
   const d = DECIMALS[c] ?? 8;
 
-  // prikaz do pune preciznosti nativne jedinice
   let out = amount.toLocaleString('en-US', {
     useGrouping: true,
     minimumFractionDigits: 0,
     maximumFractionDigits: d,
   });
 
-  // ako je zbog zaokruživanja ispalo "0" ali iznos je > 0, gurni malo više frakcija
   if (out === '0' && amount > 0) {
     out = amount.toLocaleString('en-US', {
       useGrouping: true,
@@ -41,11 +38,20 @@ function formatAmount(amount: number, chain: string) {
     });
   }
 
-  // ukloni eventualne završne nule i decimalnu točku ako nisu potrebne
   if (out.includes('.')) {
     out = out.replace(/(\.\d*?[1-9])0+$/,'$1').replace(/\.$/,'');
   }
   return out;
+}
+
+function formatUSD(n?: number | null) {
+  if (typeof n !== 'number' || !isFinite(n)) return '—';
+  return n.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
 }
 
 function explorerTxUrl(chain: string, tx: string) {
@@ -65,14 +71,30 @@ export default function ContributionsPanel() {
     (async () => {
       try {
         const [a, b] = await Promise.all([
+          // Back-compat: UI koristi /api/public/contributions/leaderboard (shim → novi handler)
           fetch('/api/public/contributions/leaderboard', { cache: 'no-store' }).then((r) => r.json()),
-          fetch('/api/public/contributions/recent', { cache: 'no-store' }).then((r) => r.json()),
+          fetch('/api/public/contributions/recent?limit=10', { cache: 'no-store' }).then((r) => r.json()),
         ]);
         if (!alive) return;
         if (!a.ok) throw new Error(a.error || 'Leaderboard error');
         if (!b.ok) throw new Error(b.error || 'Recent error');
-        setLb((a.rows || []).map((r: LBRow) => ({ ...r, chain: normChain(r.chain) })));
-        setRecent((b.rows || []).map((r: RecentRow) => ({ ...r, chain: normChain(r.chain) })));
+
+        // a.rows: [{ chain, total, contributions, usd_total }]
+        setLb((a.rows || []).map((r: any) => ({
+          chain: normChain(r.chain),
+          total: r.total,
+          contributions: r.contributions,
+          usd_total: r.usd_total ?? null,
+        })));
+
+        // b.rows: [{ chain, amount, tx, timestamp, (optional) amount_usd }]
+        setRecent((b.rows || []).map((r: any) => ({
+          chain: normChain(r.chain),
+          amount: r.amount,
+          tx: r.tx,
+          timestamp: r.timestamp ?? null,
+          amount_usd: r.amount_usd ?? null,
+        })));
       } catch (e: any) {
         if (!alive) return;
         setErr(e?.message || 'Failed to load contributions');
@@ -93,26 +115,34 @@ export default function ContributionsPanel() {
       )}
 
       <div className="mt-4 grid gap-4 md:grid-cols-2">
-        {/* Leaderboard */}
+        {/* Leaderboard (Totals) */}
         <div className="overflow-hidden rounded-2xl border border-gray-200">
+          <div className="flex items-center justify-between border-b bg-gray-50 px-4 py-3">
+            <div>
+              <div className="text-sm font-medium">Totals by chain</div>
+              <div className="text-xs text-gray-500">Native + USD (sum)</div>
+            </div>
+          </div>
           <table className="w-full table-auto text-sm">
             <thead className="bg-gray-50 text-left">
               <tr>
                 <th className="px-4 py-3 font-medium text-gray-600">Chain</th>
                 <th className="px-4 py-3 font-medium text-gray-600">Total (native)</th>
+                <th className="px-4 py-3 font-medium text-gray-600">Total (USD)</th>
                 <th className="px-4 py-3 font-medium text-gray-600">Contributions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {lb.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-3 text-gray-500" colSpan={3}>No contributions yet.</td>
+                  <td className="px-4 py-3 text-gray-500" colSpan={4}>No contributions yet.</td>
                 </tr>
               ) : (
                 lb.map((r) => (
                   <tr key={r.chain}>
                     <td className="px-4 py-3 font-mono">{r.chain}</td>
-                    <td className="px-4 py-3">{formatAmount(r.total, r.chain)}</td>
+                    <td className="px-4 py-3">{formatNative(r.total, r.chain)}</td>
+                    <td className="px-4 py-3 tabular-nums">{formatUSD(r.usd_total ?? null)}</td>
                     <td className="px-4 py-3">{r.contributions}</td>
                   </tr>
                 ))
@@ -123,18 +153,25 @@ export default function ContributionsPanel() {
 
         {/* Recent */}
         <div className="overflow-hidden rounded-2xl border border-gray-200">
+          <div className="flex items-center justify-between border-b bg-gray-50 px-4 py-3">
+            <div>
+              <div className="text-sm font-medium">Recent contributions</div>
+              <div className="text-xs text-gray-500">Latest payments (native + USD)</div>
+            </div>
+          </div>
           <table className="w-full table-auto text-sm">
             <thead className="bg-gray-50 text-left">
               <tr>
                 <th className="px-4 py-3 font-medium text-gray-600">Chain</th>
-                <th className="px-4 py-3 font-medium text-gray-600">Amount</th>
+                <th className="px-4 py-3 font-medium text-gray-600">Amount (native)</th>
+                <th className="px-4 py-3 font-medium text-gray-600">Amount (USD)</th>
                 <th className="px-4 py-3 font-medium text-gray-600">Tx</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {recent.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-3 text-gray-500" colSpan={3}>No recent contributions.</td>
+                  <td className="px-4 py-3 text-gray-500" colSpan={4}>No recent contributions.</td>
                 </tr>
               ) : (
                 recent.map((r, i) => {
@@ -143,7 +180,8 @@ export default function ContributionsPanel() {
                   return (
                     <tr key={i}>
                       <td className="px-4 py-3 font-mono">{r.chain}</td>
-                      <td className="px-4 py-3">{formatAmount(r.amount, r.chain)}</td>
+                      <td className="px-4 py-3">{formatNative(r.amount, r.chain)}</td>
+                      <td className="px-4 py-3 tabular-nums">{formatUSD(r.amount_usd ?? null)}</td>
                       <td className="px-4 py-3">
                         {url === '#' ? (
                           <span className="font-mono">{short}</span>
