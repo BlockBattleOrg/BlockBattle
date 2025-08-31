@@ -1,31 +1,27 @@
-name: Ingest ARB (every 15 min)
+name: Ingest ARB (hourly)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "16 * * * *"   # once per hour at minute 16
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest-arb
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Call ARB ingestion endpoint on Vercel
         run: |
           set -e
           echo "Calling https://www.blockbattle.org/api/ingest/arb ..."
-          for i in 1 2 3; do
-            response=$(curl -s -o response.txt -w "%{http_code}" -X POST "https://www.blockbattle.org/api/ingest/arb" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")
-            cat response.txt
-            if [ "$response" -eq 200 ]; then
-              echo "ARB ingestion succeeded."
-              exit 0
-            else
-              echo "HTTP $response"
-              echo "Retry in $((i * 5))s..."
-              sleep $((i * 5))
-            fi
-          done
-          echo "Failed to run ARB ingestion after retries."
-          exit 1
+          resp="$(curl -sSf -X POST "https://www.blockbattle.org/api/ingest/arb" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")"
+          echo "$resp"
 

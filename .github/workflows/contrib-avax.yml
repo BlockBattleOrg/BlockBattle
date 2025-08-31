@@ -2,16 +2,20 @@ name: Contribution Ingest (AVAX)
 
 on:
   schedule:
-    - cron: "*/5 * * * *" # every 5 minutes
+    - cron: "23 */3 * * *"   # every 3 hours at minute 23
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-avax
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: contrib-avax
-      cancel-in-progress: false
+    timeout-minutes: 15
     steps:
       - name: Call AVAX contribution ingest
         run: |
