@@ -7,10 +7,9 @@ export const dynamic = 'force-dynamic';
 const OK_HOURS = 6;
 const STALE_HOURS = 24;
 
-const DISPLAY_ALIAS: Record<string, string> = {
-  POL: 'MATIC',
-  BSC: 'BNB',
-};
+// DB can store POL/BSC; display as MATIC/BNB
+const DISPLAY_ALIAS: Record<string, string> = { POL: 'MATIC', BSC: 'BNB' };
+// reverse for logo filenames (MATIC -> POL.svg, BNB -> BSC.svg)
 const REVERSE_ALIAS: Record<string, string> = Object.fromEntries(
   Object.entries(DISPLAY_ALIAS).map(([k, v]) => [v, k])
 );
@@ -19,8 +18,11 @@ type Row = {
   symbol: string;
   height: number | null;
   updatedAt: string | null;
-  status: 'OK' | 'STALE' | 'ISSUE';
-  statusClass: 'ok' | 'stale' | 'issue';
+  // IMPORTANT: lower-case for CSS classes in the legacy UI
+  status: 'ok' | 'stale' | 'issue';
+  // Uppercase label for display
+  statusText: 'OK' | 'STALE' | 'ISSUE';
+  // Public path under /public/logos/crypto/
   logo: string;
 };
 
@@ -29,7 +31,7 @@ function utcToday(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-function computeStatus(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE' {
+function computeStatusText(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE' {
   if (!updatedAtISO) return 'ISSUE';
   const t = Date.parse(updatedAtISO);
   if (!Number.isFinite(t)) return 'ISSUE';
@@ -39,10 +41,10 @@ function computeStatus(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE' {
   return 'ISSUE';
 }
 
-// sad gleda u public/logos/crypto/
+// Logos live in /public/logos/crypto/
 function logoFor(symbol: string): string {
   const upper = symbol.toUpperCase();
-  const alias = REVERSE_ALIAS[upper];
+  const alias = REVERSE_ALIAS[upper]; // MATIC -> POL, BNB -> BSC
   const file = `${alias ?? upper}.svg`;
   return `/logos/crypto/${file}`;
 }
@@ -61,13 +63,17 @@ export async function GET() {
 
     const today = utcToday();
 
-    const { data: curRows } = await supabase.from('currencies').select('symbol');
+    // Allowlist from currencies (e.g., excludes ADA if not present)
+    const { data: curRows, error: curErr } = await supabase.from('currencies').select('symbol');
+    if (curErr) return noStoreJson({ ok: false, error: curErr.message }, 500);
     const allowed = new Set<string>((curRows ?? []).map(c => String(c.symbol).toUpperCase()));
 
-    const { data: todayRows } = await supabase
+    // Today's snapshot (primary)
+    const { data: todayRows, error: todayErr } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
       .eq('day', today);
+    if (todayErr) return noStoreJson({ ok: false, error: todayErr.message }, 500);
 
     type Acc = { height: number | null; updatedAt: string | null };
     const bySymbol: Record<string, Acc> = {};
@@ -75,18 +81,22 @@ export async function GET() {
     const consume = (chainRaw: any, heightRaw: any, updatedAtRaw: any) => {
       const chain = String(chainRaw ?? '').toUpperCase();
       if (!chain) return;
-      const display = DISPLAY_ALIAS[chain] ?? chain;
+      const display = DISPLAY_ALIAS[chain] ?? chain; // POL->MATIC, BSC->BNB
       if (!allowed.has(display)) return;
-      const height = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
+
+      const num = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
+      const height = Number.isFinite(num) ? num : null;
       const updatedAt = updatedAtRaw ? new Date(updatedAtRaw).toISOString() : null;
+
       const prev = bySymbol[display];
       if (!prev || (updatedAt && Date.parse(updatedAt) > Date.parse(prev.updatedAt ?? ''))) {
-        bySymbol[display] = { height: Number.isFinite(height) ? height : null, updatedAt };
+        bySymbol[display] = { height, updatedAt };
       }
     };
 
     for (const r of todayRows ?? []) consume(r.chain, r.height, r.updated_at);
 
+    // Fallback to latest-known (any day) for symbols missing today
     const have = new Set(Object.keys(bySymbol));
     const { data: latestAny } = await supabase
       .from('heights_daily')
@@ -100,23 +110,24 @@ export async function GET() {
       consume(r.chain, r.height, r.updated_at);
     }
 
+    // Build rows (sorted) + counts
     const rows: Row[] = Object.keys(bySymbol).sort().map((s) => {
       const entry = bySymbol[s] ?? { height: null, updatedAt: null };
-      const st = computeStatus(entry.updatedAt);
+      const statusText = computeStatusText(entry.updatedAt);
       return {
         symbol: s,
         height: entry.height,
         updatedAt: entry.updatedAt,
-        status: st,
-        statusClass: st.toLowerCase() as Row['statusClass'],
+        statusText,
+        status: statusText.toLowerCase() as Row['status'],
         logo: logoFor(s),
       };
     });
 
     const counts = rows.reduce(
       (acc, r) => {
-        if (r.status === 'OK') acc.ok += 1;
-        else if (r.status === 'STALE') acc.stale += 1;
+        if (r.status === 'ok') acc.ok += 1;
+        else if (r.status === 'stale') acc.stale += 1;
         else acc.issue += 1;
         return acc;
       },
