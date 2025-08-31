@@ -14,11 +14,18 @@ const DISPLAY_ALIAS: Record<string, string> = {
   BSC: 'BNB',
 };
 
+// reverse for logo filenames (MATIC -> POL.svg, BNB -> BSC.svg)
+const REVERSE_ALIAS: Record<string, string> = Object.fromEntries(
+  Object.entries(DISPLAY_ALIAS).map(([k, v]) => [v, k])
+);
+
 type Row = {
   symbol: string;                 // e.g., BTC, MATIC, BNB
   height: number | null;          // latest known height
   updatedAt: string | null;       // ISO UTC
   status: 'OK' | 'STALE' | 'ISSUE';
+  statusLower: 'ok' | 'stale' | 'issue';
+  logo: string;                   // /logos/crypto/<FILE>.svg
 };
 
 function utcToday(): string {
@@ -39,6 +46,13 @@ function computeStatus(updatedAtISO: string | null): 'OK' | 'STALE' | 'ISSUE' {
   return 'ISSUE';
 }
 
+function logoFor(symbol: string): string {
+  const upper = symbol.toUpperCase();
+  const alias = REVERSE_ALIAS[upper];
+  const file = `${alias ?? upper}.svg`;
+  return `/logos/crypto/${file}`;
+}
+
 function noStoreJson(body: any, status = 200) {
   return NextResponse.json(body, {
     status,
@@ -48,7 +62,6 @@ function noStoreJson(body: any, status = 200) {
 
 export async function GET() {
   try {
-    // Supabase client (service role if available; anon is fine if RLS allows read)
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL as string,
       (process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -58,7 +71,17 @@ export async function GET() {
 
     const today = utcToday();
 
-    // 1) Today's snapshot (primary)
+    // ---- 0) Load allowed symbols from currencies (authoritative allowlist) ----
+    const { data: curRows, error: curErr } = await supabase
+      .from('currencies')
+      .select('symbol');
+
+    if (curErr) {
+      return noStoreJson({ ok: false, error: 'Failed to read currencies', details: curErr.message }, 500);
+    }
+    const allowed = new Set<string>((curRows ?? []).map(c => String(c.symbol).toUpperCase()));
+
+    // ---- 1) Today's snapshot (primary) ----
     const { data: todayRows, error: todayErr } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
@@ -71,59 +94,62 @@ export async function GET() {
       );
     }
 
-    // Aggregate latest per display symbol
     type Acc = { height: number | null; updatedAt: string | null };
     const bySymbol: Record<string, Acc> = {};
 
     const consume = (chainRaw: any, heightRaw: any, updatedAtRaw: any) => {
       const chain = String(chainRaw ?? '').toUpperCase();
       if (!chain) return;
-      const symbol = DISPLAY_ALIAS[chain] ?? chain;
-      const heightNum =
-        typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
+
+      const display = DISPLAY_ALIAS[chain] ?? chain; // POL->MATIC, BSC->BNB
+      if (!allowed.has(display)) return;             // filter out non-supported (e.g., ADA)
+
+      const heightNum = typeof heightRaw === 'number' ? heightRaw : Number(heightRaw ?? NaN);
       const height = Number.isFinite(heightNum) ? heightNum : null;
       const updatedAt = updatedAtRaw ? new Date(updatedAtRaw).toISOString() : null;
 
-      const prev = bySymbol[symbol];
+      const prev = bySymbol[display];
       if (!prev) {
-        bySymbol[symbol] = { height, updatedAt };
+        bySymbol[display] = { height, updatedAt };
         return;
       }
-      // keep most recent
+      // keep most recent updatedAt
       const prevT = prev.updatedAt ? Date.parse(prev.updatedAt) : -Infinity;
       const curT = updatedAt ? Date.parse(updatedAt) : -Infinity;
-      if (curT > prevT) bySymbol[symbol] = { height, updatedAt };
+      if (curT > prevT) bySymbol[display] = { height, updatedAt };
     };
 
-    for (const r of todayRows ?? []) {
-      consume(r.chain, r.height, r.updated_at);
-    }
+    for (const r of todayRows ?? []) consume(r.chain, r.height, r.updated_at);
 
-    // 2) Fallback to latest known (any day) for symbols missing today
-    const haveSymbols = new Set(Object.keys(bySymbol));
+    // ---- 2) Fallback to latest known (any day) for symbols missing today ----
+    const have = new Set(Object.keys(bySymbol));
     const { data: latestAny } = await supabase
       .from('heights_daily')
       .select('chain, height, updated_at')
       .order('updated_at', { ascending: false })
-      .limit(400); // safety cap
+      .limit(400);
 
     for (const r of latestAny ?? []) {
       const raw = String(r.chain ?? '').toUpperCase();
-      const symbol = DISPLAY_ALIAS[raw] ?? raw;
-      if (haveSymbols.has(symbol)) continue;
+      const display = DISPLAY_ALIAS[raw] ?? raw;
+      if (!allowed.has(display)) continue; // skip unsupported
+      if (have.has(display)) continue;     // already have today's
       consume(r.chain, r.height, r.updated_at);
     }
 
-    // 3) Build rows and counts
+    // ---- 3) Build rows and counters ----
     const rows: Row[] = Object.keys(bySymbol)
       .sort()
       .map((s) => {
         const entry = bySymbol[s] ?? { height: null, updatedAt: null };
+        const status = computeStatus(entry.updatedAt);
         return {
           symbol: s,
           height: entry.height,
           updatedAt: entry.updatedAt,
-          status: computeStatus(entry.updatedAt),
+          status,
+          statusLower: status.toLowerCase() as Row['statusLower'],
+          logo: logoFor(s),
         };
       });
 
@@ -137,22 +163,14 @@ export async function GET() {
       { ok: 0, stale: 0, issue: 0 }
     );
 
-    // 4) Return (no duplicate keys)
     return noStoreJson({
-      ok: true,                 // API call success flag (keep this name)
+      ok: true,
       day: today,
-
-      // structured counters
       counts: { ...counts, total: rows.length },
-
-      // alias some UIs already use
       okCount: counts.ok,
       staleCount: counts.stale,
       issueCount: counts.issue,
-
-      // legacy totals shape
       totals: { ...counts, total: rows.length },
-
       rows,
       source: 'heights_daily',
     });
