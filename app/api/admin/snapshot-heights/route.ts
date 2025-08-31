@@ -10,6 +10,7 @@ type HeightRow = {
   height: number;
 };
 
+// wallet-chain (lowercase) -> display symbol (uppercase)
 const WALLET_CHAIN_TO_SYMBOL: Record<string, string> = {
   bitcoin: 'BTC',
   eth: 'ETH',
@@ -28,6 +29,7 @@ const WALLET_CHAIN_TO_SYMBOL: Record<string, string> = {
   bsc: 'BNB',
 };
 
+// reverse map: symbol -> wallet-chain (lowercase)
 const SYMBOL_TO_WALLET_CHAIN: Record<string, string> = Object.fromEntries(
   Object.entries(WALLET_CHAIN_TO_SYMBOL).map(([k, v]) => [v, k])
 );
@@ -171,14 +173,20 @@ export async function POST(req: Request) {
       return null;
     };
 
-    // fallback: latest known height in heights_daily (any day) for symbol
+    // 🎯 improved fallback: look into heights_daily by symbol OR by wallet-chain alias (uppercased)
     const fallbackFromHeightsDaily = async (sym: string): Promise<number | null> => {
+      const walletChain = SYMBOL_TO_WALLET_CHAIN[sym];
+      const aliasUpper = walletChain ? walletChain.toUpperCase() : null;
+
+      const candidates = aliasUpper ? [sym, aliasUpper] : [sym];
+
       const { data: rows } = await supabase
         .from('heights_daily')
         .select('height, updated_at, day')
-        .eq('chain', sym)
+        .in('chain', candidates)
         .order('updated_at', { ascending: false })
         .limit(1);
+
       const h = rows?.[0]?.height;
       return typeof h === 'number' && h > 0 ? h : null;
     };
@@ -198,7 +206,7 @@ export async function POST(req: Request) {
         height = readHeight(byKey.get(fallbackKey));
       }
 
-      // C) last known in heights_daily for this symbol
+      // C) last known in heights_daily for this symbol or its alias (e.g., POL/BSC)
       if (height == null) {
         height = await fallbackFromHeightsDaily(sym);
       }
@@ -221,9 +229,8 @@ export async function POST(req: Request) {
       .delete()
       .eq('day', day)
       .in('chain', toInsert.map(r => r.chain));
-
     if (delErr) {
-      // non-fatal; continue to insert
+      // non-fatal
     }
 
     const { error: insErr } = await supabase
