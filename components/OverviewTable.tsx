@@ -6,7 +6,7 @@ import ParticipateModal from './ParticipateModal';
 type Status = 'ok' | 'stale' | 'issue';
 
 type Row = {
-  symbol: string;           // display symbol
+  symbol: string;           // display symbol (from currencies.symbol), e.g. BTC, MATIC, BNB
   height: number | null;
   status: Status;
   logoUrl: string | null;   // e.g. /logos/crypto/BTC.svg
@@ -30,11 +30,28 @@ type Wallet = {
   uri_scheme?: string | null;
 };
 
-// mapiraj display simbol -> vrijednost koju API očekuje u ?chain=
-const DISPLAY_TO_CHAIN: Record<string, string> = {
-  MATIC: 'POL',
-  BNB: 'BSC',
-  // ostali idu kako jesu (BTC->BTC, ETH->ETH, ...)
+/**
+ * Mapiranje currencies.symbol (display) -> wallets.chain (API param ?chain=)
+ * Temeljeno na tvojim tablicama (screenshots).
+ */
+const SYMBOL_TO_CHAIN: Record<string, string> = {
+  BTC: 'bitcoin',
+  ETH: 'eth',
+  SOL: 'solana',
+  XRP: 'xrp',
+  DOGE: 'dogecoin',
+  MATIC: 'pol',       // Polygon
+  DOT: 'polkadot',
+  ATOM: 'cosmos',
+  TRX: 'tron',
+  LTC: 'litecoin',
+  XLM: 'stellar',
+  OP: 'op',
+  ARB: 'arb',
+  AVAX: 'avax',
+  BNB: 'bsc',
+  // Dodaj ovdje eventualno još simbola ako ih dodaš u currencies
+  // ADA: 'cardano',
 };
 
 export default function OverviewTable() {
@@ -48,6 +65,7 @@ export default function OverviewTable() {
   const [walletError, setWalletError] = React.useState<string | null>(null);
   const [walletLoading, setWalletLoading] = React.useState(false);
 
+  // Dohvat pregleda
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -83,11 +101,10 @@ export default function OverviewTable() {
     setWalletError(null);
     setWalletLoading(true);
 
-    // prevedi display simbol u ono što API traži u ?chain=
-    const chainParam = (DISPLAY_TO_CHAIN[symbol] ?? symbol).toUpperCase();
+    // prevedi display symbol u wallets.chain (lowercase nazivi iz tablice wallets)
+    const chainParam = SYMBOL_TO_CHAIN[symbol] ?? symbol.toLowerCase();
 
     try {
-      // tvoj API očekuje ?chain=...
       const res = await fetch(`/api/public/wallets?chain=${encodeURIComponent(chainParam)}`, {
         cache: 'no-store',
       });
