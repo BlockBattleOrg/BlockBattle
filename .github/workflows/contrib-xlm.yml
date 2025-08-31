@@ -2,16 +2,20 @@ name: Contribution Ingest (XLM)
 
 on:
   schedule:
-    - cron: "*/10 * * * *" # every 10 minutes
+    - cron: "41 */3 * * *"   # every 3 hours at minute 41 (UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-xlm
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: contrib-xlm
-      cancel-in-progress: false
+    timeout-minutes: 15
     steps:
       - name: Call XLM contribution ingest
         run: |
