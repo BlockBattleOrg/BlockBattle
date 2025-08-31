@@ -1,7 +1,6 @@
 // app/api/public/overview/route.ts
 // Heights overview with per-chain freshness flag (ok/stale/issue).
 // Filtrira chainove prema wallets (ili ACTIVE_CHAINS override).
-
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
@@ -16,12 +15,12 @@ function getSupabase() {
 }
 
 // Pragovi (u satima)
-const FRESH_OK_HOURS = parseInt(process.env.OVERVIEW_FRESH_OK_HOURS || "6", 10);     // zeleno
+const FRESH_OK_HOURS = parseInt(process.env.OVERVIEW_FRESH_OK_HOURS || "6", 10);       // zeleno
 const FRESH_STALE_HOURS = parseInt(process.env.OVERVIEW_FRESH_STALE_HOURS || "24", 10); // žuto do 24h
 
 type HeightRow = { chain: string; height: number | null; updated_at?: string | null };
 
-// 🔧 koristimo any da izbjegnemo TS konflikt
+/** Vrati skup dozvoljenih simbola (uppercase) iz wallets/currencies ili iz ACTIVE_CHAINS env-a. */
 async function fetchActiveSymbols(supabase: any): Promise<Set<string>> {
   const override = (process.env.ACTIVE_CHAINS || "").trim();
   if (override) {
@@ -30,6 +29,7 @@ async function fetchActiveSymbols(supabase: any): Promise<Set<string>> {
     );
   }
 
+  // wallets.active (ako postoji) → preferiraj true; inače uzmi sve iz wallets
   const { data: wallets, error: wErr } = await supabase
     .from("wallets")
     .select("currency_id, active");
@@ -71,7 +71,7 @@ export async function GET(_req: NextRequest) {
 
     const now = Date.now();
 
-    // 3) filtriranje
+    // 3) filtriranje i reduce na najnoviji zapis po chainu
     const filtered = (data || [])
       .map((r: any) => ({
         chain: String(r.chain || "").toUpperCase(),
@@ -92,18 +92,18 @@ export async function GET(_req: NextRequest) {
       if (typeof v.ts === "number") {
         const ageMs = now - v.ts;
         ageHours = Math.max(0, ageMs / 36e5);
-        if (ageHours > FRESH_STALE_HOURS) status = "issue";
-        else if (ageHours > FRESH_OK_HOURS) status = "stale";
-        else status = "ok";
+        if (ageHours > FRESH_STALE_HOURS) status = "issue";     // >24h
+        else if (ageHours > FRESH_OK_HOURS) status = "stale";   // 6–24h
+        else status = "ok";                                     // ≤6h
       }
 
       return { chain, height: v.height, status, ageHours };
     });
 
     const counts = {
-      ok: rows.filter(r => r.status === "ok").length,
-      stale: rows.filter(r => r.status === "stale").length,
-      issue: rows.filter(r => r.status === "issue").length,
+      okCount: rows.filter(r => r.status === "ok").length,
+      staleCount: rows.filter(r => r.status === "stale").length,
+      issueCount: rows.filter(r => r.status === "issue").length,
     };
 
     return NextResponse.json({

@@ -1,79 +1,97 @@
-// app/api/admin/snapshot-heights/route.ts
-import { NextResponse } from 'next/server';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+// app/api/admin/snapshoot-heights/route.ts
+// Admin helper: pokreni heights ingest za SVE aktivne lance (po wallets ili ACTIVE_CHAINS)
+// i vrati sažetak rezultata. Nema hardkodirane ADA.
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const CHAINS = ['BTC','LTC','DOGE','ETH','OP','ARB','POL','AVAX','BSC','ADA','ATOM','XRP','SOL','XLM','TRX'] as const;
-const keyH = (c: string) => `${c.toLowerCase()}_last_height`;
-const keyB = (c: string) => `${c.toLowerCase()}_last_block`;
-
-function parseHeight(v: any): number | null {
-  if (v == null) return null;
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string' && v.trim() && Number.isFinite(Number(v))) return Number(v);
-  if (typeof v === 'object' && Number.isFinite(Number((v as any).n))) return Number((v as any).n);
-  return null;
+function getSupabase() {
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
+  if (!url || !key) throw new Error("Missing Supabase env vars");
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
-function todayUTC(): string {
-  const d = new Date();
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
-}
-
-function getSupabase(rolePreferred = true): { client: SupabaseClient; usingServiceRole: boolean } {
-  const url =
-    process.env.SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL || // <-- allow fallback
-    '';
-  const sr = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  const anon = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-
-  if (!url) throw new Error('Missing SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL)');
-
-  if (rolePreferred && sr) {
-    return { client: createClient(url, sr, { auth: { persistSession: false } }), usingServiceRole: true };
+async function fetchActiveSymbols(supabase: any): Promise<string[]> {
+  const override = (process.env.ACTIVE_CHAINS || "").trim();
+  if (override) {
+    return override.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
   }
-  if (!anon) throw new Error('Missing Supabase service role and ANON key');
-  return { client: createClient(url, anon, { auth: { persistSession: false } }), usingServiceRole: false };
+  const { data: wallets, error: wErr } = await supabase.from("wallets").select("currency_id, active");
+  if (wErr || !Array.isArray(wallets)) return [];
+  const use = wallets.some((w: any) => w?.active === true)
+    ? wallets.filter((w: any) => w?.active === true)
+    : wallets;
+  const ids = Array.from(new Set(use.map((w: any) => w?.currency_id).filter((x: any) => x != null)));
+  if (ids.length === 0) return [];
+  const { data: curr, error: cErr } = await supabase.from("currencies").select("id, symbol").in("id", ids);
+  if (cErr || !Array.isArray(curr)) return [];
+  return curr.map((c: any) => String(c.symbol || "").toLowerCase()).filter(Boolean);
 }
 
-export async function POST(req: Request) {
+async function hitIngest(chain: string) {
+  const base = process.env.NEXT_PUBLIC_BASE_URL || process.env.BASE_URL || "";
+  const origin = base || process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "";
+  const host = origin || ""; // ako nema, koristi apsolutni URL ispod
+
+  const url = host
+    ? `${host}/api/ingest/${chain}`
+    : `https://www.blockbattle.org/api/ingest/${chain}`;
+
+  const secret = process.env.CRON_SECRET || "";
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "x-cron-secret": secret },
+    next: { revalidate: 0 },
+    cache: "no-store",
+  });
+
+  let body: any = null;
+  try { body = await res.json(); } catch { body = await res.text(); }
+
+  return { chain: chain.toUpperCase(), status: res.status, body };
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const sec = process.env.CRON_SECRET;
-    if (sec && req.headers.get('x-cron-secret') !== sec) {
-      return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+    // Opcionalna zaštita istim headerom kao cron
+    const secret = req.headers.get("x-cron-secret");
+    const expected = process.env.CRON_SECRET || "";
+    if (!expected || secret !== expected) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const { client: sb, usingServiceRole } = getSupabase(true);
-
-    const keys = [...CHAINS.map(keyH), ...CHAINS.map(keyB)];
-    const { data, error } = await sb.from('settings').select('key,value').in('key', keys);
-    if (error) throw error;
-
-    const map = new Map<string, any>((data ?? []).map((r: any) => [r.key, r.value]));
-    const day = todayUTC();
-
-    const rows = CHAINS.map((c) => {
-      const height = parseHeight(map.get(keyH(c))) ?? parseHeight(map.get(keyB(c))) ?? 0;
-      return { day, chain: c, height };
-    });
-
-    const up = await sb.from('heights_daily').upsert(rows as any, { onConflict: 'day,chain' });
-    if (up.error) {
-      const msg = usingServiceRole
-        ? up.error.message
-        : `Write failed without service role. Add SUPABASE_SERVICE_ROLE_KEY in Vercel Production or enable an INSERT policy on 'heights_daily' for ANON. Original: ${up.error.message}`;
-      return NextResponse.json({ ok: false, error: msg, usingServiceRole }, { status: 500 });
+    const supabase = getSupabase();
+    const chains = await fetchActiveSymbols(supabase); // npr. ['btc','eth','pol',...]
+    if (chains.length === 0) {
+      return NextResponse.json({ ok: false, error: "No active chains (wallets) found" }, { status: 400 });
     }
 
-    return NextResponse.json({ ok: true, day, upserted: rows.length, usingServiceRole });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Unexpected error' }, { status: 500 });
+    const results: any[] = [];
+    // sekvencijalno (ako želiš paralelno: Promise.allSettled)
+    for (const c of chains) {
+      // mala pauza da ne “zaburstamo” endpoint-e
+      // eslint-disable-next-line no-await-in-loop
+      const r = await hitIngest(c);
+      results.push(r);
+    }
+
+    const summary = {
+      ok: results.filter(r => r.status === 200 && (r.body?.ok === true)).length,
+      total: results.length,
+      errors: results.filter(r => !(r.status === 200 && (r.body?.ok === true))).length,
+    };
+
+    return NextResponse.json({ ok: true, ...summary, results });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
   }
+}
+
+// (Po želji) GET delegira na POST radi lakšeg testa iz browsera
+export async function GET(req: NextRequest) {
+  return POST(req);
 }
 
