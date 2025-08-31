@@ -25,47 +25,42 @@
 - ✅ `[x]` Heights ingest routes (protected by `x-cron-secret`) using **NowNodes**:
   **BTC, LTC, DOGE, ETH, OP, ARB, POL (alias `/ingest/matic`), AVAX, DOT, ATOM, XRP, SOL, XLM, TRX, BSC**
 - ✅ `[x]` Standardized height markers in `settings` as `<CHAIN>_last_height`
-- ✅ `[x]` GitHub Actions schedules for height ingests (optimized: hourly, staggered)
-- ✅ `[x]` Native **contribution ingest**:
-  - ✅ `[x]` POL (EVM native)
-  - ✅ `[x]` ETH (EVM native)
-  - ✅ `[x]` ATOM (Cosmos LCD/RPC via NowNodes, Supabase integration)
-  - ✅ `[x]` AVAX (EVM native, Supabase integration)
-  - ✅ `[x]` DOT (proxy/core setup, Supabase integration)
-  - ✅ `[x]` OP (EVM native)
-  - ✅ `[x]` ARB (EVM native)
-  - ✅ `[x]` All chains maintain `<chain>_contrib_last_scanned` markers in `settings`
-  - ✅ `[x]` GitHub Actions contrib ingests (optimized: every 3h, staggered)
-- ☐ `[ ]` Normalize `amount_usd` (FX integration) and write to `contributions.amount_usd`
+- ✅ `[x]` GitHub Actions schedules for height ingests (hourly, staggered)
+- ✅ `[x]` Native **contribution ingest** (sa `<chain>_contrib_last_scanned` markerima)
+- ✅ `[x]` **FX batch sync (CoinGecko)** → popunjava `contributions.amount_usd` (admin ruta + cron)
+  - ✅ `[x]` Ispravljen mapping **MATIC ⇢ POL**
+  - ✅ `[x]` Ne ovisi o `wallets.symbol` (koristi `currencies`)
 - ☐ `[ ]` Telemetry (structured logs) & basic alerts on failure
 
-**Phase 3 acceptance:** All ingest routes return `{ ok: true, ... }`, and `settings` markers advance per run.
+**Acceptance (P3):** svi ingest endpointi vraćaju `{ ok: true }`, markeri u `settings` se ažuriraju.
 
 ---
 
 ## Phase 4 — Aggregation & Public API
-- ✅ `[x]` `/api/public/overview` (heights summary consumed by homepage)
-- ✅ `[x]` `/api/public/wallets` (fetch donation address by chain)
-- ✅ `[x]` `/api/public/contributions/leaderboard`
-- ✅ `[x]` `/api/public/contributions/recent`
-- ✅ `[x]` APIs marked **dynamic** (`no-store`) to avoid stale data
-- ✅ `[x]` Daily rollups (`/api/admin/snapshot-heights` + cron at 00:05 UTC) for contributions & heights
-- ✅ `[x]` Contributions rollup job adjusted to 2-hourly schedule
-- 🟡 `[~]` Stale/latency metadata in `/api/public/overview` (endpoint works, metadata not yet added)
-- ☐ `[ ]` CORS allow-list + lightweight rate limiting on public routes
+- ✅ `[x]` `/api/public/overview` (heights summary)
+- ✅ `[x]` `/api/public/wallets` (donation address by chain)
+- ✅ `[x]` **Public leaderboard** (native + USD):
+  - ✅ `[x]` `?order=usd` + polje `usd_total`
+  - ✅ `[x]` Compat ruta: `/api/public/contributions/leaderboard`
+  - ✅ `[x]` Server-side env: service-role preferiran; anon fallback
+- ✅ `[x]` **Recent contributions** uključuje `amount_usd`
+- ✅ `[x]` API-ji označeni **dynamic** (`no-store`)
+- ✅ `[x]` Rollup: heights dnevno @00:05 UTC; contributions svaka 2h
+- 🟡 `[~]` Stale/latency metadata u `/api/public/overview`
+- ☐ `[ ]` CORS allow-list + lightweight rate limiting
 
-**Phase 4 acceptance:** UI reads real data via public API; responses are fresh and fast.
+**Acceptance (P4):** UI čita stvarne podatke; dostupni USD total(i); responsi svježi i brzi.
 
 ---
 
 ## Phase 5 — UI (Live Data)
-- ✅ `[x]` Heights table uses live values
-- ✅ `[x]` “Participate” modal with QR (dynamic import of `qrcode`)
-- ✅ `[x]` Contributions panel (Leaderboard + Recent)
-- ✅ `[x]` Explorer links (Etherscan/Polygonscan) for recent tx
-- ✅ `[x]` Amount rendering with full native precision per chain (no confusing “0”)
-- ☐ `[ ]` Status badges per chain (OK/STALE/ERR) sourced from API metadata
-- ☐ `[ ]` Empty/loading/error states polish across the app
+- ✅ `[x]` Chain Heights (live) tablica
+- ✅ `[x]` “Participate” modal s QR
+- ✅ `[x]` **Contributions panel**: jasni naslovi (“Totals by chain” / “Recent”), USD stupci, explorer linkovi
+- ✅ `[x]` **Chain logotipi (SVG)** u Chain Heights + **avatar pozadina**
+- ✅ `[x]` Prikaz nativnih iznosa s punom preciznošću
+- ☐ `[ ]` Status bedževi po chainu (OK/STALE/ERR) iz API metadata
+- ☐ `[ ]` Polirati empty/loading/error state-ove
 
 ---
 
@@ -76,17 +71,17 @@
 
 ## Phase 7 — Domain, Security, Perf
 - ✅ `[x]` `blockbattle.org` live on Vercel
-- ☐ `[ ]` Optional Cloudflare proxy
+- ☐ `[ ]]` Optional Cloudflare proxy
 - ☐ `[ ]` CORS allow-list → production origin only
-- ☐ `[ ]` Token-bucket rate limit on public API
-- ✅ `[x]` `/api/health` implemented
+- ☐ `[ ]` Token-bucket rate limit na public API
+- ✅ `[x]` `/api/health`
 - ☐ `[ ]` Centralized structured logging
 
 ---
 
 ## Phase 8 — Post-MVP
-- ☐ `[ ]` FX aggregator (CoinGecko/proxy) → fill `amount_usd` at insert time
-- ☐ `[ ]` Token donations (ERC-20 `Transfer` logs to project wallets)
+- 🟡 `[~]` **FX real-time na insert** (batch ostaje kao fallback)
+- ☐ `[ ]` Token donations (ERC-20 `Transfer` logs na project wallets)
 
 ---
 
@@ -99,41 +94,38 @@
 ## Tech-Debt & Cleanup
 - 🟡 `[~]` ENV cleanup
   - ✅ `[x]` Keep: `NOWNODES_API_KEY`, `CRON_SECRET`, `SUPABASE_*`, per-chain `*_RPC_URL`
-  - ✅ `[x]` AVAX RPC must include `/ext/bc/C/rpc`
-  - 🟡 `[~]` BTC uses Blockstream/Mempool → keep `BTC_API_BASE`
-  - 🟡 `[~]` Remove legacy groups (`*_RPC_URLS`, old DOGE/LTC tunables) once unused
-- 🟡 `[~]` Keep `/ingest/matic` alias temporarily; remove when all schedulers call `/ingest/pol`
-- ☐ `[ ]` Uniform error payload across ingest routes
-- ☐ `[ ]` Unit tests for helpers; smoke tests for APIs
+  - ✅ `[x]` AVAX RPC mora imati `/ext/bc/C/rpc`
+  - 🟡 `[~]` BTC preko Blockstream/Mempool → `BTC_API_BASE`
+  - 🟡 `[~]` Ukloniti legacy grupe (`*_RPC_URLS`, stari DOGE/LTC tunables) kad više nisu u upotrebi
+- 🟡 `[~]` Zadržati `/ingest/matic` alias privremeno; ukloniti kad svi scheduleri koriste `/ingest/pol`
+- ☐ `[ ]` Uniform error payload kroz ingest rute
+- ☐ `[ ]` Unit testovi za helpere; smoke testovi za API-je
 
 ---
 
 ## Immediate Next Steps
-1. ✅ **Cron optimization across all chains** (hourly heights, 3h contrib, staggered).  
-2. ✅ **Rollups**: heights daily @00:05, contributions every 2h @:05.  
-3. **FX integration**: popuniti `amount_usd` na insert; izložiti USD totale u API/UI.  
-4. **CORS + rate limit** na public routes.  
-5. **UI polish**: status badges (OK/STALE/ERR), loading/empty states.
+1. **FX real-time na insert** (zadržati batch kao fallback).  
+2. **CORS + rate limit** na public rutama.  
+3. **Status metadata** u `/api/public/overview` + UI bedževi (OK/STALE/ERR).  
+4. Polirati loading/empty/error state-ove.
 
 ---
 
 ### ENV (production)
-- `NOWNODES_API_KEY`, `CRON_SECRET`
-- `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `NOWNODES_API_KEY`, `CRON_SECRET`  
+- `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`  
 - Per-chain RPCs: `ETH_RPC_URL`, `OP_RPC_URL`, `ARB_RPC_URL`, `POL_RPC_URL`, `AVAX_RPC_URL`,  
-  `DOT_RPC_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`, `BSC_RPC_URL`
+  `DOT_RPC_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`, `BSC_RPC_URL`  
 - BTC: `BTC_API_BASE` (Blockstream/Mempool)
 
 ---
 
 ## Changelog (today)
-- All ingest workflows reduced to hourly (heights) and 3-hourly (contrib), staggered.  
-- Rollup contributions job changed to 2-hourly.  
-- Snapshot-heights confirmed daily at 00:05 UTC.  
-- DOT, OP, ARB contrib routes + cron workflows added.  
-- ATOM/AVAX contrib routes aligned to proxy pattern (core ingest).  
-- All 16 chain ingest routes confirmed green (including BSC).  
-- Public contributions API: dynamic `no-store` + correct FK joins.  
-- UI: explorer links + full-precision amounts.  
-- Security: RLS enabled on `heights_daily` (advisor clean).
+- **FX batch sync** (CoinGecko) u produkciji; puni `amount_usd`.  
+- Ispravljen **MATIC ⇢ POL** mapping (CoinGecko IDs).  
+- **Public leaderboard**: `usd_total`, `?order=usd`, compat ruta.  
+- **Recent contributions**: response dodaje `amount_usd`.  
+- **UI Contributions panel**: naslovi kartica + USD stupci + explorer linkovi.  
+- **Chain Heights**: dodani SVG logoi + avatar pozadina.  
+- Env helper: service-role/anon fallback.
 
