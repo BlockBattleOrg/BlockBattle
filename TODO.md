@@ -23,7 +23,7 @@
 
 ## Phase 3 — Ingestion (Chain Heights & Contributions)
 - ✅ `[x]` Heights ingest routes (protected by `x-cron-secret`) using **NowNodes**:
-  **BTC, LTC, DOGE, ETH, OP, ARB, POL** (incl. alias `/ingest/matic`), **AVAX, DOT, ADA, ATOM, XRP, SOL, XLM, TRX**
+  **BTC, LTC, DOGE, ETH, OP, ARB, POL (alias `/ingest/matic`), AVAX, DOT, ADA, ATOM, XRP, SOL, XLM, TRX, BSC**
 - ✅ `[x]` Standardized height markers in `settings` as `<CHAIN>_last_height`
 - ✅ `[x]` GitHub Actions schedules for height ingests (5–15 min)
 - ✅ `[x]` Native **contribution ingest**:
@@ -32,10 +32,12 @@
   - ✅ `[x]` ATOM (Cosmos LCD/RPC via NowNodes, Supabase integration)
   - ✅ `[x]` AVAX (EVM native, Supabase integration)
   - ✅ `[x]` DOT (proxy/core setup, Supabase integration)
-  - 🟡 `[~]` Markers `<chain>_contrib_last_scanned` (present for POL/ETH/AVAX; expand consistently to others)
-  - ☐ `[ ]` Extend to OP, ARB (EVM native)
+  - ✅ `[x]` OP (EVM native)
+  - ✅ `[x]` ARB (EVM native)
+  - ✅ `[x]` All chains maintain `<chain>_contrib_last_scanned` markers in `settings`
 - ☐ `[ ]` Normalize `amount_usd` (FX integration) and write to `contributions.amount_usd`
 - ☐ `[ ]` Telemetry (structured logs) & basic alerts on failure
+
 
 **Phase 3 acceptance:** All ingest routes return `{ ok: true, ... }`, and `settings` markers advance per run.
 
@@ -106,12 +108,11 @@
 ---
 
 ## Immediate Next Steps
-1. **Cron optimization across all 15 chains** (currently too frequent, burns provider quota; safe to reduce to 60-min staggered jobs until user traffic ramps up).  
-2. **Contrib ingest for OP/ARB** (EVM native) + GitHub Actions schedules.  
-3. **Daily rollups**: ✅ done (`/api/admin/snapshot-heights` + daily cron). Add stale/latency metadata in `/api/public/overview`.  
-4. **FX integration**: fill `amount_usd` on insert; expose USD totals in API/UI.  
-5. **CORS + rate limit** on public routes.  
-6. **UI polish**: status badges (OK/STALE/ERR), loading/empty states.
+1. **Cron optimization across all 16 chains** (trenutno prečesto, troši provider quota; smanjiti na 60-min stagger dok ne dođe promet).  
+2. **Daily rollups**: ✅ done (`/api/admin/snapshot-heights` + daily cron). Dodati stale/latency metadata u `/api/public/overview`.  
+3. **FX integration**: popuniti `amount_usd` na insert; izložiti USD totale u API/UI.  
+4. **CORS + rate limit** na public routes.  
+5. **UI polish**: status badges (OK/STALE/ERR), loading/empty states.
 
 ---
 
@@ -119,15 +120,15 @@
 - `NOWNODES_API_KEY`, `CRON_SECRET`
 - `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - Per-chain RPCs: `ETH_RPC_URL`, `OP_RPC_URL`, `ARB_RPC_URL`, `POL_RPC_URL`, `AVAX_RPC_URL`,  
-  `DOT_RPC_URL`, `ADA_BLOCKFROST_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`
+  `DOT_RPC_URL`, `ADA_BLOCKFROST_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`, `BSC_RPC_URL`
 - BTC: `BTC_API_BASE` (Blockstream/Mempool)
 
 ---
 
 ## Changelog (today)
-- Added DOT contrib route + cron workflow.  
+- Added DOT, OP, ARB contrib routes + cron workflows.  
 - ATOM/AVAX contrib routes aligned to proxy pattern (core ingest).  
-- All 15 chain ingest routes confirmed green.  
+- All 16 chain ingest routes confirmed green (including BSC).  
 - Snapshot-heights route + cron workflow confirmed working (00:05 UTC).  
 - Public contributions API: dynamic `no-store` + correct FK joins.  
 - UI: explorer links + full-precision amounts.  
