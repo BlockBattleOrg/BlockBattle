@@ -1,0 +1,23 @@
+name: FX Sync (amount_usd)
+
+on:
+  schedule:
+    # every 2 hours, staggered at :17 to avoid overlap with other jobs
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+
+jobs:
+  fx_sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Call /api/admin/fx-sync
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          BASE="${{ vars.PROD_BASE_URL || 'https://www.blockbattle.org' }}"
+          curl -sS -X POST "$BASE/api/admin/fx-sync" \
+            -H "x-cron-secret: $CRON_SECRET" | jq .
+
