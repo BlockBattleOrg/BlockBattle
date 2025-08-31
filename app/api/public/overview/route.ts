@@ -1,4 +1,7 @@
 // app/api/public/overview/route.ts
+// Heights overview with per-chain freshness flag (ok/stale/issue).
+// Filtrira chainove prema wallets (ili ACTIVE_CHAINS override).
+
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
@@ -18,7 +21,8 @@ const FRESH_STALE_HOURS = parseInt(process.env.OVERVIEW_FRESH_STALE_HOURS || "24
 
 type HeightRow = { chain: string; height: number | null; updated_at?: string | null };
 
-async function fetchActiveSymbols(supabase: ReturnType<typeof createClient>): Promise<Set<string>> {
+// 🔧 koristimo any da izbjegnemo TS konflikt
+async function fetchActiveSymbols(supabase: any): Promise<Set<string>> {
   const override = (process.env.ACTIVE_CHAINS || "").trim();
   if (override) {
     return new Set(
@@ -26,19 +30,16 @@ async function fetchActiveSymbols(supabase: ReturnType<typeof createClient>): Pr
     );
   }
 
-  // pokušaj koristiti wallets.active = true; ako kolona ne postoji, uzmi sve iz wallets
   const { data: wallets, error: wErr } = await supabase
     .from("wallets")
     .select("currency_id, active");
   if (wErr || !Array.isArray(wallets)) return new Set();
 
-  // ako postoji i ima true zapisa, filtriraj po active; inače uzmi sve
   const use = wallets.some((w: any) => w?.active === true)
     ? wallets.filter((w: any) => w?.active === true)
     : wallets;
 
   const ids = Array.from(new Set(use.map((w: any) => w?.currency_id).filter((x: any) => x != null)));
-
   if (ids.length === 0) return new Set();
 
   const { data: curr, error: cErr } = await supabase
@@ -57,7 +58,7 @@ export async function GET(_req: NextRequest) {
     // 1) allow-list iz wallets (ili ACTIVE_CHAINS override)
     const allowed = await fetchActiveSymbols(supabase);
 
-    // 2) povuci heights (posljednji zapisi po chainu)
+    // 2) povuci heights
     const { data, error } = await supabase
       .from("heights_daily")
       .select("chain, height, updated_at")
@@ -70,7 +71,7 @@ export async function GET(_req: NextRequest) {
 
     const now = Date.now();
 
-    // 3) zadrži samo chainove koji su u wallets/allowed
+    // 3) filtriranje
     const filtered = (data || [])
       .map((r: any) => ({
         chain: String(r.chain || "").toUpperCase(),
@@ -78,7 +79,6 @@ export async function GET(_req: NextRequest) {
         ts: r?.updated_at ? Date.parse(r.updated_at) : undefined,
       }))
       .filter(r => allowed.size === 0 ? true : allowed.has(r.chain))
-      // pick latest per chain by timestamp
       .reduce<Record<string, { height: number | null; ts?: number }>>((acc, r) => {
         const prev = acc[r.chain];
         if (!prev || ((r.ts ?? 0) > (prev.ts ?? 0))) acc[r.chain] = { height: r.height, ts: r.ts };
@@ -95,9 +95,6 @@ export async function GET(_req: NextRequest) {
         if (ageHours > FRESH_STALE_HOURS) status = "issue";
         else if (ageHours > FRESH_OK_HOURS) status = "stale";
         else status = "ok";
-      } else {
-        // ako nemamo timestamp, budi tolerantan i prikaži ok
-        status = "ok";
       }
 
       return { chain, height: v.height, status, ageHours };
