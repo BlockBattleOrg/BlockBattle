@@ -9,7 +9,7 @@ type Row = {
   symbol: string;           // display symbol
   height: number | null;
   status: Status;
-  logoUrl: string | null;
+  logoUrl: string | null;   // e.g. /logos/crypto/BTC.svg
 };
 
 type Resp = {
@@ -28,6 +28,13 @@ type Wallet = {
   memo_tag?: string | null;
   explorer_template?: string | null;
   uri_scheme?: string | null;
+};
+
+// mapiraj display simbol -> vrijednost koju API očekuje u ?chain=
+const DISPLAY_TO_CHAIN: Record<string, string> = {
+  MATIC: 'POL',
+  BNB: 'BSC',
+  // ostali idu kako jesu (BTC->BTC, ETH->ETH, ...)
 };
 
 export default function OverviewTable() {
@@ -53,14 +60,14 @@ export default function OverviewTable() {
             setData(json);
             setErr(null);
           } else {
-            setErr(json.error ?? 'Unknown error');
             setData(null);
+            setErr(json.error ?? 'Unknown error');
           }
         }
       } catch (e: any) {
         if (!cancelled) {
-          setErr(String(e?.message || e));
           setData(null);
+          setErr(String(e?.message || e));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -69,21 +76,36 @@ export default function OverviewTable() {
     return () => { cancelled = true; };
   }, []);
 
+  // Klik na Participate -> dohvat walleta
   const openModal = async (symbol: string) => {
     setModalOpen(true);
     setWallet(null);
     setWalletError(null);
     setWalletLoading(true);
+
+    // prevedi display simbol u ono što API traži u ?chain=
+    const chainParam = (DISPLAY_TO_CHAIN[symbol] ?? symbol).toUpperCase();
+
     try {
-      // API endpoint koji vraća wallet za simbol
-      const res = await fetch(`/api/public/wallets?symbol=${encodeURIComponent(symbol)}`, {
+      // tvoj API očekuje ?chain=...
+      const res = await fetch(`/api/public/wallets?chain=${encodeURIComponent(chainParam)}`, {
         cache: 'no-store',
       });
       const json = await res.json();
-      if (json.ok) {
+
+      if (json?.ok && json?.wallet) {
         setWallet(json.wallet as Wallet);
+      } else if (json?.ok && (json?.address || json?.chain)) {
+        const w: Wallet = {
+          chain: (json.chain ?? chainParam) as string,
+          address: json.address as string,
+          memo_tag: json.memo_tag ?? null,
+          explorer_template: json.explorer_template ?? null,
+          uri_scheme: json.uri_scheme ?? null,
+        };
+        setWallet(w);
       } else {
-        setWalletError(json.error ?? 'Wallet not found');
+        setWalletError(json?.error ?? 'No wallet configured for this chain yet.');
       }
     } catch (e: any) {
       setWalletError(String(e?.message || e));
