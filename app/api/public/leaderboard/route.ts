@@ -1,7 +1,7 @@
 // app/api/public/leaderboard/route.ts
-// Public leaderboard: native totals + USD totals (no created_at dependency).
-// Uses ONLY the public anon key (same pattern as other public routes).
-// Paginira po ID-ju kako bi radilo na tvojoj shemi bez created_at.
+// Public leaderboard: native totals + USD totals.
+// - No created_at dependency (pages by id)
+// - Env resolution matches your previous working helper (service-role preferred, anon fallback)
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -9,19 +9,19 @@ import { createClient } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
 const PAGE_SIZE = 2000;
 type OrderKey = "native" | "usd";
-
 type Row = { chain: string; total: number; usd_total: number; contributions: number };
 
-function makeClient() {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
+function getSupabase() {
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
+  if (!url || !key) {
+    throw new Error(
+      "Missing Supabase env: need SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)."
+    );
   }
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } });
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 export async function GET(req: NextRequest) {
@@ -33,9 +33,9 @@ export async function GET(req: NextRequest) {
     const order: OrderKey = orderParam === "usd" ? "usd" : "native";
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : 50;
 
-    const supabase = makeClient();
+    const supabase = getSupabase();
 
-    // 1) Paginirano čitanje contributions bez ovisnosti o created_at
+    // 1) Read contributions in pages (id asc), without created_at
     type Contrib = { id: number; wallet_id: string; amount: number | null; amount_usd: number | null };
     const contribs: Contrib[] = [];
     let start = 0;
@@ -68,9 +68,8 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: true, order, total: 0, rows: [] });
     }
 
-    // 2) wallets -> currency_id (samo za uključene wallet_id-ove)
+    // 2) wallets -> currency_id
     const walletIds = Array.from(new Set(contribs.map((c) => c.wallet_id).filter(Boolean))) as string[];
-
     type Wallet = { id: string; currency_id: string | number | null };
     const { data: wallets, error: wErr } = await supabase
       .from("wallets")
@@ -98,7 +97,7 @@ export async function GET(req: NextRequest) {
       if (c?.id != null && c?.symbol) currencyToSymbol[c.id] = c.symbol.toUpperCase();
     }
 
-    // 4) Agregacija u JS po symbolu
+    // 4) Aggregate
     const agg: Record<string, Row> = {};
     for (const r of contribs) {
       const curId = walletToCurrency[r.wallet_id];
