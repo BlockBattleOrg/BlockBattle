@@ -1,7 +1,7 @@
-// app/api/public/contributions/leaderboard/route.ts
-// Public leaderboard: native totals + USD totals.
-// Uses service-role key if available (server-side), else falls back to anon.
-// No DB schema changes required.
+// app/api/public/leaderboard/route.ts
+// Public leaderboard: native totals + USD totals (no created_at dependency).
+// Uses ONLY the public anon key (same pattern as other public routes).
+// Paginira po ID-ju kako bi radilo na tvojoj shemi bez created_at.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -10,20 +10,18 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SRK = process.env.SUPABASE_SERVICE_ROLE_KEY || "";       // preferred (server)
-const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";  // fallback (public)
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-const DEFAULT_SINCE_DAYS = parseInt(process.env.LEADERBOARD_SINCE_DAYS || "365", 10);
 const PAGE_SIZE = 2000;
 type OrderKey = "native" | "usd";
 
 type Row = { chain: string; total: number; usd_total: number; contributions: number };
 
 function makeClient() {
-  if (!SUPABASE_URL) throw new Error("Missing SUPABASE URL");
-  const key = SRK || ANON;
-  if (!key) throw new Error("Missing Supabase key (service_role or anon)");
-  return createClient(SUPABASE_URL, key, { auth: { persistSession: false } });
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
+  }
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } });
 }
 
 export async function GET(req: NextRequest) {
@@ -31,37 +29,33 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const orderParam = (url.searchParams.get("order") || "native").toLowerCase() as OrderKey;
     const limitParam = parseInt(url.searchParams.get("limit") || "50", 10);
-    const sinceDays = parseInt(url.searchParams.get("sinceDays") || String(DEFAULT_SINCE_DAYS), 10);
 
     const order: OrderKey = orderParam === "usd" ? "usd" : "native";
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : 50;
-    const sinceISO = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
 
     const supabase = makeClient();
 
-    // 1) Page through contributions (only needed fields)
-    type Contrib = { wallet_id: string; amount: number | null; amount_usd: number | null; created_at: string };
+    // 1) Paginirano čitanje contributions bez ovisnosti o created_at
+    type Contrib = { id: number; wallet_id: string; amount: number | null; amount_usd: number | null };
     const contribs: Contrib[] = [];
     let start = 0;
+
     while (true) {
       const { data, error } = await supabase
         .from("contributions")
-        .select("wallet_id, amount, amount_usd, created_at")
-        .gte("created_at", sinceISO)
+        .select("id, wallet_id, amount, amount_usd")
         .order("id", { ascending: true })
         .range(start, start + PAGE_SIZE - 1);
 
-      if (error) {
-        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-      }
+      if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
       if (!data || data.length === 0) break;
 
       for (const r of data) {
         contribs.push({
+          id: r.id,
           wallet_id: r.wallet_id,
           amount: typeof r.amount === "number" ? r.amount : null,
           amount_usd: typeof r.amount_usd === "number" ? r.amount_usd : null,
-          created_at: r.created_at,
         });
       }
 
@@ -71,12 +65,12 @@ export async function GET(req: NextRequest) {
     }
 
     if (contribs.length === 0) {
-      return NextResponse.json({ ok: true, order, sinceDays, total: 0, rows: [] });
+      return NextResponse.json({ ok: true, order, total: 0, rows: [] });
     }
 
+    // 2) wallets -> currency_id (samo za uključene wallet_id-ove)
     const walletIds = Array.from(new Set(contribs.map((c) => c.wallet_id).filter(Boolean))) as string[];
 
-    // 2) wallets -> currency_id
     type Wallet = { id: string; currency_id: string | number | null };
     const { data: wallets, error: wErr } = await supabase
       .from("wallets")
@@ -88,6 +82,7 @@ export async function GET(req: NextRequest) {
     for (const w of (wallets || []) as Wallet[]) {
       if (w?.id && w.currency_id != null) walletToCurrency[w.id] = w.currency_id;
     }
+
     const currencyIds = Array.from(new Set(Object.values(walletToCurrency)));
 
     // 3) currencies -> symbol
@@ -103,7 +98,7 @@ export async function GET(req: NextRequest) {
       if (c?.id != null && c?.symbol) currencyToSymbol[c.id] = c.symbol.toUpperCase();
     }
 
-    // 4) Aggregate by symbol
+    // 4) Agregacija u JS po symbolu
     const agg: Record<string, Row> = {};
     for (const r of contribs) {
       const curId = walletToCurrency[r.wallet_id];
@@ -118,7 +113,7 @@ export async function GET(req: NextRequest) {
 
     let rows = Object.values(agg);
 
-    // 5) Order & limit
+    // 5) Sort & limit
     if (order === "usd") rows.sort((a, b) => (b.usd_total || 0) - (a.usd_total || 0));
     else rows.sort((a, b) => (b.total || 0) - (a.total || 0));
     rows = rows.slice(0, limit);
@@ -126,7 +121,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       ok: true,
       order,
-      sinceDays,
       total: rows.length,
       rows: rows.map((r) => ({
         chain: r.chain,
