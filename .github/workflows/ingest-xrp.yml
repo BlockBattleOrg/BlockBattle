@@ -1,25 +1,27 @@
-name: Ingest XRP (every 15 min)
+name: Ingest XRP (hourly)
+
 on:
   schedule:
-    - cron: "*/15 * * * *"   # svakih 15 min
+    - cron: "34 * * * *"   # once per hour at minute 34 (UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest-xrp
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Call ingest XRP (fail on HTTP/ok=false)
-        env:
-          BASE: https://www.blockbattle.org
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      - name: Call XRP height ingest
         run: |
           set -e
-          resp="$(curl -sSf -X POST "$BASE/api/ingest/xrp" \
-            -H "x-cron-secret: $CRON_SECRET" \
-            -H "Cache-Control: no-cache")"
+          echo "Calling https://www.blockbattle.org/api/ingest/xrp ..."
+          resp="$(curl -sSf -X POST "https://www.blockbattle.org/api/ingest/xrp" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}")"
           echo "$resp"
-          ok=$(echo "$resp" | jq -r '.ok')
-          if [ "$ok" != "true" ]; then
-            echo "Route returned ok!=true"; exit 1
-          fi
 

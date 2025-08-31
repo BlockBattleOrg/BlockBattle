@@ -2,16 +2,20 @@ name: Contribution Ingest (XRP)
 
 on:
   schedule:
-    - cron: "*/10 * * * *" # every 10 minutes
+    - cron: "35 */3 * * *"   # every 3 hours at minute 35 (UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contrib-xrp
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: contrib-xrp
-      cancel-in-progress: false
+    timeout-minutes: 15
     steps:
       - name: Call XRP contribution ingest
         run: |
