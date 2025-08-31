@@ -137,22 +137,20 @@ export async function GET() {
       { ok: 0, stale: 0, issue: 0 }
     );
 
-    // 4) Return with multiple counter aliases (to be compatible with older UI code)
+    // 4) Return (no duplicate keys)
     return noStoreJson({
-      ok: true,
+      ok: true,                 // API call success flag (keep this name)
       day: today,
 
-      // legacy/simple fields
-      ok: counts.ok,
-      stale: counts.stale,
-      issue: counts.issue,
+      // structured counters
+      counts: { ...counts, total: rows.length },
 
-      // alt names some UIs expect
+      // alias some UIs already use
       okCount: counts.ok,
       staleCount: counts.stale,
       issueCount: counts.issue,
 
-      // structured totals
+      // legacy totals shape
       totals: { ...counts, total: rows.length },
 
       rows,
