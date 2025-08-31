@@ -6,10 +6,10 @@ import ParticipateModal from './ParticipateModal';
 type Status = 'ok' | 'stale' | 'issue';
 
 type Row = {
-  symbol: string;           // display symbol (from currencies.symbol), e.g. BTC, MATIC, BNB
+  symbol: string;           // display symbol (BTC, MATIC, BNB…)
   height: number | null;
   status: Status;
-  logoUrl: string | null;   // e.g. /logos/crypto/BTC.svg
+  logoUrl: string | null;   // /logos/crypto/BTC.svg
 };
 
 type Resp = {
@@ -22,25 +22,14 @@ type Resp = {
   error?: string;
 };
 
-type Wallet = {
-  chain: string;
-  address: string;
-  memo_tag?: string | null;
-  explorer_template?: string | null;
-  uri_scheme?: string | null;
-};
-
-/**
- * Mapiranje currencies.symbol (display) -> wallets.chain (API param ?chain=)
- * Temeljeno na tvojim tablicama (screenshots).
- */
+/** currencies.symbol -> wallets.chain (lowercase iz tablice wallets) */
 const SYMBOL_TO_CHAIN: Record<string, string> = {
   BTC: 'bitcoin',
   ETH: 'eth',
   SOL: 'solana',
   XRP: 'xrp',
   DOGE: 'dogecoin',
-  MATIC: 'pol',       // Polygon
+  MATIC: 'pol',
   DOT: 'polkadot',
   ATOM: 'cosmos',
   TRX: 'tron',
@@ -50,22 +39,19 @@ const SYMBOL_TO_CHAIN: Record<string, string> = {
   ARB: 'arb',
   AVAX: 'avax',
   BNB: 'bsc',
-  // Dodaj ovdje eventualno još simbola ako ih dodaš u currencies
-  // ADA: 'cardano',
+  // npr. ADA: 'cardano',
 };
 
 export default function OverviewTable() {
   const [data, setData] = React.useState<Resp | null>(null);
-  const [loading, setLoading] = React.useState<boolean>(true);
+  const [loading, setLoading] = React.useState(true);
   const [err, setErr] = React.useState<string | null>(null);
 
-  // Modal state
+  // Modal state – samo što modal treba
   const [modalOpen, setModalOpen] = React.useState(false);
-  const [wallet, setWallet] = React.useState<Wallet | null>(null);
-  const [walletError, setWalletError] = React.useState<string | null>(null);
-  const [walletLoading, setWalletLoading] = React.useState(false);
+  const [modalSymbol, setModalSymbol] = React.useState<string | null>(null);
+  const [modalChain, setModalChain] = React.useState<string | null>(null);
 
-  // Dohvat pregleda
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -74,19 +60,11 @@ export default function OverviewTable() {
         const res = await fetch('/api/public/overview', { cache: 'no-store' });
         const json = (await res.json()) as Resp;
         if (!cancelled) {
-          if (json.ok) {
-            setData(json);
-            setErr(null);
-          } else {
-            setData(null);
-            setErr(json.error ?? 'Unknown error');
-          }
+          if (json.ok) { setData(json); setErr(null); }
+          else { setData(null); setErr(json.error ?? 'Unknown error'); }
         }
       } catch (e: any) {
-        if (!cancelled) {
-          setData(null);
-          setErr(String(e?.message || e));
-        }
+        if (!cancelled) { setData(null); setErr(String(e?.message || e)); }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -94,41 +72,12 @@ export default function OverviewTable() {
     return () => { cancelled = true; };
   }, []);
 
-  // Klik na Participate -> dohvat walleta
-  const openModal = async (symbol: string) => {
+  // Klik na Participate -> samo odredi chain i proslijedi modalu
+  const openModal = (symbol: string) => {
+    const chain = SYMBOL_TO_CHAIN[symbol] ?? symbol.toLowerCase();
+    setModalSymbol(symbol);
+    setModalChain(chain);
     setModalOpen(true);
-    setWallet(null);
-    setWalletError(null);
-    setWalletLoading(true);
-
-    // prevedi display symbol u wallets.chain (lowercase nazivi iz tablice wallets)
-    const chainParam = SYMBOL_TO_CHAIN[symbol] ?? symbol.toLowerCase();
-
-    try {
-      const res = await fetch(`/api/public/wallets?chain=${encodeURIComponent(chainParam)}`, {
-        cache: 'no-store',
-      });
-      const json = await res.json();
-
-      if (json?.ok && json?.wallet) {
-        setWallet(json.wallet as Wallet);
-      } else if (json?.ok && (json?.address || json?.chain)) {
-        const w: Wallet = {
-          chain: (json.chain ?? chainParam) as string,
-          address: json.address as string,
-          memo_tag: json.memo_tag ?? null,
-          explorer_template: json.explorer_template ?? null,
-          uri_scheme: json.uri_scheme ?? null,
-        };
-        setWallet(w);
-      } else {
-        setWalletError(json?.error ?? 'No wallet configured for this chain yet.');
-      }
-    } catch (e: any) {
-      setWalletError(String(e?.message || e));
-    } finally {
-      setWalletLoading(false);
-    }
   };
 
   const badge = (s: Status) =>
@@ -139,13 +88,8 @@ export default function OverviewTable() {
       : 'rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700';
 
   if (loading) {
-    return (
-      <div className="w-full rounded-2xl border border-gray-200 p-6">
-        <div className="text-sm text-gray-500">Loading overview…</div>
-      </div>
-    );
+    return <div className="w-full rounded-2xl border border-gray-200 p-6"><div className="text-sm text-gray-500">Loading overview…</div></div>;
   }
-
   if (err) {
     return (
       <div className="w-full rounded-2xl border border-red-200 bg-red-50 p-6">
@@ -165,7 +109,7 @@ export default function OverviewTable() {
             <div className="text-xs text-gray-500">OK</div>
             <div className="text-2xl font-semibold">{data?.okCount ?? 0}</div>
           </div>
-          <div className="rounded-2xl border p-4">
+        <div className="rounded-2xl border p-4">
             <div className="text-xs text-gray-500">STALE</div>
             <div className="text-2xl font-semibold">{data?.staleCount ?? 0}</div>
           </div>
@@ -192,13 +136,7 @@ export default function OverviewTable() {
                     <div className="flex items-center gap-2">
                       {r.logoUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={r.logoUrl}
-                          alt=""
-                          className="h-5 w-5"
-                          loading="lazy"
-                          aria-hidden="true"
-                        />
+                        <img src={r.logoUrl} alt="" className="h-5 w-5" loading="lazy" aria-hidden="true" />
                       ) : null}
                       <span className="font-medium">{r.symbol}</span>
                     </div>
@@ -229,12 +167,12 @@ export default function OverviewTable() {
         </div>
       </div>
 
+      {/* Modal koji sam radi fetch prema /api/public/wallets?chain=... */}
       <ParticipateModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        wallet={wallet}
-        loading={walletLoading}
-        error={walletError}
+        chain={modalChain ?? undefined}
+        symbol={modalSymbol ?? undefined}
       />
     </>
   );
