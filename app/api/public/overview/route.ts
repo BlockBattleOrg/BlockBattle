@@ -4,13 +4,13 @@ import { createClient } from '@supabase/supabase-js';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// ---- Local types (server-only) ----
+// ---- Local types ----
 type Status = 'ok' | 'stale' | 'issue';
 type Row = {
-  symbol: string;
-  height: number | null;
-  updatedAt: string | null;
-  status: Status;
+  symbol: string;          // prikazni simbol (npr. 'ETH', 'MATIC')
+  height: number | null;   // zadnja visina bloka za današnji dan
+  updatedAt: string | null;// timestamp zadnjeg updatea
+  status: Status;          // ok/stale/issue po starenju zapisa
 };
 type Resp = {
   ok: boolean;
@@ -21,7 +21,7 @@ type Resp = {
   rows: Row[];
   error?: string;
 };
-// -----------------------------------
+// ---------------------
 
 function getSupabase() {
   const url =
@@ -71,33 +71,18 @@ export async function GET(_req: NextRequest) {
       );
     }
     if (!Array.isArray(wallets) || wallets.length === 0) {
-      return NextResponse.json<Resp>({
-        ok: true,
-        total: 0,
-        okCount: 0,
-        staleCount: 0,
-        issueCount: 0,
-        rows: [],
-      });
+      return NextResponse.json<Resp>({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
     }
 
     const use = wallets.some((w: any) => w?.is_active === true)
       ? wallets.filter((w: any) => w?.is_active === true)
       : wallets;
 
-    const currencyIds: number[] = Array.from(
+    const currencyIds: string[] = Array.from(
       new Set(use.map((w: any) => w?.currency_id).filter((x: any) => x != null))
     );
-
     if (currencyIds.length === 0) {
-      return NextResponse.json<Resp>({
-        ok: true,
-        total: 0,
-        okCount: 0,
-        staleCount: 0,
-        issueCount: 0,
-        rows: [],
-      });
+      return NextResponse.json<Resp>({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
     }
 
     // 2) currencies -> symbols
@@ -119,42 +104,41 @@ export async function GET(_req: NextRequest) {
     );
 
     if (symbols.length === 0) {
-      return NextResponse.json<Resp>({
-        ok: true,
-        total: 0,
-        okCount: 0,
-        staleCount: 0,
-        issueCount: 0,
-        rows: [],
-      });
+      return NextResponse.json<Resp>({ ok: true, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] });
     }
 
-    // 3) heights for selected symbols
-    //   Pretpostavljena shema:
-    //   table "heights" s kolonama: symbol (TEXT), height (NUMERIC/BIGINT), updated_at (TIMESTAMPTZ).
-    const { data: heights, error: hErr } = await supabase
-      .from('heights')
-      .select('symbol, height, updated_at')
-      .in('symbol', symbols);
+    // 3) heights_daily za *današnji dan* i tražene chain-ove/simbol(e)
+    //    Shema: heights_daily(day, chain, height, updated_at)
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    const { data: hdRows, error: hErr } = await supabase
+      .from('heights_daily')
+      .select('chain, height, updated_at, day')
+      .eq('day', today)
+      .in('chain', symbols)
+      .order('updated_at', { ascending: false, nullsFirst: false });
 
     if (hErr) {
       return NextResponse.json<Resp>(
-        { ok: false, error: `heights: ${hErr.message}`, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] },
+        { ok: false, error: `heights_daily: ${hErr.message}`, total: 0, okCount: 0, staleCount: 0, issueCount: 0, rows: [] },
         { status: 500 }
       );
     }
 
-    // 4) build rows & counts
-    const bySymbol: Record<string, { height: number | null; updatedAt: string | null }> = {};
-    (heights ?? []).forEach((h: any) => {
-      const s = String(h.symbol).toUpperCase();
-      const height = h.height == null ? null : Number(h.height);
-      const updatedAt = h.updated_at ?? null;
-      bySymbol[s] = { height, updatedAt };
+    // 4) Uzmi najsvježiji zapis po chain-u
+    const latestByChain = new Map<string, { height: number | null; updatedAt: string | null }>();
+    (hdRows ?? []).forEach((r: any) => {
+      const key = String(r.chain).toUpperCase();
+      if (!latestByChain.has(key)) {
+        latestByChain.set(key, {
+          height: r.height == null ? null : Number(r.height),
+          updatedAt: r.updated_at ?? null,
+        });
+      }
     });
 
+    // Ako za neki simbol nema zapisa danas, postavi null-ove
     const rows: Row[] = symbols.map((s) => {
-      const entry = bySymbol[s] ?? { height: null, updatedAt: null };
+      const entry = latestByChain.get(s) ?? { height: null, updatedAt: null };
       return {
         symbol: s,
         height: entry.height,
