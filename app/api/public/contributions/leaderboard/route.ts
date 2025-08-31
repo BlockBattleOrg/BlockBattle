@@ -1,5 +1,7 @@
 // app/api/public/contributions/leaderboard/route.ts
-// Back-compat shim for UI: delegate to the new leaderboard implementation.
+// Back-compat shim: reuse the new leaderboard handler, but export runtime/dynamic as literals
+export { GET } from "../../leaderboard/route";
 
-export { GET, runtime, dynamic } from "../../leaderboard/route";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
