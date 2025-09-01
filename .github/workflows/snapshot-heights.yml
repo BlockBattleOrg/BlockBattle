@@ -1,19 +1,22 @@
-name: Snapshot Heights (daily)
+name: Snapshot Heights (every 2 hours)
+
 on:
   schedule:
-    - cron: "5 0 * * *"   # 00:05 UTC daily
+    - cron: "0 */2 * * *"   # every 2 hours (UTC) on the hour
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - name: Upsert daily heights snapshot
         env:
           BASE: https://www.blockbattle.org
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          set -e
+          set -euo pipefail
           resp="$(curl -sSf -X POST "$BASE/api/admin/snapshot-heights" \
             -H "x-cron-secret: $CRON_SECRET" \
             -H "Cache-Control: no-cache")"
