@@ -1,21 +1,38 @@
-// app/page.tsx
-import OverviewTable from '@/components/OverviewTable';
-import ContributionsPanel from '@/components/ContributionsPanel';
+import Countdown from "@/components/Countdown";
+import BlocksContainer from "@/components/BlocksContainer";
 
-export default function HomePage() {
+export default async function HomePage() {
+  // If you also want the progress bar, set NEXT_PUBLIC_CAMPAIGN_START in Vercel.
+  // We pass only the end ISO here; BlocksContainer handles live data.
+  const campaignEnd = process.env.NEXT_PUBLIC_CAMPAIGN_END ?? "";
+
   return (
-    <main className="mx-auto max-w-5xl px-4 py-10">
-      <header className="mb-8">
-        <h1 className="text-2xl font-bold">BlockBattle</h1>
-        <p className="text-sm text-gray-500">
-          Live chain heights aggregated from scheduled ingestion.
+    <main className="mx-auto max-w-6xl p-6">
+      {/* Hero */}
+      <section className="mb-8">
+        <h1 className="text-3xl font-bold">BlockBattle</h1>
+        <p className="mt-1 max-w-2xl text-sm text-gray-600">
+          A transparent, year-long community challenge. More contributions → more blocks → stronger community signal.
         </p>
-      </header>
 
-      <OverviewTable />
+        <div className="mt-4">
+          <Countdown
+            endIso={campaignEnd}
+            label="Time remaining in this year-long challenge"
+            // Optionally: startIso={process.env.NEXT_PUBLIC_CAMPAIGN_START}
+          />
+        </div>
+      </section>
 
-      {/* Community contributions (leaderboard + recent) */}
-      <ContributionsPanel />
+      {/* Live blocks */}
+      <section className="space-y-3">
+        <h2 className="text-xl font-semibold">Live Community Blocks</h2>
+        <p className="text-sm text-gray-600">
+          Each square represents a contribution. Bigger amount → bigger block. More contributions → more blocks.
+        </p>
+
+        <BlocksContainer limit={200} refreshMs={60000} />
+      </section>
     </main>
   );
 }
