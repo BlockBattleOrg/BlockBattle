@@ -1,9 +1,11 @@
+// app/page.tsx
+export const revalidate = 0;
+export const dynamic = "force-dynamic";
+
 import Countdown from "@/components/Countdown";
 import BlocksContainer from "@/components/BlocksContainer";
 
 export default async function HomePage() {
-  // If you also want the progress bar, set NEXT_PUBLIC_CAMPAIGN_START in Vercel.
-  // We pass only the end ISO here; BlocksContainer handles live data.
   const campaignEnd = process.env.NEXT_PUBLIC_CAMPAIGN_END ?? "";
 
   return (
