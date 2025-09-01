@@ -91,7 +91,7 @@
 ---
 
 ## Phase 9 — Exploratory Visualizations
-- ☐ `[ ]` Tetris grid view
+- ✅ `[x]` Tetris grid view
 - ☐ `[ ]` Three.js 3D prototype
 
 ---
@@ -137,5 +137,6 @@
 - Security: RLS enabled on `heights_daily` (advisor clean).  
 - ✅ CORS allow-list + rate limiting on public routes implemented.  
 - ✅ Normalize `amount_usd` implemented.  
-- ✅ Production-only CORS allow-list + token-bucket RL enabled.
+- ✅ Production-only CORS allow-list + token-bucket RL enabled.  
+- ✅ Tetris grid view implemented with falling animation, auto-refresh and chain filter.
 
