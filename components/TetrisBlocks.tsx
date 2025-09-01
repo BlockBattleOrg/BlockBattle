@@ -12,9 +12,9 @@ export type BlockRow = {
 
 type Props = {
   rows: BlockRow[];
-  columns?: number;         // grid width, default 10
-  minSize?: number;         // px, minimal block size
-  maxSize?: number;         // px, maximal block size
+  columns?: number;   // grid width, default 10
+  minSize?: number;   // px
+  maxSize?: number;   // px
 };
 
 const CHAIN_COLORS: Record<string, string> = {
@@ -41,16 +41,12 @@ function colorForChain(chain: string) {
 }
 
 /**
- * Convert contribution USD amount to square block size in px.
- * We use sqrt scaling to avoid a few whales dominating the view.
+ * Convert USD amount into a square size (px).
+ * Uses sqrt scaling to reduce whale dominance while preserving signal.
  */
 function sizeForAmount(amountUsd: number, min = 18, max = 72) {
   const safe = Math.max(0, amountUsd);
-  // heuristic scaling: sqrt with soft cap
-  const scaled = Math.sqrt(safe);     // 0..∞
-  // normalize by a reference (e.g. $100 -> ~10), then clamp
-  const ref = 10;                      // tweak as needed
-  const px = scaled * ref;
+  const px = Math.sqrt(safe) * 10; // reference factor; tweak as needed
   return Math.max(min, Math.min(px, max));
 }
 
@@ -60,7 +56,7 @@ export default function TetrisBlocks({
   minSize = 18,
   maxSize = 72,
 }: Props) {
-  // Optional: re-order rows so bigger blocks appear first (nicer packing)
+  // Optional: show larger blocks earlier for nicer packing
   const ordered = React.useMemo(
     () => [...rows].sort((a, b) => b.amount_usd - a.amount_usd),
     [rows]
@@ -72,29 +68,23 @@ export default function TetrisBlocks({
 
       <div
         className="grid gap-1"
-        style={{
-          gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-        }}
+        style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
       >
         {ordered.map((r) => {
           const size = sizeForAmount(r.amount_usd, minSize, maxSize);
           const bg = colorForChain(r.chain);
-          const title = `${r.chain.toUpperCase()} • $${r.amount_usd.toFixed(2)} • ${new Date(r.ts).toLocaleString()}`;
+          const title = `${r.chain.toUpperCase()} • $${r.amount_usd.toFixed(
+            2
+          )} • ${new Date(r.ts).toLocaleString()}`;
           const href =
-            r.tx_hash && r.chain
-              ? explorerLink(r.chain, r.tx_hash)
-              : null;
+            r.tx_hash && r.chain ? explorerLink(r.chain, r.tx_hash) : null;
 
           const Block = (
             <div
               key={r.id}
               title={title}
               className="rounded-md shadow-sm transition-transform hover:scale-105"
-              style={{
-                width: `${size}px`,
-                height: `${size}px`,
-                background: bg,
-              }}
+              style={{ width: `${size}px`, height: `${size}px`, background: bg }}
             />
           );
 
@@ -122,7 +112,6 @@ export default function TetrisBlocks({
 
 function Legend() {
   const entries = Object.entries(CHAIN_COLORS);
-  // Hide 'unknown' in legend
   const visible = entries.filter(([k]) => k !== "unknown").slice(0, 12);
 
   return (
@@ -146,16 +135,16 @@ function explorerLink(chain: string, tx: string) {
   if (c === "pol") return `https://polygonscan.com/tx/${tx}`;
   if (c === "bsc") return `https://bscscan.com/tx/${tx}`;
   if (c === "arb") return `https://arbiscan.io/tx/${tx}`;
-  if (c === "op")  return `https://optimistic.etherscan.io/tx/${tx}`;
-  if (c === "avax")return `https://snowtrace.io/tx/${tx}`;
+  if (c === "op") return `https://optimistic.etherscan.io/tx/${tx}`;
+  if (c === "avax") return `https://snowtrace.io/tx/${tx}`;
   if (c === "trx") return `https://tronscan.org/#/transaction/${tx}`;
   if (c === "dot") return `https://polkadot.subscan.io/extrinsic/${tx}`;
-  if (c === "atom")return `https://www.mintscan.io/cosmos/txs/${tx}`;
+  if (c === "atom") return `https://www.mintscan.io/cosmos/txs/${tx}`;
   if (c === "xrp") return `https://xrpscan.com/tx/${tx}`;
   if (c === "xlm") return `https://stellar.expert/explorer/public/tx/${tx}`;
   if (c === "btc") return `https://mempool.space/tx/${tx}`;
   if (c === "ltc") return `https://litecoinspace.org/tx/${tx}`;
-  if (c === "doge")return `https://dogechain.info/tx/${tx}`;
+  if (c === "doge") return `https://dogechain.info/tx/${tx}`;
   if (c === "sol") return `https://solscan.io/tx/${tx}`;
   return "#";
 }

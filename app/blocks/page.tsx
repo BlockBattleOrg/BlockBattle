@@ -1,20 +1,18 @@
 import TetrisBlocks, { BlockRow } from "@/components/TetrisBlocks";
 
 async function fetchBlocks(limit = 200): Promise<BlockRow[]> {
-  // Server-side fetch to our public API (middleware already handles CORS/RL)
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ""}/api/public/blocks/recent?limit=${limit}`, {
-    // Use dynamic for always-fresh data; switch to revalidate:X if you want caching
+  // Use absolute URL for robust SSR; set NEXT_PUBLIC_BASE_URL on Vercel.
+  const base = process.env.NEXT_PUBLIC_BASE_URL ?? "";
+  const res = await fetch(`${base}/api/public/blocks/recent?limit=${limit}`, {
     cache: "no-store",
   });
 
   if (!res.ok) {
     console.error("blocks fetch failed:", res.status);
     return [];
-  }
-
+    }
   const data = await res.json();
-  const rows: BlockRow[] = data?.rows ?? [];
-  return rows;
+  return (data?.rows ?? []) as BlockRow[];
 }
 
 export default async function BlocksPage() {
@@ -25,7 +23,7 @@ export default async function BlocksPage() {
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Community Blocks</h1>
         <p className="text-sm text-gray-600">
-          Each block represents a contribution. Bigger amount → bigger block. More contributions → more blocks.
+          Each square represents a contribution. Bigger amount → bigger block. More contributions → more blocks.
         </p>
       </header>
 
