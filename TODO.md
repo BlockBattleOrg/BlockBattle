@@ -8,85 +8,85 @@
 ## Phase 0 — OPSEC and Standards
 - ✅ `[x]` GitHub noreply identity; hidden real email
 - ✅ `[x]` `.gitignore`, `README.md`, `SECURITY.md`, `LICENSE`
-- ✅ `[x]` `.env.example` (no secrets committed)
+- ✅ `[x]` `.env.example` (no secrets)
 
 ## Phase 1 — Application Skeleton
-- ✅ `[x]` Next.js (App Router, TypeScript, ESLint, Tailwind)
-- ✅ `[x]` Core pages and layout
-- ✅ `[x]` GitHub → Vercel CI/CD (production domain wired)
+- ✅ `[x]` Next.js (App Router, TS, ESLint, Tailwind)
+- ✅ `[x]` Basic pages and layout
+- ✅ `[x]` GitHub → Vercel pipeline (production domain wired)
 
 ## Phase 2 — Database (Supabase) & Security
 - ✅ `[x]` Tables: `currencies`, `wallets`, `contributions`, `aggregates_daily`, `settings`, `heights_daily`
-- ✅ `[x]` RLS enabled (read-only where appropriate)
-- ✅ `[x]` Security review clean (RLS on `heights_daily`)
-- ✅ `[x]` Seed base currencies & wallets (APIs resilient to missing `currency_id`)
+- ✅ `[x]` RLS enabled (read-only where needed)
+- ✅ `[x]` Security Advisor clean (RLS on `heights_daily`)
+- ✅ `[x]` Seeded base currencies & wallets (API tolerant to missing `currency_id`)
 
 ## Phase 3 — Ingestion (Chain Heights & Contributions)
-- ✅ `[x]` Height ingesters (protected via `x-cron-secret`) using NowNodes:
-  **BTC, LTC, DOGE, ETH, OP, ARB, POL (legacy alias `/ingest/matic`), AVAX, DOT, ATOM, XRP, SOL, XLM, TRX, BSC**
-- ✅ `[x]` Height markers in `settings` as `<CHAIN>_last_height`
-- ✅ `[x]` GitHub Actions schedules (hourly, staggered)
-- ✅ `[x]` Native contribution ingest (`<chain>_contrib_last_scanned` markers)
-- ✅ `[x]` FX batch sync (CoinGecko) → fills `contributions.amount_usd` (admin route + cron)
-  - ✅ `[x]` Fixed mapping **MATIC ⇢ POL**
-  - ✅ `[x]` Does not rely on `wallets.symbol` (uses `currencies`)
-- ☐ `[ ]` Telemetry (structured logs) & basic alerting on failures
+- ✅ `[x]` Heights ingest routes (protected by `x-cron-secret`) using **NowNodes**:
+  **BTC, LTC, DOGE, ETH, OP, ARB, POL (alias `/ingest/matic`), AVAX, DOT, ATOM, XRP, SOL, XLM, TRX, BSC**
+- ✅ `[x]` Standardized height markers in `settings` as `<CHAIN>_last_height`
+- ✅ `[x]` GitHub Actions schedules for height ingests (optimized: hourly, staggered)
+- ✅ `[x]` Native **contribution ingest**:
+  - ✅ `[x]` POL (EVM native)
+  - ✅ `[x]` ETH (EVM native)
+  - ✅ `[x]` ATOM (Cosmos LCD/RPC via NowNodes, Supabase integration)
+  - ✅ `[x]` AVAX (EVM native, Supabase integration)
+  - ✅ `[x]` DOT (proxy/core setup, Supabase integration)
+  - ✅ `[x]` OP (EVM native)
+  - ✅ `[x]` ARB (EVM native)
+  - ✅ `[x]` All chains maintain `<chain>_contrib_last_scanned` markers in `settings`
+  - ✅ `[x]` GitHub Actions contrib ingests (optimized: every 3h, staggered)
+- ✅ `[x]` Normalize `amount_usd` (FX integration) and write to `contributions.amount_usd`
+- ☐ `[ ]` Telemetry (structured logs) & basic alerts on failure
 
-**Acceptance (P3):** all ingest endpoints return `{ ok: true }`; `settings` markers update consistently.
+**Phase 3 acceptance:** All ingest routes return `{ ok: true, ... }`, and `settings` markers advance per run.
 
 ---
 
 ## Phase 4 — Aggregation & Public API
-- ✅ `[x]` `/api/public/overview` (heights summary)
-  - ✅ `[x]` based on `heights_daily`
-  - ✅ `[x]` alias display: `POL→MATIC`, `BSC→BNB`
-  - ✅ `[x]` status thresholds: **OK ≤ 6h**, **STALE 6–24h**, **ISSUE > 24h**
-- ✅ `[x]` `/api/public/wallets` (donation address by `wallets.chain`)
-- ✅ `[x]` Public leaderboard (native + USD):
-  - ✅ `[x]` `?order=usd` + `usd_total`
-  - ✅ `[x]` compat route `/api/public/contributions/leaderboard`
-  - ✅ `[x]` server env: service-role preferred; anon fallback
-- ✅ `[x]` Recent contributions include `amount_usd`
-- ✅ `[x]` APIs marked **dynamic** / `no-store`
-- ✅ `[x]` Rollups: heights daily @00:05 UTC; contributions every 2h
-- 🟡 `[~]` Stale/latency metadata in `/api/public/overview`
-- ☐ `[ ]` CORS allow-list + lightweight rate limiting
+- ✅ `[x]` `/api/public/overview` (heights summary consumed by homepage)
+- ✅ `[x]` `/api/public/wallets` (fetch donation address by chain)
+- ✅ `[x]` `/api/public/contributions/leaderboard`
+- ✅ `[x]` `/api/public/contributions/recent`
+- ✅ `[x]` APIs marked **dynamic** (`no-store`) to avoid stale data
+- ✅ `[x]` Daily rollups (`/api/admin/snapshot-heights` + cron at 00:05 UTC) for contributions & heights
+- ✅ `[x]` Contributions rollup job adjusted to 2-hourly schedule
+- 🟡 `[~]` Stale/latency metadata in `/api/public/overview` (endpoint works, metadata not yet added)
+- ✅ `[x]` CORS allow-list + lightweight rate limiting on public routes
 
-**Acceptance (P4):** UI consumes real data; USD totals available; responses remain fresh and fast.
+**Phase 4 acceptance:** UI reads real data via public API; responses are fresh and fast.
 
 ---
 
 ## Phase 5 — UI (Live Data)
-- ✅ `[x]` Chain Heights table (live)
-- ✅ `[x]` **Participate** modal with QR (wired to `/api/public/wallets?chain=...`)
-  - ✅ `[x]` display-symbol → `wallets.chain` mapping (e.g., `MATIC → pol`, `BNB → bsc`)
-  - ✅ `[x]` QR generation and copy-to-clipboard
-- ✅ `[x]` Contributions panel: clear headings (“Totals by chain” / “Recent”), USD columns, explorer links
-- ✅ `[x]` Chain logos (SVG) in `public/logos/crypto/`
-- ✅ `[x]` Native amounts with full precision
-- ✅ `[x]` Status badges (OK/STALE/ISSUE) from API metadata
-- ☐ `[ ]` Polish empty/loading/error states
+- ✅ `[x]` Heights table uses live values
+- ✅ `[x]` “Participate” modal with QR (dynamic import of `qrcode`)
+- ✅ `[x]` Contributions panel (Leaderboard + Recent)
+- ✅ `[x]` Explorer links (Etherscan/Polygonscan) for recent tx
+- ✅ `[x]` Amount rendering with full native precision per chain (no confusing “0”)
+- ☐ `[ ]` Status badges per chain (OK/STALE/ERR) sourced from API metadata
+- ☐ `[ ]` Empty/loading/error states polish across the app
 
 ---
 
 ## Phase 6 — Community Blocks (Top 15) — optional
-- ☐ `[ ]]` Treemap (“battle view”) using Recharts; fed by overview/rollups
+- ☐ `[ ]` Treemap (“battle” view) using Recharts; fed by overview/rollups
 
 ---
 
-## Phase 7 — Domain, Security, Performance
+## Phase 7 — Domain, Security, Perf
 - ✅ `[x]` `blockbattle.org` live on Vercel
 - ☐ `[ ]` Optional Cloudflare proxy
-- ☐ `[ ]` CORS allow-list → production origin only
-- ☐ `[ ]` Token-bucket rate limiting on public APIs
-- ✅ `[x]` `/api/health`
+- ✅ `[x]` CORS allow-list → production origin only
+- ✅ `[x]` Token-bucket rate limit on public API
+- ✅ `[x]` `/api/health` implemented
 - ☐ `[ ]` Centralized structured logging
 
 ---
 
 ## Phase 8 — Post-MVP
-- 🟡 `[~]` FX real-time on insert (keep batch as fallback)
-- ☐ `[ ]` Token donations (ERC-20 `Transfer` logs on project wallets)
+- ☐ `[ ]` FX aggregator (CoinGecko/proxy) → fill `amount_usd` at insert time
+- ☐ `[ ]` Token donations (ERC-20 `Transfer` logs to project wallets)
 
 ---
 
@@ -96,45 +96,46 @@
 
 ---
 
-## Tech Debt & Cleanup
+## Tech-Debt & Cleanup
 - 🟡 `[~]` ENV cleanup
   - ✅ `[x]` Keep: `NOWNODES_API_KEY`, `CRON_SECRET`, `SUPABASE_*`, per-chain `*_RPC_URL`
   - ✅ `[x]` AVAX RPC must include `/ext/bc/C/rpc`
-  - 🟡 `[~]` BTC via Blockstream/Mempool → `BTC_API_BASE`
-  - 🟡 `[~]` Remove legacy groups (`*_RPC_URLS`, old DOGE/LTC tunables) when unused
-- 🟡 `[~]` Keep `/ingest/matic` alias temporarily; remove once all schedulers use `/ingest/pol`
-- ☐ `[ ]` Uniform error payloads across ingest routes
-- ☐ `[ ]` Unit tests for helpers; smoke tests for public APIs
-
----
-
-## Known Aliases (display → wallets.chain)
-- `MATIC` → `pol`
-- `BNB` → `bsc`
-- (add more as needed)
+  - 🟡 `[~]` BTC uses Blockstream/Mempool → keep `BTC_API_BASE`
+  - 🟡 `[~]` Remove legacy groups (`*_RPC_URLS`, old DOGE/LTC tunables) once unused
+  - 🟡 `[~]` Keep `/ingest/matic` alias temporarily; remove when all schedulers call `/ingest/pol`
+- ☐ `[ ]` Uniform error payload across ingest routes
+- ☐ `[ ]` Unit tests for helpers; smoke tests for APIs
 
 ---
 
 ## Immediate Next Steps
-1. FX real-time on insert (retain batch as fallback).  
-2. CORS + rate limiting on public routes.  
-3. Add stale/latency metadata to `/api/public/overview` and surface in UI.  
-4. Polish loading/empty/error states on key components.
+1. ✅ **Cron optimization across all chains** (hourly heights, 3h contrib, staggered).  
+2. ✅ **Rollups**: heights daily @00:05, contributions every 2h @:05.  
+3. **UI polish**: status badges (OK/STALE/ERR), loading/empty states.
 
 ---
 
 ### ENV (production)
-- `NOWNODES_API_KEY`, `CRON_SECRET`  
-- `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`  
+- `NOWNODES_API_KEY`, `CRON_SECRET`
+- `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - Per-chain RPCs: `ETH_RPC_URL`, `OP_RPC_URL`, `ARB_RPC_URL`, `POL_RPC_URL`, `AVAX_RPC_URL`,  
-  `DOT_RPC_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`, `BSC_RPC_URL`  
+  `DOT_RPC_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`, `BSC_RPC_URL`
 - BTC: `BTC_API_BASE` (Blockstream/Mempool)
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (for rate limiting)
 
 ---
 
-## Changelog (2025-08-31)
-- **Overview API:** switched to `heights_daily`; alias display `POL→MATIC`, `BSC→BNB`; status thresholds 6h/24h.  
-- **Wallets API:** called with `?chain=<wallets.chain>`; frontend maps from `currencies.symbol`.  
-- **Participate modal:** restored and wired; QR + copy.  
-- **UI:** Chain Heights with SVG logos, Participate actions, and status badges.
+## Changelog (today)
+- All ingest workflows reduced to hourly (heights) and 3-hourly (contrib), staggered.  
+- Rollup contributions job changed to 2-hourly.  
+- Snapshot-heights confirmed daily at 00:05 UTC.  
+- DOT, OP, ARB contrib routes + cron workflows added.  
+- ATOM/AVAX contrib routes aligned to proxy pattern (core ingest).  
+- All 16 chain ingest routes confirmed green (including BSC).  
+- Public contributions API: dynamic `no-store` + correct FK joins.  
+- UI: explorer links + full-precision amounts.  
+- Security: RLS enabled on `heights_daily` (advisor clean).  
+- ✅ CORS allow-list + rate limiting on public routes implemented.  
+- ✅ Normalize `amount_usd` implemented.  
+- ✅ Production-only CORS allow-list + token-bucket RL enabled.
 
