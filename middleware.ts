@@ -23,14 +23,12 @@ export async function middleware(req: NextRequest) {
   try {
     const limiter = getRateLimiter();
     if (limiter) {
-      // Use client IP (works behind Vercel’s proxy)
       const ip =
         req.ip ??
         req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
         req.headers.get("x-real-ip") ??
         "0.0.0.0";
 
-      // Example policy: 60 requests / 5 minutes per IP (sliding window)
       const { success, limit, remaining, reset } = await limiter.limit(ip);
 
       if (!success) {
@@ -48,7 +46,7 @@ export async function middleware(req: NextRequest) {
       }
     }
   } catch {
-    // If limiter init fails (e.g., missing envs), continue without rate limiting
+    // If limiter init fails, continue without rate limiting
   }
 
   // 3) Forward to route handler; attach CORS headers on the way out
