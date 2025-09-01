@@ -4,6 +4,7 @@ export const dynamic = "force-dynamic";
 
 import Countdown from "@/components/Countdown";
 import BlocksContainer from "@/components/BlocksContainer";
+import OverviewSection from "@/components/OverviewSection";
 
 export default async function HomePage() {
   const campaignEnd = process.env.NEXT_PUBLIC_CAMPAIGN_END ?? "";
@@ -21,7 +22,6 @@ export default async function HomePage() {
           <Countdown
             endIso={campaignEnd}
             label="Time remaining in this year-long challenge"
-            // Optionally: startIso={process.env.NEXT_PUBLIC_CAMPAIGN_START}
           />
         </div>
       </section>
@@ -35,6 +35,9 @@ export default async function HomePage() {
 
         <BlocksContainer limit={200} refreshMs={60000} />
       </section>
+
+      {/* Existing overview below */}
+      <OverviewSection />
     </main>
   );
 }
