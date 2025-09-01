@@ -1,0 +1,140 @@
+"use client";
+
+import * as React from "react";
+import TetrisBlocks, { BlockRow } from "./TetrisBlocks";
+
+type Props = {
+  limit?: number;
+  refreshMs?: number; // auto-refresh interval
+  defaultChain?: string | null; // e.g. "eth" or null = All
+};
+
+// A small, fixed list is faster than dynamic discovery and covers our supported chains.
+const CHAIN_OPTIONS = [
+  { value: "", label: "All chains" },
+  { value: "eth", label: "ETH" },
+  { value: "bsc", label: "BSC" },
+  { value: "pol", label: "POL" },
+  { value: "arb", label: "ARB" },
+  { value: "op",  label: "OP"  },
+  { value: "avax",label: "AVAX"},
+  { value: "btc", label: "BTC" },
+  { value: "ltc", label: "LTC" },
+  { value: "doge",label: "DOGE"},
+  { value: "sol", label: "SOL" },
+  { value: "xrp", label: "XRP" },
+  { value: "xlm", label: "XLM" },
+  { value: "trx", label: "TRX" },
+  { value: "dot", label: "DOT" },
+  { value: "atom",label: "ATOM"},
+];
+
+export default function BlocksContainer({
+  limit = 200,
+  refreshMs = 60000,
+  defaultChain = null,
+}: Props) {
+  const [rows, setRows] = React.useState<BlockRow[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [chain, setChain] = React.useState<string>(defaultChain ?? "");
+
+  const fetchOnce = React.useCallback(async (signal?: AbortSignal) => {
+    try {
+      setLoading(true);
+      setError(null);
+      const base = process.env.NEXT_PUBLIC_BASE_URL ?? "";
+      const qs = new URLSearchParams();
+      qs.set("limit", String(limit));
+      if (chain) qs.set("chain", chain);
+      const url = `${base}/api/public/blocks/recent?${qs.toString()}`;
+      const res = await fetch(url, { cache: "no-store", signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setRows((data?.rows ?? []) as BlockRow[]);
+    } catch (e: any) {
+      if (e?.name === "AbortError") return;
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }, [limit, chain]);
+
+  // initial + auto refresh
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    fetchOnce(ctrl.signal);
+
+    // auto refresh ticker
+    const id = window.setInterval(() => {
+      const rCtrl = new AbortController();
+      fetchOnce(rCtrl.signal);
+    }, Math.max(10000, refreshMs)); // minimum 10s to be gentle with rate limit
+
+    return () => {
+      ctrl.abort();
+      window.clearInterval(id);
+    };
+  }, [fetchOnce, refreshMs]);
+
+  return (
+    <section className="space-y-4">
+      <Toolbar
+        chain={chain}
+        onChainChange={setChain}
+        loading={loading}
+        error={error}
+        onRefresh={() => fetchOnce()}
+      />
+
+      <TetrisBlocks rows={rows} columns={10} />
+    </section>
+  );
+}
+
+function Toolbar(props: {
+  chain: string;
+  onChainChange: (v: string) => void;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const { chain, onChainChange, loading, error, onRefresh } = props;
+
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <label className="text-sm text-gray-600">
+        Chain:
+        <select
+          className="ml-2 rounded-md border px-2 py-1 text-sm"
+          value={chain}
+          onChange={(e) => onChainChange(e.target.value)}
+        >
+          {CHAIN_OPTIONS.map((opt) => (
+            <option key={opt.value || "all"} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <button
+        type="button"
+        onClick={onRefresh}
+        className="rounded-md border px-3 py-1 text-sm hover:bg-gray-50 active:scale-[0.99]"
+        disabled={loading}
+      >
+        {loading ? "Refreshing…" : "Refresh now"}
+      </button>
+
+      {error ? (
+        <span className="text-sm text-red-600">Error: {error}</span>
+      ) : (
+        <span className="text-sm text-gray-500">
+          {loading ? "Loading…" : "Live view (auto-refresh)"}
+        </span>
+      )}
+    </div>
+  );
+}
+
