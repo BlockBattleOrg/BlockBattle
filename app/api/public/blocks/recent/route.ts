@@ -2,32 +2,50 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-export const runtime = "nodejs"; // use Node runtime (service role key, stable crypto)
+export const runtime = "nodejs";
 
-type RawRow = {
+type Contribution = {
   id: string | number;
-  chain?: string | null;
-  symbol?: string | null;
-  currency_id?: string | number | null;
-  amount_usd?: number | null;
-  amount?: number | null; // fallback, if USD missing
+  currency_id: string | number | null;
+  amount_usd: number | null;
+  amount?: number | null;   // optional fallback if exists
   timestamp?: string | null;
   ts?: string | null;
   tx_hash?: string | null;
 };
 
+type Currency = {
+  id: string | number;
+  // schema-flexible: try common fields; use what exists
+  chain?: string | null;
+  symbol?: string | null;
+  code?: string | null;
+  slug?: string | null;
+  name?: string | null;
+};
+
 type BlockRow = {
   id: string;
-  chain: string;        // canonical lower-case (e.g., 'eth', 'bsc', 'pol')
+  chain: string;        // canonical lower-case (e.g., 'eth', 'bsc', 'pol', ...)
   amount_usd: number;   // >= 0
   ts: string;           // ISO timestamp
   tx_hash: string | null;
 };
 
-function normalizeChain(input?: string | null, symbol?: string | null, currencyId?: string | number | null): string {
-  // Priority: explicit chain -> symbol -> currency_id
-  const v = (input ?? symbol ?? String(currencyId ?? "")).toString().trim().toLowerCase();
+function normalizeChain(
+  fromCurrencies: Partial<Currency> | undefined,
+  fallbackCurrencyId: string | number | null
+): string {
+  const vRaw =
+    (fromCurrencies?.chain ??
+      fromCurrencies?.symbol ??
+      fromCurrencies?.code ??
+      fromCurrencies?.slug ??
+      String(fallbackCurrencyId ?? "")) || "";
+
+  const v = vRaw.toString().trim().toLowerCase();
   if (!v) return "unknown";
+
   // Common aliases
   if (v === "matic" || v === "pol" || v === "polygon") return "pol";
   if (v === "bsc" || v === "bnb" || v === "binance-smart-chain" || v === "binance") return "bsc";
@@ -44,24 +62,14 @@ function normalizeChain(input?: string | null, symbol?: string | null, currencyI
   if (v === "ltc" || v === "litecoin") return "ltc";
   if (v === "doge" || v === "dogecoin") return "doge";
   if (v === "sol" || v === "solana") return "sol";
+
   return v;
 }
 
 function normalizeTs(input?: string | null, fallback?: string | null): string {
   const raw = input ?? fallback ?? new Date().toISOString();
-  // Ensure valid ISO string
   const d = new Date(raw);
   return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
-}
-
-function toBlockRow(r: RawRow): BlockRow {
-  return {
-    id: String(r.id),
-    chain: normalizeChain(r.chain, r.symbol, r.currency_id),
-    amount_usd: typeof r.amount_usd === "number" ? r.amount_usd : Math.max(0, Number(r.amount ?? 0)),
-    ts: normalizeTs(r.timestamp, r.ts),
-    tx_hash: r.tx_hash ?? null,
-  };
 }
 
 function parseLimit(searchParams: URLSearchParams, def = 200, max = 500): number {
@@ -83,7 +91,7 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const limit = parseLimit(url.searchParams, 200, 500);
-    const chains = parseChains(url.searchParams); // optional filter
+    const chainsFilter = parseChains(url.searchParams); // optional
 
     const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -99,40 +107,54 @@ export async function GET(req: Request) {
       auth: { persistSession: false },
     });
 
-    // Select a superset of fields (defensive) and normalize in app layer.
-    // Order by newest contribution timestamp (use 'timestamp' if present; otherwise 'ts' or 'id' fallback)
-    // Note: If your schema uses different column names, adapt them here.
-    let query = supabase
+    // 1) Fetch recent contributions
+    const contribQuery = supabase
       .from("contributions")
-      .select("id, chain, symbol, currency_id, amount_usd, amount, timestamp, ts, tx_hash")
-      .order("timestamp", { ascending: false, nullsFirst: false });
+      .select("id, currency_id, amount_usd, amount, timestamp, ts, tx_hash")
+      .order("timestamp", { ascending: false })
+      .limit(limit);
 
-    // If 'timestamp' is missing in some rows, fallback secondary order to 'ts' then 'id'
-    // Supabase doesn't support multi-column order in a single call nicely across nulls,
-    // but results will be "newest-first" enough for recent data. Optionally you can re-sort in app code.
+    const { data: contribs, error: cErr } = await contribQuery;
+    if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
 
-    // Apply chain filter if provided
-    if (chains && chains.length > 0) {
-      // We'll filter after fetch to leverage normalizeChain() across aliases
-      // (e.g. 'bsc' and 'bnb' should be treated the same).
-      // To keep bandwidth sane, keep the SQL limit reasonable (e.g., 1000) and then slice on app side.
-      query = query.limit(Math.min(limit * 3, 1000)); // overfetch x3 if filtering client-side
-      const { data, error } = await query;
-      if (error) {
-        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-      }
-      const rows = (data ?? []).map(toBlockRow).filter((r) => chains.includes(r.chain)).slice(0, limit);
-      return NextResponse.json({ ok: true, rows, count: rows.length }, { status: 200 });
+    // Early return if nothing
+    const list = contribs ?? [];
+    if (list.length === 0) {
+      return NextResponse.json({ ok: true, rows: [], count: 0 }, { status: 200 });
     }
 
-    // No chain filter: fetch exactly 'limit'
-    query = query.limit(limit);
-    const { data, error } = await query;
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    // 2) Fetch currencies map
+    const { data: currencies, error: curErr } = await supabase
+      .from("currencies")
+      .select("id, chain, symbol, code, slug, name");
+    if (curErr) return NextResponse.json({ ok: false, error: curErr.message }, { status: 500 });
+
+    const cmap = new Map<string | number, Currency>();
+    (currencies ?? []).forEach((c) => cmap.set(c.id, c));
+
+    // 3) Build rows with normalized chain & ts
+    let rows: BlockRow[] = list.map((r: Contribution) => {
+      const meta = r.currency_id != null ? cmap.get(r.currency_id) : undefined;
+      const chain = normalizeChain(meta, r.currency_id);
+      const amountUsd =
+        typeof r.amount_usd === "number"
+          ? r.amount_usd
+          : Math.max(0, Number(r.amount ?? 0));
+      const ts = normalizeTs(r.timestamp, r.ts);
+      return {
+        id: String(r.id),
+        chain,
+        amount_usd: amountUsd,
+        ts,
+        tx_hash: r.tx_hash ?? null,
+      };
+    });
+
+    // Optional chain filter
+    if (chainsFilter && chainsFilter.length > 0) {
+      rows = rows.filter((r) => chainsFilter.includes(r.chain));
     }
 
-    const rows = (data ?? []).map(toBlockRow);
     return NextResponse.json({ ok: true, rows, count: rows.length }, { status: 200 });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: String(err?.message ?? err) }, { status: 500 });
