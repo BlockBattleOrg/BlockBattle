@@ -1,107 +1,59 @@
 // middleware.ts
-import { NextResponse, NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from "next/server";
+import { applyCors } from "./lib/cors";
+import { getRateLimiter } from "./lib/rate-limit";
 
-// Public API scope we protect
-const PUBLIC_PREFIX = '/api/public';
-
-// Allowed origin in production
-const PROD_ORIGIN = 'https://www.blockbattle.org';
-
-// Simple per-IP token bucket (best-effort, per instance)
-type Bucket = { tokens: number; last: number; capacity: number; refillMs: number };
-const buckets: Map<string, Bucket> = (globalThis as any).__BB_BUCKETS__ ?? new Map();
-(globalThis as any).__BB_BUCKETS__ = buckets;
-
-function take(key: string, capacity: number, refillMs: number) {
-  const now = Date.now();
-  let b = buckets.get(key);
-  if (!b) {
-    b = { tokens: capacity, last: now, capacity, refillMs };
-    buckets.set(key, b);
-  }
-  const elapsed = now - b.last;
-  if (elapsed > 0) {
-    const refill = (elapsed / b.refillMs) * b.capacity;
-    b.tokens = Math.min(b.capacity, b.tokens + refill);
-    b.last = now;
-  }
-  if (b.tokens < 1) return { ok: false, remaining: 0, retryAfter: Math.ceil(b.refillMs / b.capacity) };
-  b.tokens -= 1;
-  return { ok: true, remaining: Math.floor(b.tokens) };
-}
-
-function getClientIp(req: NextRequest) {
-  const fwd = req.headers.get('x-forwarded-for');
-  if (fwd) return fwd.split(',')[0].trim();
-  // Vercel sets x-real-ip sometimes
-  const real = req.headers.get('x-real-ip');
-  if (real) return real.trim();
-  return 'unknown';
-}
-
-function ruleFor(pathname: string) {
-  // per-route limits
-  if (pathname.startsWith('/api/public/overview')) {
-    return { cap: 60, refillMs: 5 * 60 * 1000, name: 'overview' }; // 60 / 5min / IP
-  }
-  if (pathname.startsWith('/api/public/chain/')) {
-    return { cap: 120, refillMs: 5 * 60 * 1000, name: 'chain' }; // 120 / 5min / IP
-  }
-  // default public
-  return { cap: 60, refillMs: 5 * 60 * 1000, name: 'public' };
-}
+// Run only for public API routes
+export const config = {
+  matcher: ["/api/public/:path*"],
+};
 
 export async function middleware(req: NextRequest) {
-  const { pathname } = req.nextUrl;
+  const origin = req.headers.get("origin") || "";
+  const method = req.method.toUpperCase();
 
-  // Only guard public API
-  if (!pathname.startsWith(PUBLIC_PREFIX)) {
-    return NextResponse.next();
+  // 1) Handle CORS preflight early
+  if (method === "OPTIONS") {
+    const res = new NextResponse(null, { status: 204 });
+    applyCors(res, origin, req);
+    return res;
   }
 
-  const origin = req.headers.get('origin') || '';
-  const isProd = process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production';
-  const allowOrigin = isProd ? PROD_ORIGIN : origin || '*';
+  // 2) Lightweight rate limiting (graceful fallback if env vars are missing)
+  try {
+    const limiter = getRateLimiter();
+    if (limiter) {
+      // Use client IP (works behind Vercel’s proxy)
+      const ip =
+        req.ip ??
+        req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        req.headers.get("x-real-ip") ??
+        "0.0.0.0";
 
-  const corsHeaders: Record<string, string> = {
-    'Access-Control-Allow-Origin': allowOrigin,
-    'Vary': 'Origin',
-    'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  };
+      // Example policy: 60 requests / 5 minutes per IP (sliding window)
+      const { success, limit, remaining, reset } = await limiter.limit(ip);
 
-  // Handle preflight
-  if (req.method === 'OPTIONS') {
-    return new NextResponse(null, { status: 204, headers: corsHeaders });
+      if (!success) {
+        const retryAfter = Math.max(0, Math.ceil((reset - Date.now()) / 1000));
+        const res = NextResponse.json(
+          { ok: false, error: "Rate limit exceeded. Please try again later." },
+          { status: 429 }
+        );
+        applyCors(res, origin, req);
+        res.headers.set("Retry-After", String(retryAfter));
+        res.headers.set("X-RateLimit-Limit", String(limit));
+        res.headers.set("X-RateLimit-Remaining", String(remaining));
+        res.headers.set("X-RateLimit-Reset", String(Math.floor(reset / 1000)));
+        return res;
+      }
+    }
+  } catch {
+    // If limiter init fails (e.g., missing envs), continue without rate limiting
   }
 
-  // Rate-limit
-  const { cap, refillMs, name } = ruleFor(pathname);
-  const ip = getClientIp(req);
-  const key = `${name}:${ip}`;
-  const res = take(key, cap, refillMs);
-  if (!res.ok) {
-    const r = NextResponse.json(
-      { ok: false, error: 'Too Many Requests' },
-      { status: 429 }
-    );
-    r.headers.set('Retry-After', String(res.retryAfter));
-    r.headers.set('X-RateLimit-Limit', String(cap));
-    r.headers.set('X-RateLimit-Remaining', '0');
-    Object.entries(corsHeaders).forEach(([k, v]) => r.headers.set(k, v));
-    return r;
-  }
-
-  // Pass through and attach CORS + RL headers
-  const next = NextResponse.next();
-  next.headers.set('X-RateLimit-Limit', String(cap));
-  next.headers.set('X-RateLimit-Remaining', String(res.remaining));
-  Object.entries(corsHeaders).forEach(([k, v]) => next.headers.set(k, v));
-  return next;
+  // 3) Forward to route handler; attach CORS headers on the way out
+  const res = NextResponse.next();
+  applyCors(res, origin, req);
+  return res;
 }
-
-// Only run middleware for public API
-export const config = {
-  matcher: ['/api/public/:path*'],
-};
 
