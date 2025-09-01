@@ -4,25 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
-type Contribution = {
-  id: string | number;
-  currency_id: string | number | null;
-  amount_usd: number | null;
-  amount?: number | null;   // optional fallback if exists
-  timestamp?: string | null;
-  ts?: string | null;
-  tx_hash?: string | null;
-};
-
-type Currency = {
-  id: string | number;
-  // schema-flexible: try common fields; use what exists
-  chain?: string | null;
-  symbol?: string | null;
-  code?: string | null;
-  slug?: string | null;
-  name?: string | null;
-};
+type AnyRow = Record<string, any>;
 
 type BlockRow = {
   id: string;
@@ -32,21 +14,18 @@ type BlockRow = {
   tx_hash: string | null;
 };
 
-function normalizeChain(
-  fromCurrencies: Partial<Currency> | undefined,
-  fallbackCurrencyId: string | number | null
-): string {
+function normalizeChainFromCurrency(meta?: AnyRow, fallback?: string | number | null): string {
   const vRaw =
-    (fromCurrencies?.chain ??
-      fromCurrencies?.symbol ??
-      fromCurrencies?.code ??
-      fromCurrencies?.slug ??
-      String(fallbackCurrencyId ?? "")) || "";
+    (meta?.chain ??
+      meta?.symbol ??
+      meta?.code ??
+      meta?.slug ??
+      (fallback != null ? String(fallback) : "")) || "";
 
   const v = vRaw.toString().trim().toLowerCase();
   if (!v) return "unknown";
 
-  // Common aliases
+  // Common aliases -> canonical keys used in UI
   if (v === "matic" || v === "pol" || v === "polygon") return "pol";
   if (v === "bsc" || v === "bnb" || v === "binance-smart-chain" || v === "binance") return "bsc";
   if (v === "eth" || v === "ethereum") return "eth";
@@ -72,19 +51,47 @@ function normalizeTs(input?: string | null, fallback?: string | null): string {
   return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
 }
 
-function parseLimit(searchParams: URLSearchParams, def = 200, max = 500): number {
-  const v = Number(searchParams.get("limit") ?? def);
+function parseLimit(sp: URLSearchParams, def = 200, max = 500): number {
+  const v = Number(sp.get("limit") ?? def);
   if (!Number.isFinite(v) || v <= 0) return def;
   return Math.min(Math.trunc(v), max);
 }
 
-function parseChains(searchParams: URLSearchParams): string[] | null {
-  const chain = searchParams.get("chain"); // e.g. "eth" or "eth,bsc"
+function parseChains(sp: URLSearchParams): string[] | null {
+  const chain = sp.get("chain"); // e.g. "eth" or "eth,bsc"
   if (!chain) return null;
   return chain
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
+}
+
+// Try contributions ordering by a list of candidate columns (first that works)
+async function fetchContributions(
+  supabase: ReturnType<typeof createClient>,
+  limit: number
+): Promise<AnyRow[]> {
+  const orderCandidates = [
+    { col: "timestamp", asc: false },
+    { col: "created_at", asc: false },
+    { col: "id", asc: false },
+  ];
+
+  for (const cand of orderCandidates) {
+    const q = supabase.from("contributions").select("*").order(cand.col as any, { ascending: cand.asc === true ? true : false }).limit(limit);
+    const { data, error } = await q;
+    if (!error) return data ?? [];
+    // If the error is "column does not exist", try next; otherwise rethrow
+    const msg = String(error.message || "");
+    if (!/column .* does not exist/i.test(msg)) {
+      throw error;
+    }
+  }
+
+  // As a last resort: plain select without order
+  const { data, error } = await supabase.from("contributions").select("*").limit(limit);
+  if (error) throw error;
+  return data ?? [];
 }
 
 export async function GET(req: Request) {
@@ -95,7 +102,6 @@ export async function GET(req: Request) {
 
     const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       return NextResponse.json(
         { ok: false, error: "Supabase env missing (URL or SERVICE_ROLE_KEY)" },
@@ -107,40 +113,84 @@ export async function GET(req: Request) {
       auth: { persistSession: false },
     });
 
-    // 1) Fetch recent contributions
-    const contribQuery = supabase
-      .from("contributions")
-      .select("id, currency_id, amount_usd, amount, timestamp, ts, tx_hash")
-      .order("timestamp", { ascending: false })
-      .limit(limit);
+    // 1) Fetch recent contributions (robust to schema differences)
+    const contribs = await fetchContributions(supabase, limit);
 
-    const { data: contribs, error: cErr } = await contribQuery;
-    if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
-
-    // Early return if nothing
-    const list = contribs ?? [];
-    if (list.length === 0) {
+    if (contribs.length === 0) {
       return NextResponse.json({ ok: true, rows: [], count: 0 }, { status: 200 });
     }
 
-    // 2) Fetch currencies map
-    const { data: currencies, error: curErr } = await supabase
-      .from("currencies")
-      .select("id, chain, symbol, code, slug, name");
-    if (curErr) return NextResponse.json({ ok: false, error: curErr.message }, { status: 500 });
+    // 2) Collect keys for mapping
+    const currencyIds = new Set<string | number>();
+    const walletIds = new Set<string | number>();
 
-    const cmap = new Map<string | number, Currency>();
-    (currencies ?? []).forEach((c) => cmap.set(c.id, c));
+    for (const r of contribs) {
+      if (r.currency_id != null) currencyIds.add(r.currency_id);
+      if (r.wallet_id != null) walletIds.add(r.wallet_id);
+    }
 
-    // 3) Build rows with normalized chain & ts
-    let rows: BlockRow[] = list.map((r: Contribution) => {
-      const meta = r.currency_id != null ? cmap.get(r.currency_id) : undefined;
-      const chain = normalizeChain(meta, r.currency_id);
+    // 3) If we lack currency_id for some rows but have wallet_id, fetch wallets to map wallet -> currency_id
+    let walletMap = new Map<string | number, AnyRow>();
+    if (walletIds.size > 0) {
+      const { data: wallets, error: wErr } = await supabase
+        .from("wallets")
+        .select("*")
+        .in("id", Array.from(walletIds));
+      if (wErr) {
+        // If table/column doesn't exist, continue gracefully
+        walletMap = new Map();
+      } else {
+        walletMap = new Map(wallets.map((w: AnyRow) => [w.id, w]));
+        // collect missing currency_ids from wallets
+        for (const r of contribs) {
+          if (r.currency_id == null && r.wallet_id != null) {
+            const w = walletMap.get(r.wallet_id);
+            if (w?.currency_id != null) currencyIds.add(w.currency_id);
+          }
+        }
+      }
+    }
+
+    // 4) Fetch currencies map (id -> meta) if we have any currency ids; otherwise fetch all (cheap)
+    let currencyMap = new Map<string | number, AnyRow>();
+    if (currencyIds.size > 0) {
+      const { data: currencies, error: cErr } = await supabase
+        .from("currencies")
+        .select("*")
+        .in("id", Array.from(currencyIds));
+      if (!cErr) {
+        currencyMap = new Map(currencies.map((c: AnyRow) => [c.id, c]));
+      }
+    } else {
+      const { data: currencies, error: cErr } = await supabase
+        .from("currencies")
+        .select("*");
+      if (!cErr) {
+        currencyMap = new Map((currencies ?? []).map((c: AnyRow) => [c.id, c]));
+      }
+    }
+
+    // 5) Build rows
+    let rows: BlockRow[] = contribs.map((r: AnyRow) => {
+      // amount_usd (fallback to 'amount' or 0)
       const amountUsd =
         typeof r.amount_usd === "number"
           ? r.amount_usd
           : Math.max(0, Number(r.amount ?? 0));
-      const ts = normalizeTs(r.timestamp, r.ts);
+
+      // timestamp normalization
+      const ts = normalizeTs(r.timestamp, r.ts ?? r.created_at);
+
+      // lookup currency via direct currency_id or via wallet_id -> wallet.currency_id
+      let currencyId: string | number | null = r.currency_id ?? null;
+      if (currencyId == null && r.wallet_id != null) {
+        const w = walletMap.get(r.wallet_id);
+        if (w?.currency_id != null) currencyId = w.currency_id;
+      }
+
+      const meta = currencyId != null ? currencyMap.get(currencyId) : undefined;
+      const chain = normalizeChainFromCurrency(meta, currencyId);
+
       return {
         id: String(r.id),
         chain,
@@ -150,7 +200,7 @@ export async function GET(req: Request) {
       };
     });
 
-    // Optional chain filter
+    // Optional filter
     if (chainsFilter && chainsFilter.length > 0) {
       rows = rows.filter((r) => chainsFilter.includes(r.chain));
     }
