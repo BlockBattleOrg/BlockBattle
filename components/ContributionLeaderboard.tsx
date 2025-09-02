@@ -28,7 +28,7 @@ export default function ContributionLeaderboard() {
     (async () => {
       try {
         const [a, b] = await Promise.all([
-          fetch('/api/public/leaderboard?order=usd&limit=50', { cache: 'no-store' }).then(r => r.json()),
+          fetch('/api/public/contributions/leaderboard?order=usd&limit=50', { cache: 'no-store' }).then(r => r.json()),
           fetch('/api/public/contributions/recent?limit=10', { cache: 'no-store' }).then(r => r.json()),
         ]);
         if (!alive) return;
