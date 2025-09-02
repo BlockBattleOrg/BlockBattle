@@ -26,7 +26,6 @@ function rpcBase(): string {
 }
 function rpcHeaders() {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  // For NowNodes we pass an api-key; for other providers header may be ignored.
   const key = process.env.NOWNODES_API_KEY;
   if (key) headers["api-key"] = key;
   return headers;
@@ -67,14 +66,22 @@ function supa(): SupabaseClient {
   });
 }
 
+/**
+ * Fetch donation addresses for Polygon chain.
+ * We DO NOT rely on wallets.symbol (not present in your schema).
+ * We filter by chain to be backwards-compatible with aliases.
+ */
 async function getFundingAddresses(client: SupabaseClient): Promise<Set<string>> {
-  // Accept aliases while we keep both POL/MATIC around
+  // Accept legacy/alias naming: pol, matic, polygon
+  const CHAINS = ["pol", "matic", "polygon"];
   const { data, error } = await client
     .from("wallets")
-    .select("address, chain, symbol")
-    .in("symbol", ["POL", "MATIC"])
+    .select("address, chain")
+    .in("chain", CHAINS)
     .order("address");
+
   if (error) throw new Error(`Supabase wallets: ${error.message}`);
+
   const set = new Set<string>();
   for (const w of data || []) {
     if (isAddress(w.address)) set.add(lc(w.address));
@@ -143,22 +150,21 @@ export async function POST(req: Request) {
 
     const addrs = await getFundingAddresses(client);
     if (addrs.size === 0) {
-      return NextResponse.json({ ok: false, error: "No funding addresses (POL) in wallets table" }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "No funding addresses (POL) found in wallets by chain filter" }, { status: 500 });
     }
 
     // Optional direct TX insert path (useful for debugging internal transfers)
     if (forceTx) {
       const tx = await evmRpc<RpcTx>("eth_getTransactionByHash", [forceTx]);
       if (!tx) return NextResponse.json({ ok: false, error: "tx not found" }, { status: 404 });
-      const receipt = await evmRpc<any>("eth_getTransactionReceipt", [forceTx]);
       const blk = hexToInt(tx.blockNumber);
       const blkData = await evmRpc<RpcBlock>("eth_getBlockByNumber", [tx.blockNumber, false]);
       const ts = hexToInt((blkData as any).timestamp as Hex);
       const to = lc(tx.to || "");
       const from = lc(tx.from || "");
       const isDirect = addrs.has(to) && toBig(tx.value) > 0n;
+
       let captured = isDirect;
-      // internal trace (optional)
       if (!captured && traceInternal) {
         const traces = await evmRpc<TraceItem[]>("trace_transaction", [forceTx]).catch(() => [] as TraceItem[]);
         for (const t of traces || []) {
@@ -172,8 +178,8 @@ export async function POST(req: Request) {
       if (!captured) {
         return NextResponse.json({ ok: false, error: "tx does not transfer native POL to our address (direct or internal)" }, { status: 200 });
       }
-      // insert
-      const amount = isDirect ? weiToDecimal(tx.value) : weiToDecimal("0x0"); // native value comes from tx; for internal we'd fetch trace.value if we persisted it
+
+      const amount = isDirect ? weiToDecimal(tx.value) : weiToDecimal("0x0");
       const { error } = await client.from("contributions").insert([{
         chain: "pol",
         symbol: "POL",
@@ -245,7 +251,7 @@ export async function POST(req: Request) {
         for (let b = cursor; b <= toBlock; b++) {
           tracePromises.push(evmRpc<TraceItem[]>("trace_block", ["0x" + b.toString(16)]).catch(() => [] as TraceItem[]));
         }
-        await Promise.all(tracePromises); // For sada samo “sniffamo”; insert radimo kroz forceTx kad treba
+        await Promise.all(tracePromises); // sniff only; use forceTx for targeted insert
       }
 
       if (candidates.length > 0) {
@@ -267,7 +273,7 @@ export async function POST(req: Request) {
       await setLastScanned(client, toBlock);
       cursor = toBlock + 1;
 
-      // Bez maxBlocks – ostajemo na jednom batchu (cron-friendly).
+      // Bez maxBlocks – odradimo jedan batch (cron-friendly).
       if (!maxBlocks) break;
     }
 
