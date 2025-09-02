@@ -1,4 +1,4 @@
-name: Rollup Contributions (2-hourly)
+name: Rollup Contributions (hourly)
 
 on:
   schedule:

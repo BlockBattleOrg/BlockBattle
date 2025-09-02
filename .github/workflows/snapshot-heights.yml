@@ -1,4 +1,4 @@
-name: Snapshot Heights (every 2 hours)
+name: Snapshot Heights (hourly)
 
 on:
   schedule:

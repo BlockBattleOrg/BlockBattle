@@ -1,4 +1,4 @@
-name: FX Sync (amount_usd)
+name: FX Sync (amount_usd - hourly)
 
 on:
   schedule:
