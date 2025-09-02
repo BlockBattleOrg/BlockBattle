@@ -4,18 +4,20 @@
  * TetrisBlocks.tsx
  * One square = one contribution.
  * Bigger USD amount => bigger square (soft log scaling).
- * Each square links to the appropriate chain explorer (if tx is present).
- * Includes a subtle hover (scale + ring). Pointer cursor only when link exists.
+ * If a tx hash is present, the square links to the chain explorer (new tab).
+ * Includes a subtle hover (scale + ring) only when link exists.
  */
 
 import * as React from "react";
 
 export type BlockRow = {
-  chain: string;                 // e.g. "ETH", "SOL", "POL" ...
+  chain: string;                 // e.g. "ETH" | "eth" | "SOL" ...
   amount: number | null;         // native amount (for tooltip)
   amount_usd?: number | null;    // used for sizing
-  tx?: string | null;            // transaction hash (for explorer link)
-  timestamp?: string | null;     // ISO string (for tooltip)
+  tx?: string | null;            // transaction hash (alt name)
+  tx_hash?: string | null;       // transaction hash (Supabase column)
+  timestamp?: string | null;     // ISO string (alt name)
+  ts?: string | null;            // ISO string (alt name)
 };
 
 type Props = {
@@ -70,14 +72,14 @@ function explorerTxUrl(chain?: string | null, tx?: string | null) {
 
   // UTXO / others
   if (c === "BTC")  return `https://mempool.space/tx/${tx}`;
-  if (c === "LTC")  return `https://blockchair.com/litecoin/transaction/${tx}`;
-  if (c === "DOGE") return `https://blockchair.com/dogecoin/transaction/${tx}`;
+  if (c === "LTC")  return `https://litecoinspace.org/tx/${tx}`;
+  if (c === "DOGE") return `https://dogechain.info/tx/${tx}`;
 
   // Cosmos & friends
-  if (c === "ATOM") return `https://www.mintscan.io/cosmos/tx/${tx}`;
+  if (c === "ATOM") return `https://www.mintscan.io/cosmos/txs/${tx}`;
   if (c === "DOT")  return `https://polkadot.subscan.io/extrinsic/${tx}`;
   if (c === "XRP")  return `https://xrpscan.com/tx/${tx}`;
-  if (c === "XLM")  return `https://stellarchain.io/transactions/${tx}`;
+  if (c === "XLM")  return `https://stellar.expert/explorer/public/tx/${tx}`;
 
   // Solana
   if (c === "SOL")  return `https://solscan.io/tx/${tx}`;
@@ -105,14 +107,20 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
           const color = colorForChain(chain);
           const s = sizeFromUsd(r.amount_usd);
           const px = Math.round(BASE * s);
-          const href = explorerTxUrl(chain, r.tx);
+
+          // Accept either `tx` or `tx_hash`
+          const tx = r.tx ?? r.tx_hash ?? null;
+          // Accept either `timestamp` or `ts`
+          const when = r.timestamp ?? r.ts ?? null;
+
+          const href = explorerTxUrl(chain, tx);
 
           const title = [
             `Chain: ${chain}`,
             r.amount != null ? `Amount: ${r.amount}` : null,
             r.amount_usd != null ? `≈ ${r.amount_usd.toFixed(4)} USD` : null,
-            r.tx ? `Tx: ${shortHash(r.tx)}` : null,
-            r.timestamp ? `Time: ${r.timestamp}` : null,
+            tx ? `Tx: ${shortHash(tx)}` : null,
+            when ? `Time: ${when}` : null,
           ]
             .filter(Boolean)
             .join(" • ");
@@ -120,7 +128,7 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
           const square = (
             <div
               title={title}
-              className={`relative isolate rounded-md shadow-sm animate-bb-fall will-change-transform ${
+              className={`relative isolate rounded-md shadow-sm animate-bb-fall ${
                 href ? "bb-hover bb-pointer" : ""
               }`}
               style={{
@@ -133,13 +141,16 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
           );
 
           return (
-            <div key={r.tx ? `${r.tx}-${idx}` : `b-${idx}`} className="flex items-center justify-center">
+            <div
+              key={(tx || chain) + "-" + idx}
+              className="flex items-center justify-center"
+            >
               {href ? (
                 <a
                   href={href}
                   target="_blank"
                   rel="noreferrer noopener"
-                  aria-label={`${chain} tx ${shortHash(r.tx)}`}
+                  aria-label={`${chain} tx ${shortHash(tx)}`}
                 >
                   {square}
                 </a>
