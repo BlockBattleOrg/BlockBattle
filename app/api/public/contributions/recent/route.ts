@@ -1,138 +1,100 @@
 // app/api/public/contributions/recent/route.ts
-// Recent contributions: last N rows with { chain, amount, amount_usd, tx, timestamp }.
-// If amount_usd is NULL, we compute USD on-the-fly using lib/fx.ts (real-time display).
-// No schema changes.
+// Robust "recent contributions" endpoint.
+// - Uses relational select contributions → wallets → currencies to resolve chain symbol
+// - LEFT-like semantics via PostgREST nested selects (no hard-coded chains)
+// - Returns consistent shape used by the frontend:
+//   { ok, total, rows: [{ chain, amount, amount_usd, tx, timestamp }] }
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { fetchUsdPrices, loadCurrencyMeta, toUsd } from "@/lib/fx";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function getSupabase() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
-  if (!url || !key) {
-    throw new Error("Missing Supabase env: need SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).");
-  }
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
-type ContribRow = {
-  id: number;
-  wallet_id: string;
-  amount: number | null;
-  amount_usd: number | null;
+type RecentRow = {
+  amount: string | number | null;
+  amount_usd: string | number | null;
   tx_hash: string | null;
-  timestamp?: string | null; // if exists in schema
+  block_time: string | null;     // timestamptz
+  inserted_at: string | null;    // timestamptz
+  wallets?: {
+    currencies?: {
+      symbol?: string | null;
+    } | null;
+  } | null;
 };
-type WalletRow = { id: string; currency_id: string | number | null };
-type CurrencyRow = { id: string | number; symbol: string | null; decimals?: number | null };
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const url = new URL(req.url);
-    const limitParam = parseInt(url.searchParams.get("limit") || "10", 10);
-    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 10;
+    const { searchParams } = new URL(req.url);
+    const limitRaw = Number(searchParams.get("limit") || "10");
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.floor(limitRaw))) : 10;
 
-    const supabase = getSupabase();
+    const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!; // server-side key
 
-    // 1) last N by id desc (try selecting timestamp if present)
-    let rows: ContribRow[] = [];
-    {
-      const { data, error } = await supabase
-        .from("contributions")
-        .select("id, wallet_id, amount, amount_usd, tx_hash, timestamp")
-        .order("id", { ascending: false })
-        .limit(limit);
+    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: false },
+    });
 
-      if (!error && data) {
-        rows = data as ContribRow[];
-      } else {
-        const { data: data2, error: err2 } = await supabase
-          .from("contributions")
-          .select("id, wallet_id, amount, amount_usd, tx_hash")
-          .order("id", { ascending: false })
-          .limit(limit);
-        if (err2) return NextResponse.json({ ok: false, error: err2.message }, { status: 500 });
-        rows = (data2 || []) as ContribRow[];
-      }
-    }
-
-    if (!rows.length) return NextResponse.json({ ok: true, total: 0, rows: [] });
-
-    // 2) wallet -> currency
-    const walletIds = Array.from(new Set(rows.map(r => r.wallet_id).filter(Boolean))) as string[];
-    const { data: wallets, error: wErr } = await supabase
-      .from("wallets")
-      .select("id, currency_id")
-      .in("id", walletIds);
-    if (wErr) return NextResponse.json({ ok: false, error: wErr.message }, { status: 500 });
-
-    const walletToCurrency: Record<string, string | number> = {};
-    for (const w of (wallets || []) as WalletRow[]) {
-      if (w?.id && w.currency_id != null) walletToCurrency[w.id] = w.currency_id;
-    }
-    const currencyIds = Array.from(new Set(Object.values(walletToCurrency)));
-
-    // 3) currency -> symbol, decimals
-    const { data: currencies, error: cErr } = await supabase
-      .from("currencies")
-      .select("id, symbol, decimals")
-      .in("id", currencyIds);
-    if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 });
-
-    const currencyToSymbol: Record<string | number, string> = {};
-    const currencyMeta: Record<string | number, { decimals: number }> = {};
-    for (const c of (currencies || []) as CurrencyRow[]) {
-      if (c?.id != null && c?.symbol) {
-        currencyToSymbol[c.id] = c.symbol.toUpperCase();
-        currencyMeta[c.id] = { decimals: c.decimals ?? 18 };
-      }
-    }
-
-    // 4) compute USD for those missing using live prices
-    const neededSymbols = Array.from(
-      new Set(
-        rows
-          .filter(r => (r.amount_usd == null) && r.amount != null)
-          .map(r => currencyToSymbol[walletToCurrency[r.wallet_id]])
-          .filter(Boolean) as string[]
+    // Pull most recent contributions with relational symbols.
+    // NOTE: Nested selects in PostgREST behave like LEFT JOINs for missing relations.
+    const { data, error } = await supabase
+      .from("contributions")
+      .select(
+        `
+        amount,
+        amount_usd,
+        tx_hash,
+        block_time,
+        inserted_at,
+        wallets:wallet_id (
+          currencies:currency_id (
+            symbol
+          )
+        )
+      `
       )
-    );
+      .order("inserted_at", { ascending: false })
+      .limit(limit);
 
-    let prices: Record<string, number> = {};
-    if (neededSymbols.length > 0) {
-      // we have chain symbols already (from currencies), so go straight to price fetch
-      prices = await fetchUsdPrices(neededSymbols);
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    const result = rows.map((r) => {
-      const curId = walletToCurrency[r.wallet_id];
-      const symbol = currencyToSymbol[curId] || null;
-      let usd = r.amount_usd;
+    const rows = (data || []) as RecentRow[];
 
-      if (usd == null && typeof r.amount === "number" && symbol) {
-        const meta = currencyMeta[curId];
-        if (meta) {
-          const calc = toUsd(symbol, String(r.amount), meta.decimals, prices);
-          if (typeof calc === "number" && isFinite(calc)) usd = calc;
-        }
-      }
+    const mapped = rows.map((r) => {
+      const chain =
+        r?.wallets?.currencies?.symbol?.toUpperCase() || "UNKNOWN";
+
+      // Prefer on-chain block_time; fallback to inserted_at.
+      const ts = r.block_time || r.inserted_at || null;
 
       return {
-        chain: symbol,
-        amount: r.amount ?? null,
-        amount_usd: usd ?? null,
-        tx: r.tx_hash ?? null,
-        timestamp: r.timestamp ?? null,
+        chain,
+        amount: toNum(r.amount),
+        amount_usd: toNum(r.amount_usd),
+        tx: r.tx_hash || null,
+        timestamp: ts, // keep as ISO string (frontend already expects "timestamp")
       };
     });
 
-    return NextResponse.json({ ok: true, total: result.length, rows: result });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
+    return NextResponse.json(
+      { ok: true, total: mapped.length, rows: mapped },
+      { status: 200 }
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
   }
+}
+
+function toNum(v: string | number | null | undefined): number | null {
+  if (v == null) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
