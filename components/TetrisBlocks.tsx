@@ -5,6 +5,7 @@
  * One square = one contribution.
  * Bigger USD amount => bigger square (soft log scaling).
  * Each square links to the appropriate chain explorer (if tx is present).
+ * Includes a subtle hover (scale + ring). Pointer cursor only when link exists.
  */
 
 import * as React from "react";
@@ -119,7 +120,9 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
           const square = (
             <div
               title={title}
-              className="relative isolate rounded-md shadow-sm animate-bb-fall will-change-transform"
+              className={`relative isolate rounded-md shadow-sm animate-bb-fall will-change-transform ${
+                href ? "bb-hover bb-pointer" : ""
+              }`}
               style={{
                 width: px,
                 height: px,
@@ -148,7 +151,7 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
         })}
       </div>
 
-      {/* local CSS for fall animation */}
+      {/* local CSS for fall + hover */}
       <style jsx>{`
         @keyframes bb-fall {
           0% {
@@ -170,6 +173,14 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
         .animate-bb-fall {
           animation: bb-fall 520ms cubic-bezier(0.2, 0.9, 0.2, 1) both;
         }
+        .bb-hover {
+          transition: transform 160ms ease, box-shadow 160ms ease;
+        }
+        .bb-hover:hover {
+          transform: translateY(0) scale(1.06);
+          box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.08), 0 6px 10px rgba(0, 0, 0, 0.18);
+        }
+        .bb-pointer { cursor: pointer; }
       `}</style>
     </div>
   );
