@@ -2,7 +2,7 @@ name: Contribution Ingest (ATOM)
 
 on:
   schedule:
-    - cron: "32 */3 * * *"   # every 3 hours at minute 32 (UTC)
+    - cron: "32 * * * *"   # every 1 hour at minute 32 (UTC)
   workflow_dispatch:
 
 permissions:

@@ -2,7 +2,7 @@ name: Contribution Ingest (POL)
 
 on:
   schedule:
-    - cron: "20 */3 * * *"   # every 3 hours at minute 20 (UTC)
+    - cron: "20 * * * *"   # every 1 hour at minute 20 (UTC)
   workflow_dispatch:
 
 permissions:

@@ -2,7 +2,7 @@ name: Rollup Contributions (2-hourly)
 
 on:
   schedule:
-    - cron: "5 */2 * * *"   # every 2 hours at minute 05 UTC
+    - cron: "5 * * * *"   # every 1 hour at minute 05 UTC
   workflow_dispatch:
 
 permissions:

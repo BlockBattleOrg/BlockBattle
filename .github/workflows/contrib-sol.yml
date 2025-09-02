@@ -2,7 +2,7 @@ name: Contribution Ingest (SOL)
 
 on:
   schedule:
-    - cron: "38 */3 * * *"   # every 3 hours at minute 38 (UTC)
+    - cron: "38 * * * *"   # every 1 hour at minute 38 (UTC)
   workflow_dispatch:
 
 permissions:

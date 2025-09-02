@@ -2,8 +2,8 @@ name: FX Sync (amount_usd)
 
 on:
   schedule:
-    # every 2 hours, staggered at :17 to avoid overlap with other jobs
-    - cron: "17 */2 * * *"
+    # every 1 hour, staggered at :17 to avoid overlap with other jobs
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 jobs:

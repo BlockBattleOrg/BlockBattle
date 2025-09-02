@@ -2,7 +2,7 @@ name: Contribution Ingest (OP)
 
 on:
   schedule:
-    - cron: "14 */3 * * *"   # every 3 hours at minute 14 (UTC)
+    - cron: "14 * * * *"   # every 1 hour at minute 14 (UTC)
   workflow_dispatch:
 
 permissions:

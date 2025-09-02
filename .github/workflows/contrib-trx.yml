@@ -2,7 +2,7 @@ name: Contribution Ingest (TRX)
 
 on:
   schedule:
-    - cron: "44 */3 * * *"   # every 3 hours at minute 44 (UTC)
+    - cron: "44 * * * *"   # every 1 hour at minute 44 (UTC)
   workflow_dispatch:
 
 permissions:

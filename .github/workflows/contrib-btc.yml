@@ -2,7 +2,7 @@ name: Contribution Ingest (BTC)
 
 on:
   schedule:
-    - cron: "2 */3 * * *"   # every 3 hours at minute 02 (UTC)
+    - cron: "2 * * * *"   # every 1 hour at minute 02 (UTC)
   workflow_dispatch:
 
 permissions:

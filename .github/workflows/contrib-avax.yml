@@ -2,7 +2,7 @@ name: Contribution Ingest (AVAX)
 
 on:
   schedule:
-    - cron: "23 */3 * * *"   # every 3 hours at minute 23
+    - cron: "23 * * * *"   # every 1 hour at minute 23
   workflow_dispatch:
 
 permissions:

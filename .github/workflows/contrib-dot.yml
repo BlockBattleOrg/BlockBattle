@@ -2,7 +2,7 @@ name: Contribution Ingest (DOT)
 
 on:
   schedule:
-    - cron: "26 */3 * * *"   # every 3 hours at minute 26 (UTC)
+    - cron: "26 * * * *"   # every 1 hour at minute 26 (UTC)
   workflow_dispatch:
 
 permissions:

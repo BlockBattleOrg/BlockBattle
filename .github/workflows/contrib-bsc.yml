@@ -2,7 +2,7 @@ name: Contribution Ingest (BSC)
 
 on:
   schedule:
-    - cron: "47 */3 * * *"   # every 3 hours at minute 47 (UTC)
+    - cron: "47 * * * *"   # every 1 hour at minute 47 (UTC)
   workflow_dispatch:
 
 permissions:

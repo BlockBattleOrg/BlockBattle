@@ -2,7 +2,7 @@ name: Snapshot Heights (every 2 hours)
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # every 2 hours (UTC) on the hour
+    - cron: "0 * * * *"   # every 1 hour (UTC) on the hour
   workflow_dispatch:
 
 jobs:

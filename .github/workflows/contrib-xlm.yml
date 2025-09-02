@@ -2,7 +2,7 @@ name: Contribution Ingest (XLM)
 
 on:
   schedule:
-    - cron: "41 */3 * * *"   # every 3 hours at minute 41 (UTC)
+    - cron: "41 * * * *"   # every 1 hour at minute 41 (UTC)
   workflow_dispatch:
 
 permissions:

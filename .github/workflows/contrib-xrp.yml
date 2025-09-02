@@ -2,7 +2,7 @@ name: Contribution Ingest (XRP)
 
 on:
   schedule:
-    - cron: "35 */3 * * *"   # every 3 hours at minute 35 (UTC)
+    - cron: "35 * * * *"   # every 1 hour at minute 35 (UTC)
   workflow_dispatch:
 
 permissions:
