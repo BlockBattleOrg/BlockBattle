@@ -24,7 +24,7 @@ export default function HomePage() {
 
       {/* Live Community Blocks (auto-refresh + chain filter) */}
       <section className="mb-10 space-y-3">
-        <h2 className="text-xl font-semibold">Live Community Blocks</h2>
+        <h2 className="text-xl font-semibold">Community Blocks</h2>
         <p className="text-sm text-gray-600">
           Each square represents a contribution. Bigger amount → bigger block. More contributions → more blocks.
         </p>

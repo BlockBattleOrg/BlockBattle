@@ -9,7 +9,7 @@ type Props = {
   defaultChain?: string | null; // e.g. "eth" or null = All
 };
 
-// A small, fixed list is faster than dynamic discovery and covers our supported chains.
+// Supported chains (All + 15 chains)
 const CHAIN_OPTIONS = [
   { value: "", label: "All chains" },
   { value: "eth", label: "ETH" },
@@ -18,16 +18,41 @@ const CHAIN_OPTIONS = [
   { value: "arb", label: "ARB" },
   { value: "op",  label: "OP"  },
   { value: "avax",label: "AVAX"},
-  { value: "btc", label: "BTC" },
-  { value: "ltc", label: "LTC" },
-  { value: "doge",label: "DOGE"},
-  { value: "sol", label: "SOL" },
   { value: "xrp", label: "XRP" },
   { value: "xlm", label: "XLM" },
   { value: "trx", label: "TRX" },
   { value: "dot", label: "DOT" },
   { value: "atom",label: "ATOM"},
+  { value: "btc", label: "BTC" },
+  { value: "ltc", label: "LTC" },
+  { value: "doge",label: "DOGE"},
+  { value: "sol", label: "SOL" },
 ];
+
+// Constant brand colors per chain (simple, readable)
+const CHAIN_COLORS: Record<string, string> = {
+  ETH: "#3b82f6",
+  BTC: "#f59e0b",
+  DOGE: "#b45309",
+  LTC: "#2563eb",
+  MATIC: "#7c3aed", // if shown as POL, keep purple swatch in legend
+  POL: "#7c3aed",
+  BSC: "#f59e0b",
+  AVAX: "#ef4444",
+  SOL: "#9333ea",
+  TRX: "#ef4444",
+  XLM: "#10b981",
+  XRP: "#0ea5e9",
+  DOT: "#111827",
+  ATOM: "#111827",
+  ARB: "#1d4ed8",
+  OP: "#ef4444",
+};
+
+function colorForChain(symbol: string) {
+  const key = symbol.toUpperCase();
+  return CHAIN_COLORS[key] || "#64748b"; // fallback gray
+}
 
 export default function BlocksContainer({
   limit = 200,
@@ -39,37 +64,39 @@ export default function BlocksContainer({
   const [error, setError] = React.useState<string | null>(null);
   const [chain, setChain] = React.useState<string>(defaultChain ?? "");
 
-  const fetchOnce = React.useCallback(async (signal?: AbortSignal) => {
-    try {
-      setLoading(true);
-      setError(null);
-      const base = process.env.NEXT_PUBLIC_BASE_URL ?? "";
-      const qs = new URLSearchParams();
-      qs.set("limit", String(limit));
-      if (chain) qs.set("chain", chain);
-      const url = `${base}/api/public/blocks/recent?${qs.toString()}`;
-      const res = await fetch(url, { cache: "no-store", signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setRows((data?.rows ?? []) as BlockRow[]);
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      setError(String(e?.message ?? e));
-    } finally {
-      setLoading(false);
-    }
-  }, [limit, chain]);
+  const fetchOnce = React.useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        setLoading(true);
+        setError(null);
+        const base = process.env.NEXT_PUBLIC_BASE_URL ?? "";
+        const qs = new URLSearchParams();
+        qs.set("limit", String(limit));
+        if (chain) qs.set("chain", chain);
+        const url = `${base}/api/public/blocks/recent?${qs.toString()}`;
+        const res = await fetch(url, { cache: "no-store", signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        setRows((data?.rows ?? []) as BlockRow[]);
+      } catch (e: any) {
+        if (e?.name === "AbortError") return;
+        setError(String(e?.message ?? e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [limit, chain]
+  );
 
   // initial + auto refresh
   React.useEffect(() => {
     const ctrl = new AbortController();
     fetchOnce(ctrl.signal);
 
-    // auto refresh ticker
     const id = window.setInterval(() => {
       const rCtrl = new AbortController();
       fetchOnce(rCtrl.signal);
-    }, Math.max(10000, refreshMs)); // minimum 10s to be gentle with rate limit
+    }, Math.max(10000, refreshMs)); // min 10s, be gentle
 
     return () => {
       ctrl.abort();
@@ -86,6 +113,9 @@ export default function BlocksContainer({
         error={error}
         onRefresh={() => fetchOnce()}
       />
+
+      {/* Legend: always show ALL supported chains, wraps to next line */}
+      <Legend />
 
       <TetrisBlocks rows={rows} columns={10} />
     </section>
@@ -131,9 +161,30 @@ function Toolbar(props: {
         <span className="text-sm text-red-600">Error: {error}</span>
       ) : (
         <span className="text-sm text-gray-500">
-          {loading ? "Loading…" : "Live view (auto-refresh)"}
+          {loading
+            ? "Loading…"
+            : "View (auto-refreshed from hourly ingestions)"}
         </span>
       )}
+    </div>
+  );
+}
+
+function Legend() {
+  // exclude the "All chains" option
+  const items = CHAIN_OPTIONS.filter((x) => x.value !== "");
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      {items.map((c) => (
+        <div key={c.label} className="flex items-center gap-1">
+          <span
+            className="inline-block h-3 w-3 rounded-sm"
+            style={{ backgroundColor: colorForChain(c.label) }}
+            aria-hidden
+          />
+          <span className="text-xs">{c.label}</span>
+        </div>
+      ))}
     </div>
   );
 }

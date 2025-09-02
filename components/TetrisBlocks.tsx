@@ -1,227 +1,138 @@
 "use client";
 
+/**
+ * TetrisBlocks.tsx
+ * Lightweight, “tetris-like” blocks renderer used on the homepage.
+ * - One square = one contribution
+ * - Bigger amount (USD) => bigger block (with sane clamps)
+ * - Smooth falling-in animation with a tiny bounce
+ *
+ * Expected input shape matches /api/public/blocks/recent.
+ */
+
 import * as React from "react";
 
 export type BlockRow = {
-  id: string;
-  chain: string;        // e.g. 'eth', 'bsc', 'pol', ...
-  amount_usd: number;   // >= 0
-  ts: string;           // ISO timestamp
-  tx_hash: string | null;
+  chain: string;                 // e.g. "ETH", "SOL"
+  amount: number | null;         // native amount (unused for sizing but shown in title)
+  amount_usd?: number | null;    // used for sizing (preferred)
+  tx?: string | null;            // optional (for title)
+  timestamp?: string | null;     // optional (for title)
 };
 
 type Props = {
   rows: BlockRow[];
-  columns?: number;         // grid width, default 10
-  minSize?: number;         // px
-  maxSize?: number;         // px
-  animate?: boolean;        // enable falling animation
-  staggerMsPerItem?: number;// base delay per item in ms
-  fallDistance?: number;    // px to travel from (negative Y)
+  columns?: number; // grid columns
 };
 
+/** Brand/legend colors MUST match BlocksContainer legend to stay consistent */
 const CHAIN_COLORS: Record<string, string> = {
-  eth: "#627EEA",
-  pol: "#8247E5",
-  bsc: "#F3BA2F",
-  arb: "#28A0F0",
-  op:  "#FF0420",
-  avax:"#E84142",
-  xrp: "#23292F",
-  xlm: "#14B8A6",
-  trx: "#C73127",
-  dot: "#E6007A",
-  atom:"#2E3148",
-  btc: "#F7931A",
-  ltc: "#345D9D",
-  doge:"#C2A633",
-  sol: "#14F195",
-  unknown: "#9CA3AF",
+  ETH: "#3b82f6",
+  BTC: "#f59e0b",
+  DOGE: "#b45309",
+  LTC: "#2563eb",
+  MATIC: "#7c3aed",
+  POL: "#7c3aed",
+  BSC: "#f59e0b",
+  AVAX: "#ef4444",
+  SOL: "#9333ea",
+  TRX: "#ef4444",
+  XLM: "#10b981",
+  XRP: "#0ea5e9",
+  DOT: "#111827",
+  ATOM: "#111827",
+  ARB: "#1d4ed8",
+  OP: "#ef4444",
 };
 
-function colorForChain(chain: string) {
-  return CHAIN_COLORS[chain] ?? CHAIN_COLORS.unknown;
+function colorForChain(symbol: string) {
+  const key = (symbol || "").toUpperCase();
+  return CHAIN_COLORS[key] || "#64748b";
 }
 
-/**
- * Convert USD amount into a square size (px).
- * Uses sqrt scaling to reduce whale dominance while preserving signal.
- */
-function sizeForAmount(amountUsd: number, min = 18, max = 72) {
-  const safe = Math.max(0, amountUsd);
-  const px = Math.sqrt(safe) * 10; // reference factor; tweak as needed
-  return Math.max(min, Math.min(px, max));
+/** Map USD amount → block scale (1.0 … 2.5) with soft log curve */
+function sizeFromUsd(usd?: number | null): number {
+  const val = typeof usd === "number" && isFinite(usd) ? usd : 0;
+  // Small amounts still visible; large amounts don’t explode the grid.
+  // 0 → 1.0, 1 → ~1.3, 10 → ~2.0, 100+ → ~2.5 (clamped)
+  const scaled = 1.0 + Math.log10(1 + val) * 0.9;
+  return Math.max(1.0, Math.min(2.5, scaled));
 }
 
-/**
- * Returns whether user prefers reduced motion.
- * We’ll respect that by disabling the falling animation.
- */
-function usePrefersReducedMotion() {
-  const [reduced, setReduced] = React.useState(false);
-  React.useEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) return;
-    const m = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReduced(m.matches);
-    const listener = () => setReduced(m.matches);
-    m.addEventListener?.("change", listener);
-    return () => m.removeEventListener?.("change", listener);
-  }, []);
-  return reduced;
+/** Shorten a hash in tooltip */
+function shortHash(tx?: string | null) {
+  if (!tx) return "";
+  return `${tx.slice(0, 8)}…${tx.slice(-6)}`;
 }
 
-export default function TetrisBlocks({
-  rows,
-  columns = 10,
-  minSize = 18,
-  maxSize = 72,
-  animate = true,
-  staggerMsPerItem = 25,
-  fallDistance = 48,
-}: Props) {
-  const prefersReduced = usePrefersReducedMotion();
-  const enableAnim = animate && !prefersReduced;
-
-  // Optional: sort so bigger blocks "land" earlier (nicer packing feel)
-  const ordered = React.useMemo(
-    () => [...rows].sort((a, b) => b.amount_usd - a.amount_usd),
-    [rows]
-  );
-
-  // Trigger animations after mount
-  const [mounted, setMounted] = React.useState(false);
-  React.useEffect(() => {
-    const t = setTimeout(() => setMounted(true), 20);
-    return () => clearTimeout(t);
-  }, [ordered.length]);
+export default function TetrisBlocks({ rows, columns = 10 }: Props) {
+  // Base square size in px (will be scaled)
+  const BASE = 18;
 
   return (
-    <div className="space-y-4">
-      <Legend />
-
+    <div className="relative">
+      {/* Grid container */}
       <div
-        className="grid gap-1"
-        style={{
-          gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-        }}
+        className="grid gap-2"
+        style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
       >
-        {ordered.map((r, idx) => {
-          const size = sizeForAmount(r.amount_usd, minSize, maxSize);
-          const bg = colorForChain(r.chain);
-          const title = `${r.chain.toUpperCase()} • $${r.amount_usd.toFixed(
-            2
-          )} • ${new Date(r.ts).toLocaleString()}`;
-          const href =
-            r.tx_hash && r.chain ? explorerLink(r.chain, r.tx_hash) : null;
+        {rows.map((r, idx) => {
+          const chain = (r.chain || "").toUpperCase();
+          const color = colorForChain(chain);
+          const s = sizeFromUsd(r.amount_usd);
+          const px = Math.round(BASE * s);
 
-          // Falling effect styles
-          const delay = `${Math.min(idx * staggerMsPerItem, 1200)}ms`;
-          const style: React.CSSProperties = enableAnim
-            ? mounted
-              ? {
-                  // landed state
-                  transform: "translateY(0px) scale(1)",
-                  opacity: 1,
-                  transition:
-                    "transform 500ms cubic-bezier(0.22, 1, 0.36, 1), opacity 500ms ease-out",
-                  transitionDelay: delay,
-                }
-              : {
-                  // pre-landing
-                  transform: `translateY(-${fallDistance}px) scale(0.94)`,
-                  opacity: 0,
-                }
-            : {};
-
-          const Block = (
-            <div
-              key={r.id}
-              title={title}
-              className="rounded-md shadow-sm will-change-transform"
-              style={{
-                width: `${size}px`,
-                height: `${size}px`,
-                background: bg,
-                ...style,
-              }}
-            />
-          );
+          const title = [
+            `Chain: ${chain}`,
+            r.amount != null ? `Amount: ${r.amount}` : null,
+            r.amount_usd != null ? `≈ ${r.amount_usd.toFixed(4)} USD` : null,
+            r.tx ? `Tx: ${shortHash(r.tx)}` : null,
+            r.timestamp ? `Time: ${r.timestamp}` : null,
+          ]
+            .filter(Boolean)
+            .join(" • ");
 
           return (
-            <div key={r.id} className="flex items-center justify-center">
-              {href ? (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label={`${r.chain} tx ${r.tx_hash?.slice(0, 10)}...`}
-                >
-                  {Block}
-                </a>
-              ) : (
-                Block
-              )}
-            </div>
+            <div
+              key={r.tx ? `${r.tx}-${idx}` : `b-${idx}`}
+              title={title}
+              className="relative isolate rounded-md shadow-sm animate-bb-fall will-change-transform"
+              style={{
+                width: px,
+                height: px,
+                backgroundColor: color,
+                // small variety so multiple blocks don’t fall exactly in sync
+                animationDelay: `${(idx % 8) * 60}ms`,
+              }}
+            />
           );
         })}
       </div>
 
-      {/* Scoped styles for a cleaner hover */}
+      {/* Local styles once per component instance */}
       <style jsx>{`
-        .will-change-transform {
-          will-change: transform, opacity;
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .will-change-transform {
-            transition: none !important;
-            transform: none !important;
-            opacity: 1 !important;
+        @keyframes bb-fall {
+          0% {
+            opacity: 0;
+            transform: translateY(-20px) scale(0.95);
+            filter: drop-shadow(0 0 0 rgba(0, 0, 0, 0));
+          }
+          75% {
+            opacity: 1;
+            transform: translateY(0) scale(1.02);
+            filter: drop-shadow(0 6px 6px rgba(0, 0, 0, 0.15));
+          }
+          100% {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+            filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.12));
           }
         }
-        .rounded-md:hover {
-          transform: scale(1.05);
+        .animate-bb-fall {
+          animation: bb-fall 520ms cubic-bezier(0.2, 0.9, 0.2, 1) both;
         }
       `}</style>
     </div>
   );
-}
-
-function Legend() {
-  const entries = Object.entries(CHAIN_COLORS);
-  const visible = entries.filter(([k]) => k !== "unknown").slice(0, 12);
-
-  return (
-    <div className="flex flex-wrap items-center gap-3 text-sm">
-      {visible.map(([chain, color]) => (
-        <div key={chain} className="flex items-center gap-2">
-          <span
-            className="inline-block rounded-sm"
-            style={{ width: 12, height: 12, background: color }}
-          />
-          <span className="uppercase">{chain}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function explorerLink(chain: string, tx: string) {
-  const c = chain.toLowerCase();
-  if (c === "eth") return `https://etherscan.io/tx/${tx}`;
-  if (c === "pol") return `https://polygonscan.com/tx/${tx}`;
-  if (c === "bsc") return `https://bscscan.com/tx/${tx}`;
-  if (c === "arb") return `https://arbiscan.io/tx/${tx}`;
-  if (c === "op") return `https://optimistic.etherscan.io/tx/${tx}`;
-  if (c === "avax") return `https://snowtrace.io/tx/${tx}`;
-  if (c === "trx") return `https://tronscan.org/#/transaction/${tx}`;
-  if (c === "dot") return `https://polkadot.subscan.io/extrinsic/${tx}`;
-  if (c === "atom") return `https://www.mintscan.io/cosmos/txs/${tx}`;
-  if (c === "xrp") return `https://xrpscan.com/tx/${tx}`;
-  if (c === "xlm") return `https://stellar.expert/explorer/public/tx/${tx}`;
-  if (c === "btc") return `https://mempool.space/tx/${tx}`;
-  if (c === "ltc") return `https://litecoinspace.org/tx/${tx}`;
-  if (c === "doge") return `https://dogechain.info/tx/${tx}`;
-  if (c === "sol") return `https://solscan.io/tx/${tx}`;
-  return "#";
 }
 
