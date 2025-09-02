@@ -5,10 +5,28 @@ import { createClient } from '@supabase/supabase-js';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
+/**
+ * POL (Polygon) contribution ingest
+ *
+ * Robust windowing:
+ * - Keeps block-based scanning (RPC: eth_getBlockByNumber with txs = true).
+ * - Adds an overlap window (OVERLAP_BLOCKS) when resuming from last scanned,
+ *   to avoid missing txs due to indexer lag/clock drift.
+ * - Caps the total lookback by MAX_LOOKBACK blocks for safety.
+ * - Supports manual overrides via query (?sinceBlocks, ?sinceHours).
+ */
+
 // How many blocks to scan per run
 const BATCH_BLOCKS = 250;
-// Hard cap how far back first run can go
+
+// Hard cap how far back a run can go (safety)
 const MAX_LOOKBACK = 5_000;
+
+// Overlap (when resuming) to avoid missing late txs (≈ 15–20 min on Polygon)
+const OVERLAP_BLOCKS = 500;
+
+// Approx. seconds per block on Polygon (rough heuristic for ?sinceHours)
+const POL_SECONDS_PER_BLOCK = 2;
 
 type Hex = `0x${string}`;
 
@@ -67,13 +85,14 @@ export async function POST(req: Request) {
       .from('wallets')
       .select('id, address, chain, is_active, currencies:currency_id(symbol, name, decimals)')
       .eq('is_active', true);
+
     if (werr) throw werr;
 
     const isPol = (sym?: string | null, name?: string | null, chain?: string | null) => {
       const s = (sym || '').toUpperCase();
       const n = (name || '').toUpperCase();
       const c = (chain || '').toUpperCase();
-      return s === 'POL' || n.includes('POLYGON') || c === 'POL' || c === 'POLYGON' || c === 'MATIC';
+      return s === 'POL' || s === 'MATIC' || n.includes('POLYGON') || c === 'POL' || c === 'POLYGON' || c === 'MATIC';
     };
 
     // Robust: currencies can be an object OR an array
@@ -81,25 +100,44 @@ export async function POST(req: Request) {
       const cur = Array.isArray(row?.currencies) ? row.currencies[0] : row.currencies;
       return isPol(cur?.symbol, cur?.name, row?.chain);
     });
+
     if (!w) {
       return NextResponse.json({ ok: false, error: 'No active POL wallet found' }, { status: 200 });
     }
 
     const walletId: string = w.id;
     const toAddr = String(w.address).toLowerCase();
-
     const cur = Array.isArray((w as any)?.currencies) ? (w as any).currencies[0] : (w as any).currencies;
     const decimals: number = Number(cur?.decimals ?? 18) || 18; // default EVM decimals
 
-    // --- Determine range to scan ---
+    // --- Determine range to scan (with overlap + optional overrides) ---
     const latestHex = await rpc<Hex>(RPC, KEY, 'eth_blockNumber', []);
     const latest = hexToInt(latestHex);
 
+    // Optional manual overrides via query:
+    //   ?sinceBlocks=NNN        -> force lookback NNN blocks (capped by MAX_LOOKBACK)
+    //   ?sinceHours=H           -> approx blocks = H*3600 / POL_SECONDS_PER_BLOCK
+    const url = new URL(req.url);
+    const sinceBlocksParam = url.searchParams.get('sinceBlocks');
+    const sinceHoursParam = url.searchParams.get('sinceHours');
+
+    let overrideLookback = 0;
+    if (sinceBlocksParam) {
+      const n = Math.max(1, Math.min(MAX_LOOKBACK, parseInt(sinceBlocksParam, 10) || 0));
+      overrideLookback = n;
+    } else if (sinceHoursParam) {
+      const h = Math.max(1, Math.min(48, parseInt(sinceHoursParam, 10) || 0));
+      const approxBlocks = Math.min(MAX_LOOKBACK, Math.floor((h * 3600) / POL_SECONDS_PER_BLOCK));
+      overrideLookback = approxBlocks;
+    }
+
+    // Last scanned end-block (DB)
     const { data: srow, error: serr } = await sbc
       .from('settings')
       .select('value')
       .eq('key', 'pol_contrib_last_scanned')
       .maybeSingle();
+
     if (serr) throw serr;
 
     let last = 0;
@@ -108,10 +146,34 @@ export async function POST(req: Request) {
       last = typeof v === 'number' ? v : (typeof (v as any)?.n !== 'undefined' ? Number((v as any).n) : 0);
     }
 
-    const start = Math.max(last + 1, latest - MAX_LOOKBACK);
+    // Compute start using:
+    //  1) manual override (if provided): latest - overrideLookback
+    //  2) else resume from last with overlap: (last + 1 - OVERLAP_BLOCKS)
+    //  3) else fallback to latest - MAX_LOOKBACK
+    let startReason: 'override' | 'resume+overlap' | 'fallbackMax' = 'fallbackMax';
+    let start = Math.max(0, latest - MAX_LOOKBACK);
+
+    if (overrideLookback > 0) {
+      start = Math.max(0, latest - overrideLookback);
+      startReason = 'override';
+    } else if (last > 0) {
+      start = Math.max(0, Math.max(last + 1 - OVERLAP_BLOCKS, latest - MAX_LOOKBACK));
+      startReason = 'resume+overlap';
+    }
+
     const end = Math.min(start + BATCH_BLOCKS - 1, latest);
     if (end < start) {
-      return NextResponse.json({ ok: true, scanned: 0, latest, from: null, to: null, inserted: 0 });
+      return NextResponse.json({
+        ok: true,
+        latest,
+        from: null,
+        to: null,
+        scanned: 0,
+        inserted: 0,
+        reason: startReason,
+        lastSeen: last || null,
+        overlapBlocks: startReason === 'resume+overlap' ? OVERLAP_BLOCKS : 0,
+      });
     }
 
     // --- Scan blocks and collect inbound txs to our wallet ---
@@ -122,9 +184,11 @@ export async function POST(req: Request) {
       const block = await rpc<any>(RPC, KEY, 'eth_getBlockByNumber', [tag(b), true]);
       const tsISO = new Date(hexToInt(block.timestamp as Hex) * 1000).toISOString();
       const txs: any[] = block.transactions || [];
+
       for (const tx of txs) {
         const to = String(tx.to || '').toLowerCase();
         if (!to || to !== toAddr) continue;
+
         const value = toBig(tx.value || '0x0');
         if (value <= 0n) continue;
 
@@ -132,8 +196,9 @@ export async function POST(req: Request) {
           wallet_id: walletId,
           tx_hash: String(tx.hash),
           amount: weiToDecimal(tx.value, decimals), // numeric in native units
-          amount_usd: null,
+          amount_usd: null,                         // FX Sync fills later
           block_time: tsISO,
+          inserted_at: new Date().toISOString(),
         });
       }
     }
@@ -159,6 +224,10 @@ export async function POST(req: Request) {
       to: end,
       scanned: end - start + 1,
       inserted,
+      reason: startReason,
+      lastSeen: last || null,
+      overlapBlocks: startReason === 'resume+overlap' ? OVERLAP_BLOCKS : 0,
+      overrideLookback: startReason === 'override' ? overrideLookback : 0,
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || 'Unexpected error' }, { status: 500 });
