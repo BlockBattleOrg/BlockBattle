@@ -55,7 +55,9 @@ export default function ContributionLeaderboard() {
   return (
     <div className="grid gap-6 md:grid-cols-2">
       <div className="space-y-3">
-        <h3 className="text-lg font-semibold">Totals by chain</h3>
+        <h3 className="text-lg font-semibold">
+          Totals by chain <span className="text-xs text-gray-500">(updated hourly)</span>
+        </h3>
         <div className="overflow-hidden rounded-2xl border border-gray-200">
           <table className="w-full table-auto text-sm">
             <thead className="bg-gray-50 text-left">
@@ -85,7 +87,9 @@ export default function ContributionLeaderboard() {
       </div>
 
       <div className="space-y-3">
-        <h3 className="text-lg font-semibold">Recent contributions</h3>
+        <h3 className="text-lg font-semibold">
+          Recent contributions <span className="text-xs text-gray-500">(updated hourly)</span>
+        </h3>
         <div className="overflow-hidden rounded-2xl border border-gray-200">
           <table className="w-full table-auto text-sm">
             <thead className="bg-gray-50 text-left">

@@ -60,7 +60,7 @@ function explorerTxUrl(chain: string | null | undefined, tx: string | null | und
   if (c === 'AVAX') return `https://snowtrace.io/tx/${tx}`;
   if (c === 'TRX')  return `https://tronscan.org/#/transaction/${tx}`;
 
-  // UTXO / ostali
+  // UTXO / others
   if (c === 'BTC')  return `https://mempool.space/tx/${tx}`;
   if (c === 'LTC')  return `https://blockchair.com/litecoin/transaction/${tx}`;
   if (c === 'DOGE') return `https://blockchair.com/dogecoin/transaction/${tx}`;
@@ -131,10 +131,11 @@ export default function ContributionsPanel() {
         {/* Totals */}
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
           <div className="flex items-center justify-between border-b bg-gray-50/60 px-4 py-3">
-            <div>
+            <div className="flex items-baseline gap-2">
               <div className="text-sm font-medium">Totals by chain</div>
-              <div className="text-xs text-gray-500">Native + USD (sum)</div>
+              <span className="text-xs text-gray-500">(updated hourly)</span>
             </div>
+            <div className="text-xs text-gray-500">Native + USD (sum)</div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
@@ -167,10 +168,11 @@ export default function ContributionsPanel() {
         {/* Recent */}
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
           <div className="flex items-center justify-between border-b bg-gray-50/60 px-4 py-3">
-            <div>
+            <div className="flex items-baseline gap-2">
               <div className="text-sm font-medium">Recent contributions</div>
-              <div className="text-xs text-gray-500">Latest payments (native + USD)</div>
+              <span className="text-xs text-gray-500">(updated hourly)</span>
             </div>
+            <div className="text-xs text-gray-500">Latest payments (native + USD)</div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
