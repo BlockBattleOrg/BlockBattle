@@ -2,30 +2,27 @@
 
 /**
  * TetrisBlocks.tsx
- * Lightweight, “tetris-like” blocks renderer used on the homepage.
- * - One square = one contribution
- * - Bigger amount (USD) => bigger block (with sane clamps)
- * - Smooth falling-in animation with a tiny bounce
- *
- * Expected input shape matches /api/public/blocks/recent.
+ * One square = one contribution.
+ * Bigger USD amount => bigger square (soft log scaling).
+ * Each square links to the appropriate chain explorer (if tx is present).
  */
 
 import * as React from "react";
 
 export type BlockRow = {
-  chain: string;                 // e.g. "ETH", "SOL"
-  amount: number | null;         // native amount (unused for sizing but shown in title)
-  amount_usd?: number | null;    // used for sizing (preferred)
-  tx?: string | null;            // optional (for title)
-  timestamp?: string | null;     // optional (for title)
+  chain: string;                 // e.g. "ETH", "SOL", "POL" ...
+  amount: number | null;         // native amount (for tooltip)
+  amount_usd?: number | null;    // used for sizing
+  tx?: string | null;            // transaction hash (for explorer link)
+  timestamp?: string | null;     // ISO string (for tooltip)
 };
 
 type Props = {
   rows: BlockRow[];
-  columns?: number; // grid columns
+  columns?: number; // grid columns (default 10)
 };
 
-/** Brand/legend colors MUST match BlocksContainer legend to stay consistent */
+/** Keep colors aligned with BlocksContainer legend. */
 const CHAIN_COLORS: Record<string, string> = {
   ETH: "#3b82f6",
   BTC: "#f59e0b",
@@ -50,28 +47,54 @@ function colorForChain(symbol: string) {
   return CHAIN_COLORS[key] || "#64748b";
 }
 
-/** Map USD amount → block scale (1.0 … 2.5) with soft log curve */
+/** Map USD -> block scale (1.0 … 2.5) using a gentle log curve. */
 function sizeFromUsd(usd?: number | null): number {
   const val = typeof usd === "number" && isFinite(usd) ? usd : 0;
-  // Small amounts still visible; large amounts don’t explode the grid.
-  // 0 → 1.0, 1 → ~1.3, 10 → ~2.0, 100+ → ~2.5 (clamped)
-  const scaled = 1.0 + Math.log10(1 + val) * 0.9;
+  const scaled = 1.0 + Math.log10(1 + val) * 0.9; // 0→1.0, 1→~1.3, 10→~2.0, 100→~2.5
   return Math.max(1.0, Math.min(2.5, scaled));
 }
 
-/** Shorten a hash in tooltip */
+/** Build a block-explorer URL per chain. */
+function explorerTxUrl(chain?: string | null, tx?: string | null) {
+  if (!chain || !tx) return null;
+  const c = chain.toUpperCase();
+
+  // EVM family
+  if (c === "ETH") return `https://etherscan.io/tx/${tx}`;
+  if (c === "BSC") return `https://bscscan.com/tx/${tx}`;
+  if (c === "ARB") return `https://arbiscan.io/tx/${tx}`;
+  if (c === "OP")  return `https://optimistic.etherscan.io/tx/${tx}`;
+  if (c === "POL" || c === "MATIC") return `https://polygonscan.com/tx/${tx}`;
+  if (c === "AVAX") return `https://snowtrace.io/tx/${tx}`;
+
+  // UTXO / others
+  if (c === "BTC")  return `https://mempool.space/tx/${tx}`;
+  if (c === "LTC")  return `https://blockchair.com/litecoin/transaction/${tx}`;
+  if (c === "DOGE") return `https://blockchair.com/dogecoin/transaction/${tx}`;
+
+  // Cosmos & friends
+  if (c === "ATOM") return `https://www.mintscan.io/cosmos/tx/${tx}`;
+  if (c === "DOT")  return `https://polkadot.subscan.io/extrinsic/${tx}`;
+  if (c === "XRP")  return `https://xrpscan.com/tx/${tx}`;
+  if (c === "XLM")  return `https://stellarchain.io/transactions/${tx}`;
+
+  // Solana
+  if (c === "SOL")  return `https://solscan.io/tx/${tx}`;
+
+  return null;
+}
+
+/** Shorten hash for tooltip/title. */
 function shortHash(tx?: string | null) {
   if (!tx) return "";
   return `${tx.slice(0, 8)}…${tx.slice(-6)}`;
 }
 
 export default function TetrisBlocks({ rows, columns = 10 }: Props) {
-  // Base square size in px (will be scaled)
-  const BASE = 18;
+  const BASE = 18; // base px for 1.0 scale
 
   return (
     <div className="relative">
-      {/* Grid container */}
       <div
         className="grid gap-2"
         style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
@@ -81,6 +104,7 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
           const color = colorForChain(chain);
           const s = sizeFromUsd(r.amount_usd);
           const px = Math.round(BASE * s);
+          const href = explorerTxUrl(chain, r.tx);
 
           const title = [
             `Chain: ${chain}`,
@@ -92,24 +116,39 @@ export default function TetrisBlocks({ rows, columns = 10 }: Props) {
             .filter(Boolean)
             .join(" • ");
 
-          return (
+          const square = (
             <div
-              key={r.tx ? `${r.tx}-${idx}` : `b-${idx}`}
               title={title}
               className="relative isolate rounded-md shadow-sm animate-bb-fall will-change-transform"
               style={{
                 width: px,
                 height: px,
                 backgroundColor: color,
-                // small variety so multiple blocks don’t fall exactly in sync
                 animationDelay: `${(idx % 8) * 60}ms`,
               }}
             />
           );
+
+          return (
+            <div key={r.tx ? `${r.tx}-${idx}` : `b-${idx}`} className="flex items-center justify-center">
+              {href ? (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  aria-label={`${chain} tx ${shortHash(r.tx)}`}
+                >
+                  {square}
+                </a>
+              ) : (
+                square
+              )}
+            </div>
+          );
         })}
       </div>
 
-      {/* Local styles once per component instance */}
+      {/* local CSS for fall animation */}
       <style jsx>{`
         @keyframes bb-fall {
           0% {
