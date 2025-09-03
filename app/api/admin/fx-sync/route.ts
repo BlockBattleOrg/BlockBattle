@@ -17,8 +17,7 @@ function maybe(name: string): string | undefined {
   const v = process.env[name];
   return v && v.trim().length ? v : undefined;
 }
-function lc(x?: string | null) { return (x || "").toLowerCase(); }
-function up(x?: string | null) { return (x || "").toUpperCase(); }
+const up = (x?: string | null) => String(x || "").toUpperCase();
 
 function supa(): SupabaseClient {
   return createClient(need("NEXT_PUBLIC_SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE_KEY"), {
@@ -31,26 +30,26 @@ async function parseFxFromQuery(url: URL): Promise<FXMap> {
   const out: FXMap = {};
   if (fxParam) {
     for (const part of fxParam.split(",")) {
-      const [rawK, rawV] = part.split(":");
-      const k = up((rawK || "").trim());
-      const v = Number((rawV || "").trim());
+      const [k0, v0] = part.split(":");
+      const k = up((k0 || "").trim());
+      const v = Number((v0 || "").trim());
       if (k && Number.isFinite(v) && v > 0) out[k] = v;
     }
   }
-  // Optional: remote JSON feed (simple key->number mapping)
-  const feed = maybe("PRICE_FEED_URL");
-  if (feed && Object.keys(out).length === 0) {
-    try {
-      const res = await fetch(feed, { headers: { "accept": "application/json" } });
-      if (res.ok) {
-        const j = await res.json();
-        for (const [k, v] of Object.entries(j || {})) {
-          const n = Number(v as any);
-          if (Number.isFinite(n) && n > 0) out[up(k)] = n;
+  // optional remote feed
+  if (Object.keys(out).length === 0) {
+    const feed = maybe("PRICE_FEED_URL");
+    if (feed) {
+      try {
+        const res = await fetch(feed, { headers: { accept: "application/json" } });
+        if (res.ok) {
+          const j = await res.json();
+          for (const [k, v] of Object.entries(j || {})) {
+            const n = Number(v as any);
+            if (Number.isFinite(n) && n > 0) out[up(k)] = n;
+          }
         }
-      }
-    } catch {
-      // ignore
+      } catch {}
     }
   }
   return out;
@@ -65,27 +64,21 @@ export async function POST(req: Request) {
     }
 
     const client = supa();
-
-    // modes
-    const mode = (url.searchParams.get("mode") || "missing").toLowerCase(); // "missing" | "reprice"
-    const hours = Math.max(1, Number(url.searchParams.get("hours") || "24")); // window for mode=missing
-    const days = Math.max(1, Number(url.searchParams.get("days") || "30"));  // window for mode=reprice
-    const limit = Math.max(100, Math.min(5000, Number(url.searchParams.get("limit") || "2000"))); // per batch
-
-    // Optional: filter po chainu (comma-separated), npr. chain=POL,ETH
+    const mode = (url.searchParams.get("mode") || "missing").toLowerCase(); // missing | reprice
+    const hours = Math.max(1, Number(url.searchParams.get("hours") || "24")); // for missing
+    const days = Math.max(1, Number(url.searchParams.get("days") || "30"));  // for reprice
+    const limit = Math.max(100, Math.min(5000, Number(url.searchParams.get("limit") || "2000")));
     const chainFilter = (url.searchParams.get("chain") || "")
       .split(",")
       .map(s => up(s.trim()))
       .filter(Boolean);
 
-    // Cijene
     const fx = await parseFxFromQuery(url);
     if (!fx || Object.keys(fx).length === 0) {
-      // Bez cijena ne možemo izračunati amount_usd
-      return NextResponse.json({ ok: false, error: "No FX map provided (use ?fx=POL:0.48,ETH:2400 or set PRICE_FEED_URL)" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "No FX map provided (?fx=POL:0.51,ETH:2400 or PRICE_FEED_URL)" }, { status: 400 });
     }
 
-    // Dohvati mapu wallet_id -> chain
+    // wallets -> map id -> CHAIN
     const { data: wallets, error: werr } = await client
       .from("wallets")
       .select("id, chain")
@@ -93,72 +86,60 @@ export async function POST(req: Request) {
     if (werr) throw new Error(`wallets: ${werr.message}`);
 
     const idToChain = new Map<string, string>();
-    for (const w of wallets || []) {
-      idToChain.set(w.id as string, up(w.chain as string));
-    }
+    for (const w of wallets || []) idToChain.set(String(w.id), up(String(w.chain)));
 
-    // Datum granice
     const now = Date.now();
-    const sinceTs = mode === "missing"
+    const sinceIso = mode === "missing"
       ? new Date(now - hours * 3600_000).toISOString()
       : new Date(now - days * 86400_000).toISOString();
 
-    // Selektor retka
-    const baseSel = client
+    // base select
+    let q = client
       .from("contributions")
       .select("id, wallet_id, amount, amount_usd, block_time")
-      .gte("block_time", sinceTs)
+      .gte("block_time", sinceIso)
       .order("block_time", { ascending: false })
       .limit(limit);
 
-    // Za mode=missing filtriramo na amount_usd IS NULL
-    let rowsResp = mode === "missing"
-      ? await baseSel.is("amount_usd", null)
-      : await baseSel;
+    if (mode === "missing") q = q.is("amount_usd", null);
 
-    if (rowsResp.error) throw new Error(`select contributions: ${rowsResp.error.message}`);
+    const { data: rows, error: rerr } = await q;
+    if (rerr) throw new Error(`select contributions: ${rerr.message}`);
 
-    // (Opcionalni) filter po chainu
-    let rows = (rowsResp.data || []).filter(r => idToChain.has(r.wallet_id as string));
-    if (chainFilter.length) {
-      rows = rows.filter(r => chainFilter.includes(up(idToChain.get(r.wallet_id as string))));
-    }
+    // filter po chainu (ako tražen)
+    const filtered = (rows || []).filter(r => r.wallet_id && idToChain.has(String(r.wallet_id)));
+    const pool = chainFilter.length
+      ? filtered.filter(r => chainFilter.includes(idToChain.get(String(r.wallet_id))!))
+      : filtered;
 
-    // Priprema update batch-a
-    type UpRow = { id: number; amount_usd: number };
-    const updates: UpRow[] = [];
+    // priprema per-row update (bez upsert!)
+    let considered = 0;
+    let updated = 0;
 
-    for (const r of rows) {
-      const chain = up(idToChain.get(r.wallet_id as string));
+    for (const r of pool) {
+      considered++;
+      const chain = idToChain.get(String(r.wallet_id))!;
       const price = fx[chain];
-      if (!price) continue; // nema cijene za taj chain → preskačemo
+      if (!price) continue;
+
       const amt = Number(r.amount);
       if (!Number.isFinite(amt)) continue;
-      const usd = +(amt * price); // basic multiply, rounding prepusti DB formatu NUMERIC
-      // kod mode=reprice uvijek upisujemo ponovno; kod missing upisujemo samo ako je null (već filtrirano)
-      updates.push({ id: r.id as number, amount_usd: usd });
-    }
 
-    // Batch upsert preko PK id (samo kolona amount_usd)
-    let updated = 0;
-    const CHUNK = 500;
-    for (let i = 0; i < updates.length; i += CHUNK) {
-      const chunk = updates.slice(i, i + CHUNK);
+      const usd = amt * price;
+
       const { error: uerr } = await client
         .from("contributions")
-        .upsert(
-          chunk.map(u => ({ id: u.id, amount_usd: u.amount_usd })),
-          { onConflict: "id" }
-        );
-      if (uerr) throw new Error(`upsert chunk failed: ${uerr.message}`);
-      updated += chunk.length;
+        .update({ amount_usd: usd })
+        .eq("id", r.id as number);
+      if (uerr) throw new Error(`update id=${r.id}: ${uerr.message}`);
+      updated++;
     }
 
     return NextResponse.json({
       ok: true,
       mode,
-      since: sinceTs,
-      considered: rows.length,
+      since: sinceIso,
+      considered,
       updated,
       fxKeys: Object.keys(fx),
       chainFilter: chainFilter.length ? chainFilter : undefined,
