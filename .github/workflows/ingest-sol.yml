@@ -1,8 +1,8 @@
-name: Ingest SOL (hourly)
+name: Ingest SOL (every 2 hours)
 
 on:
   schedule:
-    - cron: "37 * * * *"   # once per hour at minute 37 (UTC)
+    - cron: "37 */2 * * *"   # once per 2 hours at minute 37 (UTC)
   workflow_dispatch:
 
 permissions:

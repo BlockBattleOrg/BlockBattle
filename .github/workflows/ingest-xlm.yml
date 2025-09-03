@@ -1,8 +1,8 @@
-name: Ingest XLM (hourly)
+name: Ingest XLM (every 2 hours)
 
 on:
   schedule:
-    - cron: "40 * * * *"   # once per hour at minute 40 (UTC)
+    - cron: "40 */2 * * *"   # once per 2 hours at minute 40 (UTC)
   workflow_dispatch:
 
 permissions:

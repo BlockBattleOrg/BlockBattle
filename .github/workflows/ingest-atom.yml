@@ -1,8 +1,8 @@
-name: Ingest ATOM (hourly)
+name: Ingest ATOM (every 2 hours)
 
 on:
   schedule:
-    - cron: "31 * * * *"   # once per hour at minute 31 (UTC)
+    - cron: "31 */2 * * *"   # once per 2 hours at minute 31 (UTC)
   workflow_dispatch:
 
 permissions:

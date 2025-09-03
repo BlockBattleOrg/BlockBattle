@@ -1,8 +1,8 @@
-name: Ingest LTC (hourly)
+name: Ingest LTC (every 2 hours)
 
 on:
   schedule:
-    - cron: "4 * * * *"   # once per hour at minute 04 (UTC)
+    - cron: "4 */2 * * *"   # once per 2 hours at minute 04 (UTC)
   workflow_dispatch:
 
 permissions:

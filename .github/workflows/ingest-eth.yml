@@ -1,8 +1,8 @@
-name: Ingest ETH (hourly)
+name: Ingest ETH (every 2 hours)
 
 on:
   schedule:
-    - cron: "10 * * * *"   # once per hour at minute 10 (UTC)
+    - cron: "10 */2 * * *"   # once per 2 hours at minute 10 (UTC)
   workflow_dispatch:
 
 permissions:

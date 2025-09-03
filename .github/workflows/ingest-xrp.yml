@@ -1,8 +1,8 @@
-name: Ingest XRP (hourly)
+name: Ingest XRP (every 2 hours)
 
 on:
   schedule:
-    - cron: "34 * * * *"   # once per hour at minute 34 (UTC)
+    - cron: "34 */2 * * *"   # once per 2 hours at minute 34 (UTC)
   workflow_dispatch:
 
 permissions:

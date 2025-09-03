@@ -1,8 +1,8 @@
-name: Ingest ARB (hourly)
+name: Ingest ARB (every 2 hours)
 
 on:
   schedule:
-    - cron: "16 * * * *"   # once per hour at minute 16
+    - cron: "16 */2 * * *"   # once per 2 hours at minute 16
   workflow_dispatch:
 
 permissions:

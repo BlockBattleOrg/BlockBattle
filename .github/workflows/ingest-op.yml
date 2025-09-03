@@ -1,8 +1,8 @@
-name: Ingest OP (hourly)
+name: Ingest OP (every 2 hours)
 
 on:
   schedule:
-    - cron: "13 * * * *"   # once per hour at minute 13 (UTC)
+    - cron: "13 */2 * * *"   # once per 2 hours at minute 13 (UTC)
   workflow_dispatch:
 
 permissions:

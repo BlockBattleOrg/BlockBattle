@@ -1,8 +1,8 @@
-name: Ingest BSC (hourly)
+name: Ingest BSC (every 2 hours)
 
 on:
   schedule:
-    - cron: "46 * * * *"   # once per hour at minute 46 (UTC)
+    - cron: "46 */2 * * *"   # once per 2 hours at minute 46 (UTC)
   workflow_dispatch:
 
 permissions:

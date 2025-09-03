@@ -1,8 +1,8 @@
-name: Ingest POL (hourly)
+name: Ingest POL (every 2 hours)
 
 on:
   schedule:
-    - cron: "19 * * * *"   # once per hour at minute 19 (UTC)
+    - cron: "19 */2 * * *"   # once per 2 hours at minute 19 (UTC)
   workflow_dispatch:
 
 permissions:

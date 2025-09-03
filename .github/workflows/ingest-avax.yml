@@ -1,8 +1,8 @@
-name: Ingest AVAX (hourly)
+name: Ingest AVAX (every 2 hours)
 
 on:
   schedule:
-    - cron: "22 * * * *"   # once per hour at minute 22
+    - cron: "22 */2 * * *"   # once per 2 hours at minute 22
   workflow_dispatch:
 
 permissions:

@@ -1,0 +1,25 @@
+name: FX Daily Reprice (2x/day)
+
+on:
+  schedule:
+    - cron: "10 0 * * *"   # 00:10 UTC
+    - cron: "10 12 * * *"  # 12:10 UTC
+  workflow_dispatch:
+
+jobs:
+  reprice:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Reprice last 30 days (POL + ETH shown as example)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          BASE="${{ vars.PROD_BASE_URL || 'https://www.blockbattle.org' }}"
+          # FX map: pass what you want to reprice; možeš dodati i ostale lance
+          FX_MAP="POL:0.48,ETH:2400"
+          curl -sS -X POST "$BASE/api/admin/fx-sync?mode=reprice&days=30&fx=${FX_MAP}" \
+            -H "x-cron-secret: $CRON_SECRET" | jq .
+

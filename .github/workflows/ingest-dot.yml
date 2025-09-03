@@ -1,8 +1,8 @@
-name: Ingest DOT (hourly)
+name: Ingest DOT (every 2 hours)
 
 on:
   schedule:
-    - cron: "25 * * * *"   # once per hour at minute 25 (UTC)
+    - cron: "25 */2 * * *"   # once per 2 hours at minute 25 (UTC)
   workflow_dispatch:
 
 permissions:
