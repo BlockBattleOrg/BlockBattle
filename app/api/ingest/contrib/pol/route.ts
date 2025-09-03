@@ -27,7 +27,7 @@ function rpcBase(): string {
 function rpcHeaders() {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const key = process.env.NOWNODES_API_KEY;
-  if (key) headers["api-key"] = key; // NowNodes needs api-key
+  if (key) headers["api-key"] = key; // NowNodes
   return headers;
 }
 async function evmRpc<T = any>(method: string, params: any[], attempt = 0): Promise<T> {
@@ -51,9 +51,6 @@ function weiToDecimalString(wei: Hex | string, decimals = 18): string {
   if (frac === 0n) return whole.toString();
   const f = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
   return `${whole.toString()}.${f}`;
-}
-function weiToNumber(wei: Hex | string, decimals = 18): number {
-  return Number(weiToDecimalString(wei, decimals));
 }
 function isAddress(x: any): x is Address {
   return typeof x === "string" && /^0x[a-fA-F0-9]{40}$/.test(x);
@@ -128,9 +125,6 @@ export async function POST(req: Request) {
     const sinceBlockParam = url.searchParams.get("sinceBlock");
     const maxBlocks = Math.min(Number(url.searchParams.get("maxBlocks") || "0") || 0, 20000) || 0;
     const forceTx = url.searchParams.get("tx"); // direct single-tx debug path
-    // temporary helper to compute amount_usd directly in-route until FX normalizer fills it
-    const usdPerPol = Number(url.searchParams.get("usdPerPol") || "0");
-    const useUsd = Number.isFinite(usdPerPol) && usdPerPol > 0 ? usdPerPol : 0;
 
     const tipHex = await evmRpc<Hex>("eth_blockNumber", []);
     const tip = hexToInt(tipHex);
@@ -153,10 +147,7 @@ export async function POST(req: Request) {
 
       const blk = hexToInt(tx.blockNumber);
       const blkData = await evmRpc<RpcBlock>("eth_getBlockByNumber", [tx.blockNumber, false]);
-      const ts = hexToInt((blkData as any).timestamp as Hex);
-
-      const amount = weiToDecimalString(tx.value); // store as NUMERIC via text
-      const amount_usd = useUsd ? weiToNumber(tx.value) * useUsd : null;
+      const ts = Number((blkData as any).timestamp ? BigInt((blkData as any).timestamp) : 0n);
 
       // idempotent insert on (wallet_id, tx_hash)
       const { error } = await client
@@ -166,8 +157,7 @@ export async function POST(req: Request) {
             {
               wallet_id: hit.id,
               tx_hash: tx.hash,
-              amount,          // NUMERIC
-              amount_usd,      // NUMERIC | null
+              amount: weiToDecimalString(tx.value), // NUMERIC via text
               block_time: new Date(ts * 1000).toISOString(),
             },
           ],
@@ -179,7 +169,6 @@ export async function POST(req: Request) {
       await setLastScanned(client, Math.max((await getLastScanned(client)) || 0, blk));
 
       const resp: any = { ok: true, inserted: 1, reason: "forceTx", tx: tx.hash, wallet_id: hit.id };
-      if (useUsd) resp.usdPerPol = useUsd;
       if (debug) resp.funding = wallets.map(w => w.address.toLowerCase());
       return NextResponse.json(resp);
     }
@@ -223,19 +212,15 @@ export async function POST(req: Request) {
 
       for (const blk of blocks) {
         const bn = hexToInt(blk.number);
-        const ts = hexToInt(blk.timestamp);
+        const ts = Number(BigInt(blk.timestamp));
         for (const tx of blk.transactions || []) {
           const to = lc(tx.to || "");
           const hit = to && byAddr.get(to);
           if (hit && toBig(tx.value) > 0n) {
-            const amount = weiToDecimalString(tx.value);
-            const amount_usd = useUsd ? weiToNumber(tx.value) * useUsd : null;
-
             rows.push({
               wallet_id: hit.id,
               tx_hash: tx.hash,
-              amount,
-              amount_usd,
+              amount: weiToDecimalString(tx.value),
               block_time: new Date(ts * 1000).toISOString(),
             });
           }
@@ -244,7 +229,6 @@ export async function POST(req: Request) {
       }
 
       if (rows.length) {
-        // upsert to avoid unique violation on reruns
         const { error } = await client
           .from("contributions")
           .upsert(rows, { onConflict: "wallet_id,tx_hash", ignoreDuplicates: true });
@@ -268,7 +252,6 @@ export async function POST(req: Request) {
       lastSeen,
       reason: sinceBlockParam ? "sinceBlock" : sinceHours ? "sinceHours" : "marker",
     };
-    if (useUsd) resp.usdPerPol = useUsd;
     if (debug) resp.funding = wallets.map(w => w.address.toLowerCase());
     return NextResponse.json(resp);
   } catch (e: any) {
