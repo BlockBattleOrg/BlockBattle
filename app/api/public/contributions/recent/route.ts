@@ -6,31 +6,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { fetchUsdPrices, toUsd } from "@/lib/fx";
+import { canonChain } from "@/lib/chain";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-
-// Canonical chain aliasing so BSC/BNB/BINANCE -> BNB, POL/MATIC/POLYGON -> POL, etc.
-const ALIAS_TO_CANON: Record<string, string> = {
-  "btc": "BTC", "bitcoin": "BTC",
-  "eth": "ETH", "ethereum": "ETH",
-  "pol": "POL", "matic": "POL", "polygon": "POL",
-  "bnb": "BNB", "bsc": "BNB", "binance": "BNB",
-  "sol": "SOL", "solana": "SOL",
-  "arb": "ARB", "arbitrum": "ARB",
-  "op":  "OP",  "optimism": "OP",
-  "avax":"AVAX","avalanche":"AVAX",
-  "atom":"ATOM","cosmos":"ATOM",
-  "dot": "DOT","polkadot":"DOT",
-  "ltc": "LTC","litecoin":"LTC",
-  "trx": "TRX","tron":"TRX",
-  "xlm": "XLM","stellar":"XLM",
-  "xrp": "XRP","ripple":"XRP",
-  "doge":"DOGE","dogecoin":"DOGE",
-};
-const canon = (x?: string | null) =>
-  ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
 
 // Supabase client (prefer SERVICE_ROLE on server routes, fallback to ANON for dev)
 function getSupabase() {
@@ -50,10 +30,8 @@ function getSupabase() {
 
 // Safely extract symbol/chain from nested relation that can be object or array
 function extractSymbolOrChain(rel: any): { symbol?: string; chain?: string } {
-  // wallets can be object or array
   const w = Array.isArray(rel) ? rel[0] : rel;
   if (!w) return {};
-  // currencies can be object or array
   const c = Array.isArray(w.currencies) ? w.currencies[0] : w.currencies;
   const symbol = c?.symbol ? String(c.symbol).toUpperCase() : undefined;
   const chain = w?.chain ? String(w.chain) : undefined;
@@ -68,7 +46,6 @@ export async function GET(req: NextRequest) {
 
     const supabase = getSupabase();
 
-    // 1) fetch last N contributions by inserted_at desc (fallback to id if needed)
     let dataRows: any[] = [];
     {
       const { data, error } = await supabase
@@ -92,7 +69,6 @@ export async function GET(req: NextRequest) {
         .limit(limit);
 
       if (error) {
-        // fallback ordering by id if inserted_at not usable
         const { data: data2, error: err2 } = await supabase
           .from("contributions")
           .select(`
@@ -121,12 +97,11 @@ export async function GET(req: NextRequest) {
 
     if (!dataRows.length) return NextResponse.json({ ok: true, total: 0, rows: [] });
 
-    // 2) collect needed symbols for on-the-fly USD if amount_usd is NULL
     const neededSymbols = new Set<string>();
     for (const r of dataRows) {
       if (r.amount_usd == null && r.amount != null) {
         const { symbol, chain } = extractSymbolOrChain(r.wallets);
-        const s = canon(symbol || chain || "");
+        const s = canonChain(symbol || chain || "");
         if (s) neededSymbols.add(s);
       }
     }
@@ -136,11 +111,9 @@ export async function GET(req: NextRequest) {
       prices = await fetchUsdPrices(Array.from(neededSymbols));
     }
 
-    // 3) shape response rows
     const rows = dataRows.map((r) => {
       const { symbol, chain } = extractSymbolOrChain(r.wallets);
-      const ch = canon(symbol || chain || "UNKNOWN");
-
+      const ch = canonChain(symbol || chain || "UNKNOWN")!;
       let usd = r.amount_usd;
       const amtNum = r.amount == null ? null : Number(r.amount);
 
