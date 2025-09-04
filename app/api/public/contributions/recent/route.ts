@@ -1,13 +1,11 @@
 // app/api/public/contributions/recent/route.ts
-// Robust "recent contributions" endpoint.
-//
-// - Uses relational select contributions → wallets → currencies to resolve chain symbol
-// - LEFT-like semantics via PostgREST nested selects (no hard-coded chains)
-// - Returns consistent shape used by the frontend:
-//   { ok, total, rows: [{ chain, amount, amount_usd, tx, timestamp }] }
+// Recent contributions: last N rows with { chain, amount, amount_usd, tx, timestamp }.
+// If amount_usd is NULL, we compute USD on-the-fly using lib/fx.ts (real-time display).
+// No schema changes.
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { fetchUsdPrices, toUsd } from "@/lib/fx";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,108 +19,148 @@ const ALIAS_TO_CANON: Record<string, string> = {
   "bnb": "BNB", "bsc": "BNB", "binance": "BNB",
   "sol": "SOL", "solana": "SOL",
   "arb": "ARB", "arbitrum": "ARB",
-  "op": "OP", "optimism": "OP",
-  "avax": "AVAX", "avalanche": "AVAX",
-  "atom": "ATOM", "cosmos": "ATOM",
-  "dot": "DOT", "polkadot": "DOT",
-  "ltc": "LTC", "litecoin": "LTC",
-  "trx": "TRX", "tron": "TRX",
-  "xlm": "XLM", "stellar": "XLM",
-  "xrp": "XRP", "ripple": "XRP",
-  "doge": "DOGE", "dogecoin": "DOGE",
+  "op":  "OP",  "optimism": "OP",
+  "avax":"AVAX","avalanche":"AVAX",
+  "atom":"ATOM","cosmos":"ATOM",
+  "dot": "DOT","polkadot":"DOT",
+  "ltc": "LTC","litecoin":"LTC",
+  "trx": "TRX","tron":"TRX",
+  "xlm": "XLM","stellar":"XLM",
+  "xrp": "XRP","ripple":"XRP",
+  "doge":"DOGE","dogecoin":"DOGE",
 };
 const canon = (x?: string | null) =>
   ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
 
-type RecentRow = {
-  amount: string | number | null;
-  amount_usd: string | number | null;
-  tx_hash: string | null;
-  block_time: string | null;     // timestamptz
-  inserted_at: string | null;    // timestamptz
-  wallets?: {
-    chain?: string | null;
-    currencies?: {
-      symbol?: string | null;
-    } | null;
-  } | Array<{
-    chain?: string | null;
-    currencies?: { symbol?: string | null } | null;
-  }> | null;
-};
-
-/** Supabase server client
- *  - Prefer SERVICE_ROLE on server routes (old working setup),
- *  - Fallback to ANON when SERVICE_ROLE is not present (e.g. local/dev).
- */
-function supa() {
-  const url =
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    process.env.SUPABASE_URL ||
+// Supabase client (prefer SERVICE_ROLE on server routes, fallback to ANON for dev)
+function getSupabase() {
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     "";
-  if (!url) throw new Error("Missing Supabase URL (NEXT_PUBLIC_SUPABASE_URL / SUPABASE_URL)");
-
-  const serviceRole = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "";
-
-  const key = serviceRole || anon;
-  if (!key) throw new Error("Missing Supabase key (SUPABASE_SERVICE_ROLE_KEY / ANON)");
-
+  if (!url || !key) {
+    throw new Error(
+      "Missing Supabase env: need SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)."
+    );
+  }
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-export async function GET(req: Request) {
+// Safely extract symbol/chain from nested relation that can be object or array
+function extractSymbolOrChain(rel: any): { symbol?: string; chain?: string } {
+  // wallets can be object or array
+  const w = Array.isArray(rel) ? rel[0] : rel;
+  if (!w) return {};
+  // currencies can be object or array
+  const c = Array.isArray(w.currencies) ? w.currencies[0] : w.currencies;
+  const symbol = c?.symbol ? String(c.symbol).toUpperCase() : undefined;
+  const chain = w?.chain ? String(w.chain) : undefined;
+  return { symbol, chain };
+}
+
+export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const limitRaw = Number(searchParams.get("limit") || "10");
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.floor(limitRaw))) : 10;
+    const url = new URL(req.url);
+    const limitParam = parseInt(url.searchParams.get("limit") || "10", 10);
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 10;
 
-    const supabase = supa();
+    const supabase = getSupabase();
 
-    // Pull most recent contributions with relational symbols.
-    // NOTE: Nested selects in PostgREST behave like LEFT JOINs for missing relations.
-    const { data, error } = await supabase
-      .from("contributions")
-      .select(
-        `
-        amount,
-        amount_usd,
-        tx_hash,
-        block_time,
-        inserted_at,
-        wallets:wallet_id (
-          chain,
-          currencies:currency_id (
-            symbol
+    // 1) fetch last N contributions by inserted_at desc (fallback to id if needed)
+    let dataRows: any[] = [];
+    {
+      const { data, error } = await supabase
+        .from("contributions")
+        .select(`
+          id,
+          wallet_id,
+          amount,
+          amount_usd,
+          tx_hash,
+          block_time,
+          inserted_at,
+          wallets:wallet_id (
+            chain,
+            currencies:currency_id (
+              symbol
+            )
           )
-        )
-      `
-      )
-      .order("inserted_at", { ascending: false })
-      .limit(limit);
+        `)
+        .order("inserted_at", { ascending: false })
+        .limit(limit);
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      if (error) {
+        // fallback ordering by id if inserted_at not usable
+        const { data: data2, error: err2 } = await supabase
+          .from("contributions")
+          .select(`
+            id,
+            wallet_id,
+            amount,
+            amount_usd,
+            tx_hash,
+            block_time,
+            inserted_at,
+            wallets:wallet_id (
+              chain,
+              currencies:currency_id (
+                symbol
+              )
+            )
+          `)
+          .order("id", { ascending: false })
+          .limit(limit);
+        if (err2) return NextResponse.json({ ok: false, error: err2.message }, { status: 500 });
+        dataRows = data2 || [];
+      } else {
+        dataRows = data || [];
+      }
     }
 
-    const rows = (data || []).map((r: RecentRow) => {
-      // Handle relation returned as object or array
-      const w: any = r.wallets;
-      const wObj = Array.isArray(w) ? (w[0] ?? null) : w ?? null;
-      const symbol = wObj?.currencies?.symbol ?? null;
-      const chainRaw = symbol || wObj?.chain || null;
+    if (!dataRows.length) return NextResponse.json({ ok: true, total: 0, rows: [] });
+
+    // 2) collect needed symbols for on-the-fly USD if amount_usd is NULL
+    const neededSymbols = new Set<string>();
+    for (const r of dataRows) {
+      if (r.amount_usd == null && r.amount != null) {
+        const { symbol, chain } = extractSymbolOrChain(r.wallets);
+        const s = canon(symbol || chain || "");
+        if (s) neededSymbols.add(s);
+      }
+    }
+
+    let prices: Record<string, number> = {};
+    if (neededSymbols.size > 0) {
+      prices = await fetchUsdPrices(Array.from(neededSymbols));
+    }
+
+    // 3) shape response rows
+    const rows = dataRows.map((r) => {
+      const { symbol, chain } = extractSymbolOrChain(r.wallets);
+      const ch = canon(symbol || chain || "UNKNOWN");
+
+      let usd = r.amount_usd;
+      const amtNum = r.amount == null ? null : Number(r.amount);
+
+      if ((usd == null || Number.isNaN(Number(usd))) && amtNum != null && ch) {
+        const computed = toUsd(ch, String(amtNum), /*decimals*/ 18, prices);
+        if (typeof computed === "number" && isFinite(computed)) usd = computed;
+      }
+
       return {
-        chain: canon(chainRaw),
-        amount: r.amount === null ? 0 : Number(r.amount),
-        amount_usd: r.amount_usd === null ? null : Number(r.amount_usd),
-        tx: r.tx_hash || "",
-        timestamp: r.block_time || r.inserted_at || "",
+        chain: ch,
+        amount: amtNum,
+        amount_usd: usd == null ? null : Number(usd),
+        tx: r.tx_hash ?? "",
+        timestamp: (r.block_time as string) || (r.inserted_at as string) || "",
       };
     });
 
     return NextResponse.json({ ok: true, total: rows.length, rows });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
   }
 }
 
