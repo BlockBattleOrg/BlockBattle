@@ -1,4 +1,4 @@
-// app/lib/chain.ts
+// lib/chain.ts
 // Canonical chain aliasing for the whole app.
 // Use this everywhere instead of ad-hoc alias maps.
 //
@@ -8,8 +8,8 @@
 
 export type Canon =
   | "BTC" | "ETH" | "POL" | "BNB" | "SOL"
-  | "ARB" | "OP" | "AVAX" | "ATOM" | "DOT"
-  | "LTC" | "TRX" | "XLM" | "XRP" | "DOGE";
+  | "ARB" | "OP"  | "AVAX" | "ATOM" | "DOT"
+  | "LTC" | "TRX" | "XLM" | "XRP"  | "DOGE";
 
 const ALIAS_TO_CANON: Record<string, Canon> = {
   // BTC
@@ -47,6 +47,7 @@ const ALIAS_TO_CANON: Record<string, Canon> = {
 export function canonChain(x?: string | null): Canon | undefined {
   if (!x) return undefined;
   const low = x.trim().toLowerCase();
+  // If no alias match, return upper-cased original (typed as Canon for convenience)
   return ALIAS_TO_CANON[low] ?? (x.trim().toUpperCase() as Canon);
 }
 
