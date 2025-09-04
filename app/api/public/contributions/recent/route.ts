@@ -23,7 +23,8 @@ const ALIAS_TO_CANON: Record<string, string> = {
   "xrp": "XRP", "ripple": "XRP",
   "doge": "DOGE", "dogecoin": "DOGE",
 };
-const canon = (x?: string | null) => ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
+const canon = (x?: string | null) =>
+  ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
 
 function need(name: string) {
   const v = process.env[name];
@@ -39,7 +40,7 @@ function supa() {
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    let limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") || "10")));
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") || "10")));
 
     const client = supa();
     const { data, error } = await client
@@ -52,13 +53,17 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    const rows = (data || []).map((r: any) => ({
-      chain: canon(r?.wallets?.chain),
-      amount: Number(r.amount),
-      amount_usd: r.amount_usd === null ? null : Number(r.amount_usd),
-      tx: r.tx_hash,
-      timestamp: r.block_time,
-    }));
+    const rows = (data || []).map((r: any) => {
+      const w: any = (r as any).wallets;
+      const rawChain = Array.isArray(w) ? w[0]?.chain : w?.chain;
+      return {
+        chain: canon(rawChain),
+        amount: Number(r.amount),
+        amount_usd: r.amount_usd === null ? null : Number(r.amount_usd),
+        tx: r.tx_hash as string,
+        timestamp: r.block_time as string,
+      };
+    });
 
     return NextResponse.json({ ok: true, total: rows.length, rows });
   } catch (e: any) {

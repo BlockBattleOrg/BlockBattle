@@ -1,4 +1,4 @@
-// app/api/public/contributions/leaderboard/route.ts
+// app/api/public/leaderboard/route.ts
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
@@ -23,7 +23,8 @@ const ALIAS_TO_CANON: Record<string, string> = {
   "xrp": "XRP", "ripple": "XRP",
   "doge": "DOGE", "dogecoin": "DOGE",
 };
-const canon = (x?: string | null) => ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
+const canon = (x?: string | null) =>
+  ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
 
 function need(name: string) {
   const v = process.env[name];
@@ -45,7 +46,7 @@ export async function GET(req: Request) {
     const client = supa();
     const { data, error } = await client
       .from("contributions")
-      .select("amount, amount_usd, wallets!inner(chain)")
+      .select("amount, amount_usd, block_time, wallets!inner(chain)")
       .order("block_time", { ascending: false })
       .limit(5000); // safety cap
 
@@ -54,11 +55,15 @@ export async function GET(req: Request) {
     }
 
     const agg: Record<string, { total: number; usd_total: number; contributions: number }> = {};
-    for (const r of data || []) {
-      const chain = canon(r?.wallets?.chain);
+    for (const r of (data || []) as any[]) {
+      const w: any = r.wallets;
+      const rawChain = Array.isArray(w) ? w[0]?.chain : w?.chain;
+      const chain = canon(rawChain);
       if (!chain) continue;
+
       const amt = Number(r.amount);
       const usd = r.amount_usd === null ? 0 : Number(r.amount_usd);
+
       if (!agg[chain]) agg[chain] = { total: 0, usd_total: 0, contributions: 0 };
       agg[chain].total += amt;
       agg[chain].usd_total += usd;
