@@ -1,6 +1,7 @@
 // app/api/ingest/contrib/bsc/route.ts
 import { NextResponse } from "next/server";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { canonChain } from "@/lib/chain";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -9,7 +10,7 @@ type Hex = `0x${string}`;
 type Address = `0x${string}`;
 
 const BATCH_BLOCKS = 250;
-const MAX_LOOKBACK = 5000; // safety cap for sinceHours lookback
+const MAX_LOOKBACK = 5000; // safety cap for sinceHours->blocks
 
 // ---------- Utils ----------
 function need(name: string): string {
@@ -17,100 +18,86 @@ function need(name: string): string {
   if (!v) throw new Error(`Missing ENV: ${name}`);
   return v;
 }
-function rpcBase(): string {
-  const u =
-    (process.env.BSC_RPC_URL || "").trim() ||
-    (process.env.BNB_RPC_URL || "").trim() ||
-    "https://bsc.nownodes.io";
-  return u.replace(/\/+$/, "");
+function maybe(name: string): string | undefined {
+  const v = process.env[name];
+  return v && v.trim().length ? v : undefined;
 }
-function rpcHeaders() {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const key = process.env.NOWNODES_API_KEY;
-  if (key) headers["api-key"] = key; // NowNodes key if used
-  return headers;
+function supa(): SupabaseClient {
+  const url =
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    "";
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    "";
+  if (!url || !key) throw new Error("Missing Supabase env (URL/KEY)");
+  return createClient(url, key, { auth: { persistSession: false } });
 }
-async function evmRpc<T = any>(method: string, params: any[], attempt = 0): Promise<T> {
-  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
-  const res = await fetch(rpcBase(), { method: "POST", headers: rpcHeaders(), body });
-  if (!res.ok) {
-    if (attempt < 2) return evmRpc<T>(method, params, attempt + 1);
-    throw new Error(`RPC ${method} failed: HTTP ${res.status}`);
-  }
+function rpcUrl(): string {
+  // Support multiple env names; first match wins
+  return (
+    maybe("BSC_RPC_URL") ||
+    maybe("BSC_RPC") ||
+    maybe("BNB_RPC_URL") ||
+    maybe("BNB_RPC") ||
+    need("BSC_RPC_URL") // will throw if all above missing
+  );
+}
+
+async function evmRpc<T = any>(method: string, params: any[]): Promise<T> {
+  const res = await fetch(rpcUrl(), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  if (!res.ok) throw new Error(`RPC ${method} failed: HTTP ${res.status}`);
   const j = await res.json();
   if (j.error) throw new Error(`RPC ${method} error: ${j.error?.message || j.error}`);
   return j.result as T;
 }
-const toBig = (x: Hex | string | null | undefined) => BigInt(x ?? "0x0");
-const hexToInt = (x: Hex | string) => Number(BigInt(x as any));
-function weiToDecimalString(wei: Hex | string, decimals = 18): string {
-  const v = toBig(wei);
-  const base = 10n ** BigInt(decimals);
-  const whole = v / base;
-  const frac = v % base;
-  if (frac === 0n) return whole.toString();
-  const f = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
-  return `${whole.toString()}.${f}`;
+function hexToNum(hex: Hex | string | null | undefined): number {
+  if (!hex) return 0;
+  return Number(BigInt(hex as string));
 }
-function isAddress(x: any): x is Address {
-  return typeof x === "string" && /^0x[a-fA-F0-9]{40}$/.test(x);
+function weiToEth(v: Hex | string): number {
+  const n = typeof v === "string" && v.startsWith("0x") ? Number(BigInt(v)) : Number(v);
+  return n / 1e18;
 }
-const lc = (x: string | null | undefined) => (x || "").toLowerCase();
-
-// ---------- Supabase ----------
-function supa(): SupabaseClient {
-  return createClient(need("NEXT_PUBLIC_SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE_KEY"), {
-    auth: { persistSession: false },
-  });
+function toLower(addr?: string | null): string {
+  return (addr || "").toLowerCase();
 }
 
-type WalletRow = { id: string; address: string; chain: string };
-
-async function getBscWallets(client: SupabaseClient): Promise<{ byAddr: Map<string, WalletRow>; list: WalletRow[] }> {
-  const { data, error } = await client
-    .from("wallets")
-    .select("id,address,chain")
-    .in("chain", ["bsc", "bnb", "binance"])
-    .order("address");
-  if (error) throw new Error(`Supabase wallets: ${error.message}`);
-  const list: WalletRow[] = (data || []).filter((w: any) => isAddress(w.address));
-  const byAddr = new Map<string, WalletRow>();
-  for (const w of list) byAddr.set(lc(w.address), w);
-  return { byAddr, list };
+async function getLastScanned(db: SupabaseClient): Promise<number | null> {
+  const key = "bsc_contrib_last_scanned";
+  const { data, error } = await db.from("settings").select("value").eq("key", key).maybeSingle();
+  if (error) return null;
+  if (data?.value == null) return null;
+  const v = Number(data.value);
+  return Number.isFinite(v) ? v : null;
+}
+async function setLastScanned(db: SupabaseClient, height: number): Promise<void> {
+  const key = "bsc_contrib_last_scanned";
+  await db.from("settings").upsert({ key, value: String(height) }, { onConflict: "key" });
 }
 
-async function getLastScanned(client: SupabaseClient): Promise<number | null> {
-  const { data, error } = await client
-    .from("settings")
-    .select("key,value")
-    .eq("key", "bsc_contrib_last_scanned")
-    .maybeSingle();
-  if (error) throw new Error(`Supabase settings: ${error.message}`);
-  const v = data?.value ? Number(data.value) : null;
-  return Number.isFinite(v as any) ? (v as number) : null;
-}
-async function setLastScanned(client: SupabaseClient, value: number): Promise<void> {
-  const { error } = await client
-    .from("settings")
-    .upsert([{ key: "bsc_contrib_last_scanned", value: String(value) }], { onConflict: "key" });
-  if (error) throw new Error(`Supabase settings upsert: ${error.message}`);
-}
-
-// ---------- RPC Types ----------
-interface RpcTx {
+// ---------- Types from RPC ----------
+type RpcTx = {
   hash: Hex;
-  from?: Address;
-  to?: Address | null;
+  to: Address | null;
+  from: Address;
   value: Hex;
-  blockNumber: Hex;
-}
-interface RpcBlock {
+  blockNumber: Hex | null;
+};
+type RpcBlock = {
   number: Hex;
   timestamp: Hex;
   transactions: RpcTx[];
-}
+};
+type RpcReceipt = { status?: Hex; to?: Address | null; from?: Address; contractAddress?: Address | null };
 
-// ---------- Handler ----------
+// ---------- Main handler ----------
 export async function POST(req: Request) {
   try {
     const url = new URL(req.url);
@@ -119,143 +106,165 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const client = supa();
-    const debug = url.searchParams.get("debug") === "1";
-    const sinceHours = Number(url.searchParams.get("sinceHours") || "0");
-    const sinceBlockParam = url.searchParams.get("sinceBlock");
-    const maxBlocks = Math.min(Number(url.searchParams.get("maxBlocks") || "0") || 0, 20000) || 0;
-    const forceTx = url.searchParams.get("tx"); // <- direct TX path
+    const db = supa();
 
-    const tipHex = await evmRpc<Hex>("eth_blockNumber", []);
-    const tip = hexToInt(tipHex);
+    // Load funding wallets for BNB chain (normalize aliases)
+    const { data: wallets, error: werr } = await db.from("wallets").select("id,address,chain");
+    if (werr) throw new Error(`wallets: ${werr.message}`);
 
-    const { byAddr, list: wallets } = await getBscWallets(client);
-    if (wallets.length === 0) {
-      return NextResponse.json({ ok: false, error: "No BSC wallets configured (chain in bsc/bnb/binance)" }, { status: 500 });
+    const fundingMap = new Map<string, { id: string }>(); // address(lower) -> wallet meta
+    for (const w of wallets || []) {
+      const chain = canonChain((w as any).chain);
+      if (chain === "BNB") {
+        const addr = toLower((w as any).address);
+        if (addr) fundingMap.set(addr as string, { id: String((w as any).id) });
+      }
+    }
+    const funding = Array.from(fundingMap.keys());
+    if (funding.length === 0) {
+      return NextResponse.json({ ok: false, error: "No funding wallets for BNB" }, { status: 200 });
     }
 
-    // ---------- Direct TX path ----------
-    if (forceTx) {
-      const tx = await evmRpc<RpcTx>("eth_getTransactionByHash", [forceTx]);
-      if (!tx) return NextResponse.json({ ok: false, error: "tx not found" }, { status: 404 });
+    // Params
+    const debug = url.searchParams.get("debug") === "1";
+    const txHash = (url.searchParams.get("tx") || "").trim() as Hex | "";
+    const minConf = Math.max(0, Number(url.searchParams.get("minConf") || "4"));
+    const overlap = Math.max(0, Number(url.searchParams.get("overlap") || "200"));
+    const sinceBlockParam = url.searchParams.get("sinceBlock");
+    const sinceHoursParam = url.searchParams.get("sinceHours");
+    const maxBlocks = Math.max(0, Number(url.searchParams.get("maxBlocks") || "5000"));
 
-      const to = lc(tx.to || "");
-      const hit = to && byAddr.get(to);
-      const native = toBig(tx.value);
+    // Tip and safe head
+    const tip = hexToNum(await evmRpc<Hex>("eth_blockNumber", []));
+    const safeTip = Math.max(0, tip - minConf);
 
-      if (!hit || native === 0n) {
-        return NextResponse.json({
-          ok: false,
-          error: "tx is not a native BNB transfer to our wallet",
-          note: hit ? "value == 0 (likely BEP-20 token transfer)" : "recipient not in wallets",
-        }, { status: 200 });
+    // ForceTx mode
+    if (txHash) {
+      const tx = await evmRpc<RpcTx | null>("eth_getTransactionByHash", [txHash]);
+      if (!tx || !tx.blockNumber) {
+        return NextResponse.json({ ok: false, chain: "BSC", error: "tx not found or not yet mined" }, { status: 200 });
       }
+      const toAddr = toLower(tx.to);
+      if (!toAddr || !fundingMap.has(toAddr)) {
+        return NextResponse.json({ ok: true, chain: "BSC", reason: "forceTx-nonFunding", inserted: 0, funding }, { status: 200 });
+      }
+      const bn = hexToNum(tx.blockNumber);
+      if (bn > safeTip) {
+        return NextResponse.json({ ok: false, chain: "BSC", error: `tx block ${bn} < min confirmations` }, { status: 200 });
+      }
+      const receipt = await evmRpc<RpcReceipt>("eth_getTransactionReceipt", [txHash]);
+      if (receipt?.status !== "0x1") {
+        return NextResponse.json({ ok: true, chain: "BSC", reason: "forceTx-reverted", inserted: 0 }, { status: 200 });
+      }
+      const block = await evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + bn.toString(16), false]);
+      const ts = hexToNum(block?.timestamp || "0x0") * 1000;
+      const amount = weiToEth(tx.value);
+      const walletId = fundingMap.get(toAddr)!.id;
 
-      const blk = hexToInt(tx.blockNumber);
-      const blkData = await evmRpc<RpcBlock>("eth_getBlockByNumber", [tx.blockNumber, false]);
-      const ts = Number((blkData as any).timestamp ? BigInt((blkData as any).timestamp) : 0n);
-
-      const { error } = await client
+      const { error: ierr } = await db
         .from("contributions")
         .upsert(
-          [
-            {
-              wallet_id: hit.id,
-              tx_hash: tx.hash,
-              amount: weiToDecimalString(tx.value), // NUMERIC via text
-              block_time: new Date(ts * 1000).toISOString(),
-            },
-          ],
-          { onConflict: "wallet_id,tx_hash", ignoreDuplicates: true }
+          [{ wallet_id: walletId, tx_hash: tx.hash, amount: amount, block_time: new Date(ts).toISOString() }],
+          { onConflict: "wallet_id,tx_hash" }
         );
-      if (error) return NextResponse.json({ ok: false, error: `insert failed: ${error.message}` }, { status: 500 });
+      if (ierr) throw new Error(`insert failed: ${ierr.message}`);
 
-      await setLastScanned(client, Math.max((await getLastScanned(client)) || 0, blk));
-
-      const resp: any = { ok: true, chain: "BSC", inserted: 1, reason: "forceTx", tx: tx.hash, wallet_id: hit.id };
-      if (debug) resp.funding = wallets.map(w => w.address.toLowerCase());
-      return NextResponse.json(resp);
+      return NextResponse.json({
+        ok: true,
+        chain: "BSC",
+        inserted: 1,
+        reason: "forceTx",
+        tx: tx.hash,
+        wallet_id: walletId,
+        funding,
+      });
     }
 
-    // ---------- Range scan ----------
+    // Range scan mode
     let fromBlock: number | null = null;
     if (sinceBlockParam) {
       const n = Number(sinceBlockParam);
-      if (!Number.isFinite(n) || n < 0) {
-        return NextResponse.json({ ok: false, error: "sinceBlock must be a positive integer" }, { status: 400 });
-      }
-      fromBlock = n;
-    } else if (sinceHours > 0) {
-      // BSC ~ 3s/block → ~1200 blocks/hour (konzervativno)
-      const approx = Math.min(MAX_LOOKBACK, sinceHours * 1200);
-      fromBlock = Math.max(0, tip - approx);
-    } else {
-      fromBlock = (await getLastScanned(client)) ?? null;
-      if (fromBlock !== null) fromBlock = Math.min(fromBlock + 1, tip);
+      if (Number.isFinite(n) && n >= 0) fromBlock = n;
     }
-    if (fromBlock === null) fromBlock = Math.max(0, tip - 1000);
+    if (fromBlock === null && sinceHoursParam) {
+      // approximate: BSC ~ 3s block -> ~1200 blocks/hour; cap with MAX_LOOKBACK
+      const hours = Math.max(1, Number(sinceHoursParam));
+      const approxBlocks = Math.min(MAX_LOOKBACK, Math.floor(hours * 1200));
+      fromBlock = Math.max(0, safeTip - approxBlocks);
+    }
+    if (fromBlock === null) {
+      const last = await getLastScanned(db);
+      if (last && last > 0) fromBlock = Math.max(0, last - overlap);
+    }
+    if (fromBlock === null) fromBlock = Math.max(0, safeTip - 1000);
 
-    const limitTo = maxBlocks > 0 ? Math.min(tip, fromBlock + maxBlocks) : tip;
+    const toLimit = maxBlocks > 0 ? Math.min(safeTip, fromBlock + maxBlocks) : safeTip;
     let cursor = fromBlock;
     let inserted = 0;
-    let scannedBlocks = 0;
-    let lastSeen = (await getLastScanned(client)) ?? 0;
+    let scanned = 0;
+    const lastSeen = (await getLastScanned(db)) ?? 0;
 
-    while (cursor <= limitTo) {
-      const toBlock = Math.min(cursor + BATCH_BLOCKS - 1, limitTo);
+    while (cursor <= toLimit) {
+      const end = Math.min(cursor + BATCH_BLOCKS - 1, toLimit);
 
-      const blockPromises: Promise<RpcBlock>[] = [];
-      for (let b = cursor; b <= toBlock; b++) {
-        blockPromises.push(evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true]));
-      }
-      const blocks = await Promise.all(blockPromises);
-      scannedBlocks += blocks.length;
+      // fetch blocks in parallel
+      const blocks: RpcBlock[] = await Promise.all(
+        Array.from({ length: end - cursor + 1 }, (_, i) => cursor + i).map((b) =>
+          evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true])
+        )
+      );
 
-      const rows: any[] = [];
+      scanned += blocks.length;
+
+      // build candidate inserts
+      const puts: { wallet_id: string; tx_hash: string; amount: number; block_time: string }[] = [];
 
       for (const blk of blocks) {
-        const bn = hexToInt(blk.number);
-        const ts = Number(BigInt(blk.timestamp));
+        const ts = hexToNum(blk.timestamp) * 1000;
         for (const tx of blk.transactions || []) {
-          const to = lc(tx.to || "");
-          const hit = to && byAddr.get(to);
-          if (hit && toBig(tx.value) > 0n) {
-            rows.push({
-              wallet_id: hit.id,
-              tx_hash: tx.hash,
-              amount: weiToDecimalString(tx.value),
-              block_time: new Date(ts * 1000).toISOString(),
-            });
-          }
+          const to = toLower(tx.to);
+          if (!to || !fundingMap.has(to)) continue;
+          if (!tx.value || tx.value === "0x0") continue;
+
+          // check success (filter only funding matches to minimize RPC)
+          const rc = await evmRpc<RpcReceipt>("eth_getTransactionReceipt", [tx.hash]);
+          if (rc?.status !== "0x1") continue;
+
+          puts.push({
+            wallet_id: fundingMap.get(to)!.id,
+            tx_hash: tx.hash,
+            amount: weiToEth(tx.value),
+            block_time: new Date(ts).toISOString(),
+          });
         }
-        lastSeen = Math.max(lastSeen, bn);
       }
 
-      if (rows.length) {
-        const { error } = await client
+      if (puts.length) {
+        const { error: ierr } = await db
           .from("contributions")
-          .upsert(rows, { onConflict: "wallet_id,tx_hash", ignoreDuplicates: true });
-        if (error) throw new Error(`insert failed: ${error.message}`);
-        inserted += rows.length;
+          .upsert(puts, { onConflict: "wallet_id,tx_hash" });
+        if (ierr) throw new Error(`upsert chunk failed: ${ierr.message}`);
+        inserted += puts.length;
       }
 
-      await setLastScanned(client, toBlock);
-      cursor = toBlock + 1;
-
-      if (!maxBlocks) break; // jedan batch default
+      cursor = end + 1;
+      await setLastScanned(db, end);
     }
 
-    const resp: any = {
+    return NextResponse.json({
       ok: true,
       chain: "BSC",
-      tip,
+      tip: tip,
       from: fromBlock,
-      to: Math.min(limitTo, fromBlock + BATCH_BLOCKS - 1),
-      scanned: scannedBlocks,
+      to: toLimit,
+      scanned,
       inserted,
-    };
-    if (debug) resp.funding = wallets.map(w => w.address.toLowerCase());
-    return NextResponse.json(resp);
+      lastSeen,
+      reason: sinceBlockParam ? "sinceBlock" : sinceHoursParam ? "sinceHours" : "markerScan",
+      overlap,
+      minConf,
+      funding,
+    });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }
