@@ -36,36 +36,65 @@ function supa(): SupabaseClient {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-/** NowNodes traži API ključ u headeru: "api-key: <NOWNODES_API_KEY>" */
+/** NowNodes može tražiti ključ kao header ili kao query param. */
 function rpcHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "content-type": "application/json" };
+  const h: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/json",
+  };
   const key = maybe("NOWNODES_API_KEY");
   if (key) h["api-key"] = key;
   return h;
 }
 
 /**
- * Izvuci RPC URL(e):
- * - koristi BSC_RPC_POOL (comma-separated) ako postoji
- * - inače BSC_RPC_URL (kod tebe: https://bsc.nownodes.io)
- * - fallback: BSC_RPC, BNB_RPC_URL, BNB_RPC
+ * Build RPC URL pool:
+ * - BSC_RPC_POOL (comma-separated)
+ * - else BSC_RPC_URL / BSC_RPC / BNB_RPC_URL / BNB_RPC
+ * If host includes "nownodes.io" and we have NOWNODES_API_KEY, also try
+ * query param variants (?apikey=KEY and ?api_key=KEY) as fallbacks.
  */
 function getRpcPool(): string[] {
   const pool = (maybe("BSC_RPC_POOL") || "")
     .split(",")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
-  const fallbacks = [
-    maybe("BSC_RPC_URL"),
-    maybe("BSC_RPC"),
-    maybe("BNB_RPC_URL"),
-    maybe("BNB_RPC"),
-  ].filter(Boolean) as string[];
+  const base =
+    pool.length > 0
+      ? pool
+      : [
+          maybe("BSC_RPC_URL"),
+          maybe("BSC_RPC"),
+          maybe("BNB_RPC_URL"),
+          maybe("BNB_RPC"),
+        ].filter(Boolean) as string[];
 
-  const urls = [...pool, ...fallbacks];
-  if (urls.length === 0) throw new Error("No BSC RPC env set (BSC_RPC_POOL/BSC_RPC_URL/BSC_RPC/BNB_RPC_URL/BNB_RPC)");
-  return urls;
+  if (base.length === 0) {
+    throw new Error("No BSC RPC env set (BSC_RPC_POOL/BSC_RPC_URL/BSC_RPC/BNB_RPC_URL/BNB_RPC)");
+  }
+
+  const key = maybe("NOWNODES_API_KEY");
+  const variants: string[] = [];
+  for (const url of base) {
+    variants.push(url);
+    try {
+      const u = new URL(url);
+      if (key && u.hostname.includes("nownodes.io")) {
+        // Add query param variants as fallbacks
+        const v1 = new URL(url);
+        v1.searchParams.set("apikey", key);
+        variants.push(v1.toString());
+        const v2 = new URL(url);
+        v2.searchParams.set("api_key", key);
+        variants.push(v2.toString());
+      }
+    } catch {
+      // If URL constructor fails, just push the raw url
+    }
+  }
+  // remove duplicates
+  return Array.from(new Set(variants));
 }
 
 async function evmRpc<T = any>(method: string, params: any[], debug = false): Promise<{ result: T; urlUsed: string }> {
@@ -82,7 +111,14 @@ async function evmRpc<T = any>(method: string, params: any[], debug = false): Pr
         const text = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 180)}` : ""}`);
       }
-      const j = await res.json();
+      const text = await res.text();
+      // Some providers incorrectly return text/plain; try parse anyway
+      let j: any;
+      try {
+        j = JSON.parse(text);
+      } catch (e) {
+        throw new Error(`Non-JSON response (first 120): ${text.slice(0, 120)}`);
+      }
       if (j.error) {
         throw new Error(j.error?.message || JSON.stringify(j.error));
       }
@@ -249,7 +285,7 @@ export async function POST(req: Request) {
 
       // fetch blocks in parallel
       const blockPromises = Array.from({ length: end - cursor + 1 }, (_, i) => cursor + i).map((b) =>
-        evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true], debug).then(x => x.result)
+        evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true], debug).then((x) => x.result)
       );
       const blocks: RpcBlock[] = await Promise.all(blockPromises);
 
