@@ -1,7 +1,7 @@
 // app/api/admin/fx-sync/route.ts
 import { NextResponse } from "next/server";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { canonChain } from "@/lib/chain";
+import { canonChain, Canon } from "@/lib/chain";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -46,7 +46,7 @@ async function parseFxFromQuery(url: URL): Promise<FXMap> {
       try {
         const res = await fetch(feed, { headers: { accept: "application/json" } });
         if (res.ok) {
-          const j = (await res.json()) as Record<string, any>;
+          const j = (await res.json()) as Record<string, unknown>;
           for (const [k, v] of Object.entries(j || {})) {
             const c = canonChain(k);
             const n = Number(v as any);
@@ -54,7 +54,7 @@ async function parseFxFromQuery(url: URL): Promise<FXMap> {
           }
         }
       } catch {
-        // ignore
+        // ignore feed errors; caller can still provide ?fx=
       }
     }
   }
@@ -77,35 +77,44 @@ export async function POST(req: Request) {
     const days = Math.max(1, Number(url.searchParams.get("days") || "30"));
     const limit = Math.max(100, Math.min(5000, Number(url.searchParams.get("limit") || "2000")));
 
+    // chain=POL,BNB,SOL,... (optional)
     const chainFilterRaw = (url.searchParams.get("chain") || "")
       .split(",")
       .map(s => s.trim())
       .filter(Boolean);
+
+    // ✅ FIX: type predicate narrows to Canon
     const chainFilter = chainFilterRaw
       .map(canonChain)
-      .filter((x): x is string => !!x);
+      .filter((x): x is Canon => Boolean(x));
 
     const fx = await parseFxFromQuery(url);
     if (!fx || Object.keys(fx).length === 0) {
-      return NextResponse.json({ ok: false, error: "No FX map provided (?fx=POL:0.51,ETH:2400,BNB:520 or PRICE_FEED_URL)" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "No FX map provided (?fx=POL:0.51,ETH:2400,BNB:520 or PRICE_FEED_URL)" },
+        { status: 400 }
+      );
     }
 
+    // wallets → map wallet_id -> Canon chain
     const { data: wallets, error: werr } = await client
       .from("wallets")
       .select("id, chain");
     if (werr) throw new Error(`wallets: ${werr.message}`);
 
-    const idToChain = new Map<string, string>();
+    const idToChain = new Map<string, Canon>();
     for (const w of wallets || []) {
       const c = canonChain((w as any).chain);
       if (c) idToChain.set(String((w as any).id), c);
     }
 
+    // time window
     const now = Date.now();
     const sinceIso = mode === "missing"
       ? new Date(now - hours * 3600_000).toISOString()
       : new Date(now - days  * 86400_000).toISOString();
 
+    // select contributions in window (missing mode filters by amount_usd is null)
     let sel = client
       .from("contributions")
       .select("id, wallet_id, amount, amount_usd, block_time")
@@ -119,7 +128,8 @@ export async function POST(req: Request) {
     if (rerr) throw new Error(`select contributions: ${rerr.message}`);
 
     const pool = (rows || []).filter(r => {
-      const cid = (r as any).wallet_id ? idToChain.get(String((r as any).wallet_id)) : undefined;
+      const wid = (r as any).wallet_id ? String((r as any).wallet_id) : "";
+      const cid = wid ? idToChain.get(wid) : undefined;
       if (!cid) return false;
       if (chainFilter.length) return chainFilter.includes(cid);
       return true;
@@ -132,7 +142,7 @@ export async function POST(req: Request) {
       considered++;
       const wid = String((r as any).wallet_id);
       const chainCanon = idToChain.get(wid)!;
-      const price = fx[chainCanon];
+      const price = fx[chainCanon]; // fx keys are Canon strings
       if (!price) continue;
 
       const amt = Number((r as any).amount);
