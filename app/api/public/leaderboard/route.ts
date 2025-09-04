@@ -6,6 +6,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
+// Alias map for canonical chain names
 const ALIAS_TO_CANON: Record<string, string> = {
   "btc": "BTC", "bitcoin": "BTC",
   "eth": "ETH", "ethereum": "ETH",
@@ -26,15 +27,18 @@ const ALIAS_TO_CANON: Record<string, string> = {
 const canon = (x?: string | null) =>
   ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
 
-function need(name: string) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing ENV: ${name}`);
-  return v;
-}
+// Supabase client helper with fallback to non-next-public vars
 function supa() {
-  return createClient(need("NEXT_PUBLIC_SUPABASE_URL"), need("NEXT_PUBLIC_SUPABASE_ANON_KEY"), {
-    auth: { persistSession: false },
-  });
+  const url =
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    "";
+  const anon =
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    "";
+  if (!url || !anon) throw new Error("Missing Supabase ENV vars");
+  return createClient(url, anon, { auth: { persistSession: false } });
 }
 
 export async function GET(req: Request) {
