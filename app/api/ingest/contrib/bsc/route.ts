@@ -35,28 +35,67 @@ function supa(): SupabaseClient {
   if (!url || !key) throw new Error("Missing Supabase env (URL/KEY)");
   return createClient(url, key, { auth: { persistSession: false } });
 }
-function rpcUrl(): string {
-  // Support multiple env names; first match wins
-  return (
-    maybe("BSC_RPC_URL") ||
-    maybe("BSC_RPC") ||
-    maybe("BNB_RPC_URL") ||
-    maybe("BNB_RPC") ||
-    need("BSC_RPC_URL") // will throw if all above missing
-  );
+
+/** NowNodes traži API ključ u headeru: "api-key: <NOWNODES_API_KEY>" */
+function rpcHeaders(): Record<string, string> {
+  const h: Record<string, string> = { "content-type": "application/json" };
+  const key = maybe("NOWNODES_API_KEY");
+  if (key) h["api-key"] = key;
+  return h;
 }
 
-async function evmRpc<T = any>(method: string, params: any[]): Promise<T> {
-  const res = await fetch(rpcUrl(), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  if (!res.ok) throw new Error(`RPC ${method} failed: HTTP ${res.status}`);
-  const j = await res.json();
-  if (j.error) throw new Error(`RPC ${method} error: ${j.error?.message || j.error}`);
-  return j.result as T;
+/**
+ * Izvuci RPC URL(e):
+ * - koristi BSC_RPC_POOL (comma-separated) ako postoji
+ * - inače BSC_RPC_URL (kod tebe: https://bsc.nownodes.io)
+ * - fallback: BSC_RPC, BNB_RPC_URL, BNB_RPC
+ */
+function getRpcPool(): string[] {
+  const pool = (maybe("BSC_RPC_POOL") || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const fallbacks = [
+    maybe("BSC_RPC_URL"),
+    maybe("BSC_RPC"),
+    maybe("BNB_RPC_URL"),
+    maybe("BNB_RPC"),
+  ].filter(Boolean) as string[];
+
+  const urls = [...pool, ...fallbacks];
+  if (urls.length === 0) throw new Error("No BSC RPC env set (BSC_RPC_POOL/BSC_RPC_URL/BSC_RPC/BNB_RPC_URL/BNB_RPC)");
+  return urls;
 }
+
+async function evmRpc<T = any>(method: string, params: any[], debug = false): Promise<{ result: T; urlUsed: string }> {
+  const errors: string[] = [];
+  const headers = rpcHeaders();
+  for (const url of getRpcPool()) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 180)}` : ""}`);
+      }
+      const j = await res.json();
+      if (j.error) {
+        throw new Error(j.error?.message || JSON.stringify(j.error));
+      }
+      return { result: j.result as T, urlUsed: url };
+    } catch (e: any) {
+      errors.push(`${method}@${url} -> ${e?.message || e}`);
+      // try next url
+    }
+  }
+  const msg = debug ? `RPC ${method} failed:\n${errors.join("\n")}` : `RPC ${method} failed`;
+  throw new Error(msg);
+}
+
 function hexToNum(hex: Hex | string | null | undefined): number {
   if (!hex) return 0;
   return Number(BigInt(hex as string));
@@ -135,12 +174,13 @@ export async function POST(req: Request) {
     const maxBlocks = Math.max(0, Number(url.searchParams.get("maxBlocks") || "5000"));
 
     // Tip and safe head
-    const tip = hexToNum(await evmRpc<Hex>("eth_blockNumber", []));
+    const { result: tipHex, urlUsed: tipUrl } = await evmRpc<Hex>("eth_blockNumber", [], debug);
+    const tip = hexToNum(tipHex);
     const safeTip = Math.max(0, tip - minConf);
 
     // ForceTx mode
     if (txHash) {
-      const tx = await evmRpc<RpcTx | null>("eth_getTransactionByHash", [txHash]);
+      const { result: tx } = await evmRpc<RpcTx | null>("eth_getTransactionByHash", [txHash], debug);
       if (!tx || !tx.blockNumber) {
         return NextResponse.json({ ok: false, chain: "BSC", error: "tx not found or not yet mined" }, { status: 200 });
       }
@@ -152,11 +192,11 @@ export async function POST(req: Request) {
       if (bn > safeTip) {
         return NextResponse.json({ ok: false, chain: "BSC", error: `tx block ${bn} < min confirmations` }, { status: 200 });
       }
-      const receipt = await evmRpc<RpcReceipt>("eth_getTransactionReceipt", [txHash]);
+      const { result: receipt } = await evmRpc<RpcReceipt>("eth_getTransactionReceipt", [txHash], debug);
       if (receipt?.status !== "0x1") {
         return NextResponse.json({ ok: true, chain: "BSC", reason: "forceTx-reverted", inserted: 0 }, { status: 200 });
       }
-      const block = await evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + bn.toString(16), false]);
+      const { result: block } = await evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + bn.toString(16), false], debug);
       const ts = hexToNum(block?.timestamp || "0x0") * 1000;
       const amount = weiToEth(tx.value);
       const walletId = fundingMap.get(toAddr)!.id;
@@ -208,15 +248,13 @@ export async function POST(req: Request) {
       const end = Math.min(cursor + BATCH_BLOCKS - 1, toLimit);
 
       // fetch blocks in parallel
-      const blocks: RpcBlock[] = await Promise.all(
-        Array.from({ length: end - cursor + 1 }, (_, i) => cursor + i).map((b) =>
-          evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true])
-        )
+      const blockPromises = Array.from({ length: end - cursor + 1 }, (_, i) => cursor + i).map((b) =>
+        evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true], debug).then(x => x.result)
       );
+      const blocks: RpcBlock[] = await Promise.all(blockPromises);
 
       scanned += blocks.length;
 
-      // build candidate inserts
       const puts: { wallet_id: string; tx_hash: string; amount: number; block_time: string }[] = [];
 
       for (const blk of blocks) {
@@ -226,8 +264,8 @@ export async function POST(req: Request) {
           if (!to || !fundingMap.has(to)) continue;
           if (!tx.value || tx.value === "0x0") continue;
 
-          // check success (filter only funding matches to minimize RPC)
-          const rc = await evmRpc<RpcReceipt>("eth_getTransactionReceipt", [tx.hash]);
+          // check success (only for funding matches to reduce calls)
+          const { result: rc } = await evmRpc<RpcReceipt>("eth_getTransactionReceipt", [tx.hash], debug);
           if (rc?.status !== "0x1") continue;
 
           puts.push({
@@ -264,6 +302,7 @@ export async function POST(req: Request) {
       overlap,
       minConf,
       funding,
+      rpcTipFrom: tipUrl,
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
