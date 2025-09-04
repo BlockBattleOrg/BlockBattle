@@ -36,23 +36,12 @@ function supa(): SupabaseClient {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-/** NowNodes može tražiti ključ kao header ili kao query param. */
-function rpcHeaders(): Record<string, string> {
-  const h: Record<string, string> = {
-    accept: "application/json",
-    "content-type": "application/json",
-  };
-  const key = maybe("NOWNODES_API_KEY");
-  if (key) h["api-key"] = key;
-  return h;
-}
-
 /**
  * Build RPC URL pool:
  * - BSC_RPC_POOL (comma-separated)
  * - else BSC_RPC_URL / BSC_RPC / BNB_RPC_URL / BNB_RPC
- * If host includes "nownodes.io" and we have NOWNODES_API_KEY, also try
- * query param variants (?apikey=KEY and ?api_key=KEY) as fallbacks.
+ * If host includes "nownodes.io" and we have NOWNODES_API_KEY, also add query param variants
+ * (?apikey, ?api_key, ?apiKey) as fallbacks.
  */
 function getRpcPool(): string[] {
   const pool = (maybe("BSC_RPC_POOL") || "")
@@ -81,51 +70,66 @@ function getRpcPool(): string[] {
     try {
       const u = new URL(url);
       if (key && u.hostname.includes("nownodes.io")) {
-        // Add query param variants as fallbacks
-        const v1 = new URL(url);
-        v1.searchParams.set("apikey", key);
-        variants.push(v1.toString());
-        const v2 = new URL(url);
-        v2.searchParams.set("api_key", key);
-        variants.push(v2.toString());
+        const names = ["apikey", "api_key", "apiKey"];
+        for (const pname of names) {
+          const v = new URL(url);
+          v.searchParams.set(pname, key);
+          variants.push(v.toString());
+        }
       }
     } catch {
-      // If URL constructor fails, just push the raw url
+      // ignore invalid URL parse, keep raw
     }
   }
-  // remove duplicates
   return Array.from(new Set(variants));
 }
 
-async function evmRpc<T = any>(method: string, params: any[], debug = false): Promise<{ result: T; urlUsed: string }> {
+/** Try multiple header key variants commonly seen with NowNodes-style APIs. */
+function buildHeaderVariants(): Record<string, string>[] {
+  const base: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/json",
+  };
+  const key = maybe("NOWNODES_API_KEY");
+  const variants: Record<string, string>[] = [base];
+  if (key) {
+    variants.push({ ...base, "api-key": key });
+    variants.push({ ...base, "x-api-key": key });
+    variants.push({ ...base, "X-API-KEY": key });
+  }
+  return variants;
+}
+
+async function evmRpc<T = any>(method: string, params: any[], debug = false): Promise<{ result: T; urlUsed: string; headersUsed: Record<string,string> }> {
+  const urls = getRpcPool();
+  const headerVariants = buildHeaderVariants();
   const errors: string[] = [];
-  const headers = rpcHeaders();
-  for (const url of getRpcPool()) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 180)}` : ""}`);
-      }
-      const text = await res.text();
-      // Some providers incorrectly return text/plain; try parse anyway
-      let j: any;
+
+  for (const url of urls) {
+    for (const headers of headerVariants) {
       try {
-        j = JSON.parse(text);
-      } catch (e) {
-        throw new Error(`Non-JSON response (first 120): ${text.slice(0, 120)}`);
+        const res = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        });
+        const raw = await res.text().catch(() => "");
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}${raw ? `: ${raw.slice(0, 200)}` : ""}`);
+        }
+        let j: any;
+        try {
+          j = JSON.parse(raw);
+        } catch {
+          throw new Error(`Non-JSON (first 200): ${raw.slice(0, 200)}`);
+        }
+        if (j.error) {
+          throw new Error(j.error?.message || JSON.stringify(j.error));
+        }
+        return { result: j.result as T, urlUsed: url, headersUsed: headers };
+      } catch (e: any) {
+        errors.push(`${method} @ ${url} ${JSON.stringify(headers)} -> ${e?.message || e}`);
       }
-      if (j.error) {
-        throw new Error(j.error?.message || JSON.stringify(j.error));
-      }
-      return { result: j.result as T, urlUsed: url };
-    } catch (e: any) {
-      errors.push(`${method}@${url} -> ${e?.message || e}`);
-      // try next url
     }
   }
   const msg = debug ? `RPC ${method} failed:\n${errors.join("\n")}` : `RPC ${method} failed`;
@@ -210,7 +214,7 @@ export async function POST(req: Request) {
     const maxBlocks = Math.max(0, Number(url.searchParams.get("maxBlocks") || "5000"));
 
     // Tip and safe head
-    const { result: tipHex, urlUsed: tipUrl } = await evmRpc<Hex>("eth_blockNumber", [], debug);
+    const { result: tipHex, urlUsed: tipUrl, headersUsed } = await evmRpc<Hex>("eth_blockNumber", [], debug);
     const tip = hexToNum(tipHex);
     const safeTip = Math.max(0, tip - minConf);
 
@@ -339,6 +343,7 @@ export async function POST(req: Request) {
       minConf,
       funding,
       rpcTipFrom: tipUrl,
+      rpcHeadersUsed: headersUsed, // za lakši debug na prod
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
