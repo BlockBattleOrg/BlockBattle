@@ -1,99 +1,82 @@
-// app/api/public/leaderboard/route.ts
+// app/api/public/contributions/leaderboard/route.ts
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// Always compute server-side
-export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const revalidate = 0;
 
-type Row = {
-  amount: string | number | null;
-  amount_usd: string | number | null;
-  wallets?: {
-    currencies?: {
-      symbol?: string | null;
-    } | null;
-  } | null;
+const ALIAS_TO_CANON: Record<string, string> = {
+  "btc": "BTC", "bitcoin": "BTC",
+  "eth": "ETH", "ethereum": "ETH",
+  "pol": "POL", "matic": "POL", "polygon": "POL",
+  "bnb": "BNB", "bsc": "BNB", "binance": "BNB",
+  "sol": "SOL", "solana": "SOL",
+  "arb": "ARB", "arbitrum": "ARB",
+  "op": "OP", "optimism": "OP",
+  "avax": "AVAX", "avalanche": "AVAX",
+  "atom": "ATOM", "cosmos": "ATOM",
+  "dot": "DOT", "polkadot": "DOT",
+  "ltc": "LTC", "litecoin": "LTC",
+  "trx": "TRX", "tron": "TRX",
+  "xlm": "XLM", "stellar": "XLM",
+  "xrp": "XRP", "ripple": "XRP",
+  "doge": "DOGE", "dogecoin": "DOGE",
 };
+const canon = (x?: string | null) => ALIAS_TO_CANON[(x || "").toLowerCase()] || (x || "").toUpperCase();
+
+function need(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing ENV: ${name}`);
+  return v;
+}
+function supa() {
+  return createClient(need("NEXT_PUBLIC_SUPABASE_URL"), need("NEXT_PUBLIC_SUPABASE_ANON_KEY"), {
+    auth: { persistSession: false },
+  });
+}
 
 export async function GET(req: Request) {
   try {
-    const { searchParams } = new URL(req.url);
-    const order = (searchParams.get("order") || "native").toLowerCase(); // 'native' | 'usd'
-    const limit = Math.max(50, Number(searchParams.get("scan") || "300")); // koliko zapisa povući za agregaciju
+    const url = new URL(req.url);
+    const order = (url.searchParams.get("order") || "usd").toLowerCase();
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || "50")));
 
-    const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!; // server-side key
-
-    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-      auth: { persistSession: false },
-    });
-
-    // Dohvati recent kontribucije + relacije do currencies.symbol
-    // Korištenje ugrađenih relacija PostgREST-a:
-    // contributions → wallets (FK) → currencies (FK)
-    const { data, error } = await supabase
+    const client = supa();
+    const { data, error } = await client
       .from("contributions")
-      .select(
-        `
-        amount,
-        amount_usd,
-        wallets:wallet_id (
-          currencies:currency_id (
-            symbol
-          )
-        )
-      `
-      )
-      .order("inserted_at", { ascending: false })
-      .limit(limit);
+      .select("amount, amount_usd, wallets!inner(chain)")
+      .order("block_time", { ascending: false })
+      .limit(5000); // safety cap
 
     if (error) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    const rows = (data || []) as Row[];
-
-    // Agregacija po chainu
-    type Agg = { chain: string; total: number; usd_total: number; contributions: number };
-    const aggMap = new Map<string, Agg>();
-
-    for (const r of rows) {
-      const chain =
-        r?.wallets?.currencies?.symbol?.toUpperCase() ||
-        "UNKNOWN";
-
-      const amt = Number(r.amount ?? 0) || 0;
-      const usd = Number(r.amount_usd ?? 0) || 0;
-
-      const cur = aggMap.get(chain) || { chain, total: 0, usd_total: 0, contributions: 0 };
-      cur.total += amt;
-      cur.usd_total += usd;
-      cur.contributions += 1;
-      aggMap.set(chain, cur);
+    const agg: Record<string, { total: number; usd_total: number; contributions: number }> = {};
+    for (const r of data || []) {
+      const chain = canon(r?.wallets?.chain);
+      if (!chain) continue;
+      const amt = Number(r.amount);
+      const usd = r.amount_usd === null ? 0 : Number(r.amount_usd);
+      if (!agg[chain]) agg[chain] = { total: 0, usd_total: 0, contributions: 0 };
+      agg[chain].total += amt;
+      agg[chain].usd_total += usd;
+      agg[chain].contributions += 1;
     }
 
-    let list = Array.from(aggMap.values());
-
-    // Poredak
+    let rows = Object.entries(agg).map(([chain, v]) => ({ chain, ...v }));
     if (order === "usd") {
-      list.sort((a, b) => (b.usd_total - a.usd_total) || (b.contributions - a.contributions));
-    } else {
-      // default: native
-      list.sort((a, b) => (b.total - a.total) || (b.usd_total - a.usd_total));
+      rows = rows.sort((a, b) => b.usd_total - a.usd_total);
+    } else if (order === "native") {
+      rows = rows.sort((a, b) => b.total - a.total);
     }
 
-    return NextResponse.json(
-      {
-        ok: true,
-        order: order === "usd" ? "usd" : "native",
-        total: list.length,
-        rows: list,
-      },
-      { status: 200 }
-    );
+    rows = rows.slice(0, limit);
+
+    return NextResponse.json({ ok: true, order, total: rows.length, rows });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }
 }
 
