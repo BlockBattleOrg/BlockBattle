@@ -96,11 +96,17 @@ function buildHeaderVariants(): Record<string, string>[] {
     variants.push({ ...base, "api-key": key });
     variants.push({ ...base, "x-api-key": key });
     variants.push({ ...base, "X-API-KEY": key });
+    // Some setups expect Bearer format:
+    variants.push({ ...base, Authorization: `Bearer ${key}` });
   }
   return variants;
 }
 
-async function evmRpc<T = any>(method: string, params: any[], debug = false): Promise<{ result: T; urlUsed: string; headersUsed: Record<string,string> }> {
+async function evmRpc<T = any>(
+  method: string,
+  params: any[],
+  debug = false
+): Promise<{ result: T; urlUsed: string; headersUsed: Record<string, string> }> {
   const urls = getRpcPool();
   const headerVariants = buildHeaderVariants();
   const errors: string[] = [];
@@ -343,7 +349,7 @@ export async function POST(req: Request) {
       minConf,
       funding,
       rpcTipFrom: tipUrl,
-      rpcHeadersUsed: headersUsed, // za lakši debug na prod
+      rpcHeadersUsed: headersUsed, // for prod debugging
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
