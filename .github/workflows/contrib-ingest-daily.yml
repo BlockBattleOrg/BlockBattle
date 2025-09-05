@@ -37,11 +37,15 @@ jobs:
           )
           for c in eth arb avax op pol bsc; do
             echo ">>> $c"
-            if ! out=$(curl -sS --fail-with-body -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" ); then
+            if ! out=$(
+              curl -sS --fail-with-body \
+                   --max-time 90 --retry 2 --retry-delay 2 --retry-all-errors \
+                   -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
+                   -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+            ); then
               echo "::warning:: $c ingest failed (HTTP) or route missing"; continue
             fi
-            echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a")"'
+            echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a") error=\(.error // "n/a")"'
             sleep 0.2
           done
 
@@ -56,9 +60,15 @@ jobs:
           )
           for c in btc ltc doge; do
             echo ">>> $c"
-            curl -sS --fail-with-body -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
-            | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a")"'
+            if ! out=$(
+              curl -sS --fail-with-body \
+                   --max-time 90 --retry 2 --retry-delay 2 --retry-all-errors \
+                   -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
+                   -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+            ); then
+              echo "::warning:: $c ingest failed (HTTP; continuing)"; continue
+            fi
+            echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a") error=\(.error // "n/a")"'
             sleep 0.2
           done
 
@@ -72,9 +82,16 @@ jobs:
           )
           for c in xrp xlm; do
             echo ">>> $c"
-            curl -sS --fail-with-body -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
-            | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a")"'
+            if ! out=$(
+              curl -sS --fail-with-body \
+                   --max-time 90 --retry 2 --retry-delay 2 --retry-all-errors \
+                   -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
+                   -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+            ); then
+              echo "::warning:: $c ingest failed (HTTP; continuing)"
+              continue
+            fi
+            echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a") error=\(.error // "n/a")"'
             sleep 0.2
           done
 
@@ -90,10 +107,15 @@ jobs:
           )
           for c in sol trx dot atom; do
             echo ">>> $c"
-            if ! out=$(curl -sS --fail-with-body -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" ); then
+            if ! out=$(
+              curl -sS --fail-with-body \
+                   --max-time 90 --retry 2 --retry-delay 2 --retry-all-errors \
+                   -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
+                   -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+            ); then
               echo "::warning:: $c ingest failed (HTTP)"; continue
             fi
-            echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a")"'
+            echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a") error=\(.error // "n/a")"'
             sleep 0.2
           done
+
