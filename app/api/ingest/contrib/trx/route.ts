@@ -8,9 +8,9 @@ export const runtime = "nodejs";
 
 /**
  * TRX (Tron) native contributions ingest.
- * - Skenira blokove i hvata `TransferContract` prema našim funding adresama.
- * - Piše u `public.contributions` (wallet_id, tx_hash, amount, block_time).
- * - Marker (zadnji obrađeni blok) je u `public.settings` pod ključem `trx_contrib_last_scanned`.
+ * - Scans blocks and captures `TransferContract` transfers to our funding addresses.
+ * - Writes into `public.contributions` (wallet_id, tx_hash, amount, block_time).
+ * - Cursor (last processed block) is stored in `public.settings` with key `trx_contrib_last_scanned`.
  *
  * ENV:
  *  - CRON_SECRET
@@ -18,21 +18,21 @@ export const runtime = "nodejs";
  *  - SUPABASE_SERVICE_ROLE_KEY
  *
  * RPC (NowNodes / Tron FullNode HTTP API):
- *  - TRX_RPC_POOL   (opcionalno; lista baza, comma/newline-separated)
- *  - TRX_RPC_URL    (fallback single base, npr. https://trx.nownodes.io)
- *  - NOWNODES_API_KEY (opcionalno; pokušavamo više header/query varijanti)
+ *  - TRX_RPC_POOL   (optional; comma/newline-separated list of base URLs)
+ *  - TRX_RPC_URL    (fallback single base, e.g. https://trx.nownodes.io)
+ *  - NOWNODES_API_KEY (optional; multiple header/query variants are attempted)
  *
  * Query:
- *  - tx=<txid>                   // forsiraj single-tx ingest
- *  - sinceBlock=<n>              // početni blok
- *  - sinceHours=<n>              // vremenski backoff (≈ 3s po bloku)
- *  - overlap=<n=200>             // preskeniraj ovoliko prije markera
- *  - maxBlocks=<n=4000>          // limit po runu
- *  - minConf=<n=12>              // sigurnosni gap od tipa
- *  - debug=1                     // bogat debug
+ *  - tx=<txid>                   // force single-tx ingest
+ *  - sinceBlock=<n>              // start block
+ *  - sinceHours=<n>              // time backoff (≈ 3s per block)
+ *  - overlap=<n=200>             // re-scan this many before the cursor
+ *  - maxBlocks=<n=4000>          // run limit
+ *  - minConf=<n=12>              // safety gap from the tip
+ *  - debug=1                     // verbose debug
  *
- * Napomena:
- *  - Ne pišemo amount_usd ovdje (radi se drugdje).
+ * Note:
+ *  - We do NOT write amount_usd here (handled elsewhere).
  */
 
 // ---------- Tunables & helpers ----------
@@ -62,7 +62,7 @@ function supa() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-// Canonical chain (isti obrazac kao i ostale rute)
+// Canonical chain (shared pattern with other routes)
 function canonChain(x: string | null | undefined): string {
   const v = (x || "").toLowerCase();
   if (v.includes("trx") || v.includes("tron")) return "TRX";
@@ -109,7 +109,7 @@ function buildHttpAttempts(base: string, apiKey?: string | null): HttpAttempt[] 
     attempts.push({ url: clean, headers: { ...baseHeaders, "x-api-key": k }, headerTip: "x-api-key" });
     attempts.push({ url: clean, headers: { ...baseHeaders, "X-API-KEY": k }, headerTip: "X-API-KEY" });
     attempts.push({ url: clean, headers: { ...baseHeaders, Authorization: `Bearer ${k}` }, headerTip: "Bearer" });
-    // Neki gateway-i očekuju query ključ
+    // some gateways expect query key
     attempts.push({ url: `${clean}?apikey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apikey", queryKey: "apikey" });
     attempts.push({ url: `${clean}?api_key=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:api_key", queryKey: "api_key" });
     attempts.push({ url: `${clean}?apiKey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apiKey", queryKey: "apiKey" });
@@ -170,7 +170,7 @@ async function tronPost<T = any>(
   throw lastErr || new Error("All TRX attempts failed");
 }
 
-// ---------- Address helpers (Base58Check -> hex "41..." normalizacija) ----------
+// ---------- Address helpers (Base58Check -> hex "41..." normalization) ----------
 const B58_ALPH = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const B58_MAP = new Map(B58_ALPH.split("").map((c, i) => [c, i]));
 
@@ -212,9 +212,10 @@ function tronBase58ToHex(addr: string): string | null {
     const h1 = sha256(data);
     const h2 = sha256(h1);
     const calc = h2.subarray(0, 4);
-    if (!Buffer.compare(Buffer.from(calc), Buffer.from(checksum)) === 0) {
-      // If checksum mismatch, still try (some gateways skip check) -> comment out strictness if needed
-    }
+
+    // Optional checksum validation (we do NOT enforce it; some gateways skip it)
+    // const okChecksum = Buffer.compare(Buffer.from(calc), Buffer.from(checksum)) === 0;
+
     // tron mainnet: version 0x41 + 20 bytes account = 21 bytes total
     const hex = Buffer.from(data).toString("hex").toLowerCase();
     if (!hex.startsWith("41")) return "41" + hex.replace(/^0x/, "");
@@ -253,7 +254,7 @@ export async function POST(req: Request) {
 
     const sb = supa();
 
-    // Wallets -> samo TRX (normaliziramo adrese u HEX "41..." formu)
+    // Wallets -> TRX only (normalize to HEX "41..." form)
     const { data: wallets, error: wErr } = await sb
       .from("wallets")
       .select("id,address,chain,is_active")
@@ -345,11 +346,11 @@ export async function POST(req: Request) {
       return ok(res);
     }
 
-    // Marker iz settings
+    // Marker from settings
     const { data: st } = await sb.from("settings").select("value").eq("key", CURSOR_KEY).maybeSingle();
     const prev = Number(st?.value?.n ?? 0);
 
-    // Odredi range
+    // Determine range
     let from: number;
     let reason = "";
     if (sinceBlock > 0) {
@@ -390,8 +391,8 @@ export async function POST(req: Request) {
       for (const tx of txs) {
         const sig = String(tx?.txID || tx?.txid || "");
         const contracts: any[] = Array.isArray(tx?.raw_data?.contract) ? tx.raw_data.contract : [];
-        // u jednom tx-u može biti više TransferContract; agregiramo po walletu
-        const agg = new Map<string, number>(); // wallet_id -> suma TRX u ovom tx-u
+        // multiple TransferContract per tx possible; aggregate per wallet
+        const agg = new Map<string, number>(); // wallet_id -> sum TRX in this tx
 
         for (const c of contracts) {
           if (c?.type !== "TransferContract") continue;
@@ -424,7 +425,7 @@ export async function POST(req: Request) {
       inserted = upserted?.length || 0;
     }
 
-    // Pomakni marker
+    // Move cursor
     await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: to } }, { onConflict: "key" });
 
     const res: Json = {
