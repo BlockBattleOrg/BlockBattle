@@ -1,9 +1,7 @@
 name: Contribution Ingest (DOGE)
 
 on:
-  schedule:
-    - cron: "8 * * * *"   # every 1 hour at minute 08 (UTC)
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: read

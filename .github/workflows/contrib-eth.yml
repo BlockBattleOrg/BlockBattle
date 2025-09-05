@@ -1,9 +1,7 @@
 name: Contribution Ingest (ETH)
 
 on:
-  schedule:
-    - cron: "11 * * * *"   # every 1 hour at minute 11 (UTC)
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: read
