@@ -2,201 +2,396 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = "force-dynamic";
+// Keep Node.js runtime (non-edge)
 export const runtime = "nodejs";
-export const revalidate = 0;
 
-const RPC = (process.env.SOL_RPC_URL || "").trim();
-const KEY = (process.env.NOWNODES_API_KEY || "").trim();
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
+/**
+ * SOL (Solana) native contributions ingest.
+ * - Skenira slotove (blokove) i pronalazi SystemProgram transfer u naše funding adrese.
+ * - Piše u `public.contributions` (wallet_id, tx_hash, amount, block_time).
+ * - Marker (zadnji obrađeni slot) je u `public.settings` pod ključem `sol_contrib_last_scanned`.
+ *
+ * ENV:
+ *  - CRON_SECRET
+ *  - NEXT_PUBLIC_SUPABASE_URL
+ *  - SUPABASE_SERVICE_ROLE_KEY
+ *
+ * RPC (NowNodes / kompatibilan Solana JSON-RPC):
+ *  - SOL_RPC_POOL   (opcionalno; lista baza, comma/newline-separated)
+ *  - SOL_RPC_URL    (fallback single base, npr. https://sol.nownodes.io)
+ *  - NOWNODES_API_KEY (opcionalno; pokušavamo više header/query varijanti)
+ *
+ * Query:
+ *  - tx=<sig>                     // forsiraj single-tx ingest
+ *  - sinceSlot=<n>                // početni slot
+ *  - sinceHours=<n>               // vremenski backoff (≈ 0.4s po slotu)
+ *  - overlap=<n=400>              // preskeniraj ovoliko prije markera
+ *  - maxSlots=<n=4000>            // limit po runu
+ *  - minConf=<n=64>               // “finality gap” (tip - minConf)
+ *  - debug=1                      // bogat debug
+ *
+ * Napomena:
+ *  - Ne pišemo amount_usd ovdje (radi se drugdje).
+ */
 
-const PAGES = Number(process.env.SOL_CONTRIB_PAGES || 2); // pages per wallet
-const PAGE_LIMIT = 100; // getSignaturesForAddress limit
+// ---------- Tunables & helpers ----------
+const DECIMALS = 9;            // 1 SOL = 1e9 lamports
+const AVG_SLOT_SEC = 0.4;      // gruba aproksimacija za sinceHours
+const DEFAULT_MAX_SLOTS = 4000;
+const DEFAULT_MIN_CONF = 64;
+const DEFAULT_OVERLAP = 400;
+const DEFAULT_BATCH_FALLBACK = 2000;
 
-type Json = any;
+const CURSOR_KEY = "sol_contrib_last_scanned";
 
-type SignatureInfo = {
-  signature: string;
-  slot?: number;
-  blockTime?: number | null;
-  err?: any;
-  memo?: string | null;
-  confirmationStatus?: string;
+type Json = Record<string, any>;
+const ok = (b: Json = {}) => NextResponse.json({ ok: true, ...b });
+const err = (m: string, status = 500, extra?: Json) =>
+  NextResponse.json({ ok: false, error: m, ...(extra || {}) }, { status });
+
+function need(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing ${name}`);
+  return v;
+}
+
+function supa() {
+  const url = need("NEXT_PUBLIC_SUPABASE_URL");
+  const key = need("SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key, { auth: { persistSession: false } });
+}
+
+// Canonical chain (isti obrazac kao i ostale rute)
+function canonChain(x: string | null | undefined): string {
+  const v = (x || "").toLowerCase();
+  if (v.includes("sol")) return "SOL";
+  if (v.includes("trx") || v.includes("tron")) return "TRX";
+  if (v.includes("dot") || v.includes("polkadot")) return "DOT";
+  if (v.includes("atom") || v.includes("cosmos")) return "ATOM";
+  // ostalo…
+  return v.toUpperCase();
+}
+
+// ---------- RPC pool & auth fallbacks ----------
+function parsePool(envPool?: string, envSingle?: string) {
+  const list: string[] = [];
+  const push = (s?: string) => {
+    if (!s) return;
+    const t = s.trim().replace(/\/+$/, "");
+    if (t) list.push(t);
+  };
+  if (envPool) for (const part of envPool.split(/[\n,]+/)) push(part);
+  push(envSingle);
+  if (process.env.SOL_PUBLIC_RPC_URL) push(process.env.SOL_PUBLIC_RPC_URL);
+  return Array.from(new Set(list));
+}
+
+type RpcAttempt = {
+  url: string;
+  headers: Record<string, string>;
+  headerTip: string;
+  queryKey?: string;
 };
 
-type ParsedTx = {
-  blockTime?: number | null;
-  transaction?: {
-    message?: {
-      accountKeys?: Array<string | { pubkey: string }>;
-    };
-  };
-  meta?: {
-    preBalances?: number[];
-    postBalances?: number[];
-  };
-};
+function buildRpcAttempts(base: string, apiKey?: string | null): RpcAttempt[] {
+  const attempts: RpcAttempt[] = [];
+  const clean = base.replace(/\/+$/, "");
+  const baseHeaders: Record<string, string> = { "Content-Type": "application/json" };
 
-function isSOL(symbol?: string | null, chain?: string | null) {
-  const s = String(symbol || "").trim().toUpperCase();
-  const c = String(chain || "").trim().toUpperCase();
-  return s === "SOL" || c === "SOL" || c === "SOLANA";
-}
-function relFirst<T = any>(maybe: any): T | undefined {
-  if (!maybe) return undefined;
-  return Array.isArray(maybe) ? maybe[0] : maybe;
-}
-
-async function rpc<T = Json>(method: string, params: any[]): Promise<T> {
-  if (!RPC) throw new Error("Missing SOL_RPC_URL");
-  if (!KEY) throw new Error("Missing NOWNODES_API_KEY");
-  const res = await fetch(RPC, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "api-key": KEY },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`SOL RPC HTTP ${res.status} ${res.statusText}${txt ? `: ${txt}` : ""}`);
+  if (apiKey && apiKey.trim()) {
+    const k = apiKey.trim();
+    attempts.push({ url: clean, headers: { ...baseHeaders, "api-key": k }, headerTip: "api-key" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, "x-api-key": k }, headerTip: "x-api-key" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, "X-API-KEY": k }, headerTip: "X-API-KEY" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, Authorization: `Bearer ${k}` }, headerTip: "Bearer" });
+    // Neki gateway-i očekuju query ključ
+    attempts.push({ url: `${clean}?apikey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apikey", queryKey: "apikey" });
+    attempts.push({ url: `${clean}?api_key=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:api_key", queryKey: "api_key" });
+    attempts.push({ url: `${clean}?apiKey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apiKey", queryKey: "apiKey" });
+  } else {
+    attempts.push({ url: clean, headers: baseHeaders, headerTip: "no-key" });
   }
-  const json = (await res.json()) as any;
-  if (json.error) throw new Error(String(json.error?.message || "RPC error"));
-  return json.result as T;
+  return attempts;
 }
 
-function toSol(lamports: number) {
-  return lamports / 1_000_000_000; // 1e9
-}
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-function keyToString(k: any): string {
-  return typeof k === "string" ? k : String(k?.pubkey || "");
-}
+async function solRpc<T = any>(
+  method: string,
+  params: any[],
+  pool: string[],
+  apiKey?: string | null,
+  opts?: { retries?: number; timeoutMs?: number; debugLog?: string[] }
+): Promise<{ result: T; used: { url: string; headerTip: string } }> {
+  const retries = opts?.retries ?? 2;
+  const timeoutMs = opts?.timeoutMs ?? 20_000;
+  const debugLog = opts?.debugLog;
+  let lastErr: any = null;
 
-function accountIndexFromKeys(keys: any[], account: string): number {
-  for (let i = 0; i < (keys || []).length; i++) {
-    const pk = keyToString(keys[i]);
-    if (pk === account) return i;
+  for (const base of pool) {
+    for (const att of buildRpcAttempts(base, apiKey)) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(att.url, {
+          method: "POST",
+          headers: att.headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+          signal: controller.signal,
+        });
+        const j = await res.json().catch(() => ({}));
+        clearTimeout(timer);
+        if (res.ok && !j?.error) {
+          if (debugLog) debugLog.push(`RPC OK via ${att.url} [${att.headerTip}]`);
+          return { result: (j.result ?? j) as T, used: { url: att.url, headerTip: att.headerTip } };
+        }
+        lastErr = new Error(`RPC ${res.status} ${JSON.stringify(j?.error || {})} @ ${att.url} [${att.headerTip}]`);
+        if (debugLog) debugLog.push(String(lastErr));
+      } catch (e: any) {
+        clearTimeout(timer);
+        lastErr = e;
+        if (debugLog) debugLog.push(`RPC error: ${(e?.message || e)} @ ${att.url} [${att.headerTip}]`);
+      }
+      await sleep(200);
+    }
   }
-  return -1;
+
+  for (let i = 0; i < retries; i++) {
+    await sleep(400 * (i + 1));
+    const { result, used } = await solRpc<T>(method, params, pool, apiKey, { retries: 0, timeoutMs, debugLog });
+    return { result, used };
+  }
+  throw lastErr || new Error("All RPC attempts failed");
 }
 
-export async function POST(req: Request) {
+// ---------- Amount/helper utils ----------
+const lamportsToSol = (lamports: number | bigint) => Number(lamports) / 10 ** DECIMALS;
+
+// Pomoćna: izvući SOL transfere iz jsonParsed instrukcija
+function extractSolTransfersFromTx(tx: any): Array<{ destination: string; lamports: number }> {
   try {
-    // auth
-    if (!CRON_SECRET || (req.headers.get("x-cron-secret") || "") !== CRON_SECRET) {
-      return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+    const msg = tx?.transaction?.message;
+    const ix = Array.isArray(msg?.instructions) ? msg.instructions : [];
+    const res: Array<{ destination: string; lamports: number }> = [];
+    for (const i of ix) {
+      const parsed = i?.parsed;
+      if (!parsed) continue;
+      const typ = parsed?.type || parsed?.info?.type;
+      const prog = i?.program || parsed?.program;
+      if ((prog === "system" || prog === "spl-system") && typ === "transfer") {
+        const info = parsed?.info || {};
+        const dest = String(info?.destination || "");
+        const lam = Number(info?.lamports ?? 0);
+        if (dest && lam > 0) res.push({ destination: dest, lamports: lam });
+      }
     }
-    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-      return NextResponse.json({ ok: false, error: "Missing Supabase env" }, { status: 500 });
+    // innerInstructions (ako postoje)
+    const metaInner = tx?.meta?.innerInstructions;
+    if (Array.isArray(metaInner)) {
+      for (const inner of metaInner) {
+        const arr = Array.isArray(inner?.instructions) ? inner.instructions : [];
+        for (const i of arr) {
+          const parsed = i?.parsed;
+          if (!parsed) continue;
+          const typ = parsed?.type || parsed?.info?.type;
+          const prog = i?.program || parsed?.program;
+          if ((prog === "system" || prog === "spl-system") && typ === "transfer") {
+            const info = parsed?.info || {};
+            const dest = String(info?.destination || "");
+            const lam = Number(info?.lamports ?? 0);
+            if (dest && lam > 0) res.push({ destination: dest, lamports: lam });
+          }
+        }
+      }
     }
-    const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+    return res;
+  } catch {
+    return [];
+  }
+}
 
-    // 1) Active SOL wallets
-    const { data: walletsAll, error: wErr } = await sb
+// ---------- Main handler ----------
+export async function POST(req: Request) {
+  const dbg: string[] = [];
+  try {
+    // Auth
+    const expected = need("CRON_SECRET");
+    if ((req.headers.get("x-cron-secret") || "") !== expected) {
+      return err("Unauthorized", 401);
+    }
+
+    const sb = supa();
+
+    // Wallets -> samo SOL
+    const { data: wallets, error: wErr } = await sb
       .from("wallets")
-      .select(`
-        id, address, chain, is_active, currency_id,
-        currencies:currency_id ( symbol )
-      `)
+      .select("id,address,chain,is_active")
       .eq("is_active", true);
     if (wErr) throw wErr;
 
-    const wallets = (walletsAll || []).filter((w: any) => w?.address && isSOL(relFirst(w?.currencies)?.symbol, w?.chain));
-    if (wallets.length === 0) {
-      return NextResponse.json({ ok: true, info: "No SOL wallets active; nothing to ingest.", inserted: 0 });
+    const funding = (wallets || [])
+      .filter(w => canonChain(String(w.chain)) === "SOL")
+      .map(w => ({ id: String(w.id), addr: String((w as any).address || "").trim() }))
+      .filter(w => !!w.addr);
+
+    if (!funding.length) return ok({ note: "No active SOL wallets", inserted: 0, scanned: 0 });
+
+    const addrSet = new Set(funding.map(f => f.addr));
+    const addrToWallet = new Map(funding.map(f => [f.addr, f.id]));
+
+    // RPC pool
+    const pool = parsePool(process.env.SOL_RPC_POOL, process.env.SOL_RPC_URL || "https://sol.nownodes.io");
+    const apiKey = process.env.NOWNODES_API_KEY || null;
+
+    // Query
+    const url = new URL(req.url);
+    const qp = url.searchParams;
+    const forceTx = qp.get("tx") || "";          // signature
+    const sinceSlot = Number(qp.get("sinceSlot") || "0");
+    const sinceHours = Number(qp.get("sinceHours") || "0");
+    const overlap = Number(qp.get("overlap") || String(DEFAULT_OVERLAP));
+    const maxSlots = Number(qp.get("maxSlots") || String(DEFAULT_MAX_SLOTS));
+    const minConf = Math.max(0, Number(qp.get("minConf") || String(DEFAULT_MIN_CONF)));
+    const richDebug = qp.get("debug") === "1";
+
+    // Tip & safe head (finalized)
+    const tipSlotWrap = await solRpc<number>("getSlot", [{ commitment: "finalized" }], pool, apiKey, { debugLog: dbg });
+    const tip = Number(tipSlotWrap.result || 0);
+    const safeTip = Math.max(0, tip - minConf);
+
+    // Force tx (signature) path
+    if (forceTx) {
+      // getTransaction(signature, {encoding:"jsonParsed"})
+      const txWrap = await solRpc<any>(
+        "getTransaction",
+        [forceTx, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 } as any],
+        pool,
+        apiKey,
+        { debugLog: dbg }
+      );
+      const tx = txWrap.result;
+      if (!tx) return err("Transaction not found", 404, { tx: forceTx });
+
+      const transfers = extractSolTransfersFromTx(tx);
+      const matches = transfers.filter(t => addrSet.has(t.destination));
+      if (!matches.length) return ok({ note: "No SOL transfers to funding addresses", tx: forceTx, inserted: 0 });
+
+      const whenISO = tx?.blockTime ? new Date(Number(tx.blockTime) * 1000).toISOString() : new Date().toISOString();
+
+      let inserted = 0;
+      for (const m of matches) {
+        const wallet_id = addrToWallet.get(m.destination)!;
+        const amount = lamportsToSol(m.lamports);
+        const { error: iErr } = await sb
+          .from("contributions")
+          .upsert([{ wallet_id, tx_hash: forceTx, amount, block_time: whenISO }], { onConflict: "tx_hash" })
+          .select("tx_hash");
+        if (iErr) throw iErr;
+        inserted += 1;
+      }
+
+      const res: Json = { chain: "sol", mode: "forceTx", tip, safeTip, tx: forceTx, outputsMatched: matches.length, inserted };
+      if (richDebug) (res as any).debugLog = dbg;
+      return ok(res);
     }
 
-    const candidates: Array<{ wallet_id: string; tx_hash: string; amount: number; block_time: string }> = [];
+    // Marker iz settings
+    const { data: st } = await sb.from("settings").select("value").eq("key", CURSOR_KEY).maybeSingle();
+    const prev = Number(st?.value?.n ?? 0);
+
+    // Odredi range
+    let from: number;
+    let reason = "";
+    if (sinceSlot > 0) {
+      from = sinceSlot;
+      reason = "sinceSlot";
+    } else if (sinceHours > 0) {
+      const approxSlots = Math.max(1, Math.floor((sinceHours * 3600) / AVG_SLOT_SEC));
+      from = Math.max(0, safeTip - approxSlots);
+      reason = "sinceHours";
+    } else if (prev > 0) {
+      from = Math.max(0, prev - overlap + 1);
+      reason = "marker/overlap";
+    } else {
+      from = Math.max(0, safeTip - Math.min(DEFAULT_BATCH_FALLBACK, maxSlots) + 1);
+      reason = "fallback";
+    }
+
+    let to = Math.min(safeTip, from + Math.max(1, maxSlots) - 1);
+    if (to < from) {
+      const body: Json = { tip, safeTip, from, to, scanned: 0, inserted: 0, note: "Nothing to scan (waiting for finalization)" };
+      if (richDebug) (body as any).debugLog = dbg;
+      return ok(body);
+    }
+
+    // Scan slot-by-slot (getBlock with jsonParsed)
     let scanned = 0;
+    const rows: Array<{ wallet_id: string; tx_hash: string; amount: number; block_time: string }> = [];
 
-    for (const w of wallets) {
-      const walletId = String((w as any).id);
-      const account = String((w as any).address).trim();
-      if (!account) continue;
+    for (let s = from; s <= to; s++) {
+      // getBlock(s, {…})
+      const blkWrap = await solRpc<any>(
+        "getBlock",
+        [s, { encoding: "jsonParsed", transactionDetails: "full", rewards: false, maxSupportedTransactionVersion: 0 } as any],
+        pool,
+        apiKey,
+        { debugLog: dbg }
+      );
+      scanned++;
 
-      let before: string | undefined = undefined;
+      const blk = blkWrap.result;
+      if (!blk) continue;
 
-      for (let page = 0; page < PAGES; page++) {
-        // Newest-first page
-        const sigs: SignatureInfo[] = await rpc<SignatureInfo[]>("getSignaturesForAddress", [
-          account,
-          { limit: PAGE_LIMIT, before },
-        ]);
-        if (!Array.isArray(sigs) || sigs.length === 0) break;
+      const whenISO = blk?.blockTime ? new Date(Number(blk.blockTime) * 1000).toISOString() : new Date().toISOString();
+      const txs: any[] = Array.isArray(blk?.transactions) ? blk.transactions : [];
 
-        for (const s of sigs) {
-          scanned++;
-          const signature = String(s?.signature || "");
-          if (!signature) continue;
+      for (const tx of txs) {
+        const transfers = extractSolTransfersFromTx(tx);
+        if (!transfers.length) continue;
 
-          // getTransaction with jsonParsed
-          const tx: ParsedTx | null = await rpc<ParsedTx | null>("getTransaction", [
-            signature,
-            { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
-          ]);
-          if (!tx) continue;
+        const sig = String(tx?.transaction?.signatures?.[0] || "");
+        if (!sig) continue;
 
-          const keys = tx?.transaction?.message?.accountKeys || [];
-          const idx = accountIndexFromKeys(keys, account);
-          if (idx < 0) continue;
-
-          const pre = Number(tx?.meta?.preBalances?.[idx] ?? 0);
-          const post = Number(tx?.meta?.postBalances?.[idx] ?? 0);
-          const delta = post - pre;
-
-          // Only positive net inflow (received SOL)
-          if (delta > 0) {
-            const whenSec = Number(tx?.blockTime ?? s?.blockTime ?? 0) || Math.floor(Date.now() / 1000);
-            const whenIso = new Date(whenSec * 1000).toISOString();
-
-            candidates.push({
-              wallet_id: walletId,
-              tx_hash: signature,
-              amount: toSol(delta),
-              block_time: whenIso,
-            });
-          }
+        for (const t of transfers) {
+          if (!addrSet.has(t.destination)) continue;
+          const wallet_id = addrToWallet.get(t.destination)!;
+          const amount = lamportsToSol(t.lamports);
+          rows.push({ wallet_id, tx_hash: sig, amount, block_time: whenISO });
         }
-
-        // prepare next page (older)
-        before = String(sigs[sigs.length - 1]?.signature || "") || before;
-        if (!before) break;
-        if (sigs.length < PAGE_LIMIT) break;
       }
     }
 
-    // 2) De-dup by (tx_hash, wallet_id)
-    let existingKeys = new Set<string>();
-    if (candidates.length) {
-      const uniqHashes = Array.from(new Set(candidates.map((r) => r.tx_hash)));
-      const { data: ex } = await sb
-        .from("contributions")
-        .select("tx_hash, wallet_id")
-        .in("tx_hash", uniqHashes);
-      existingKeys = new Set((ex || []).map((e: any) => `${e.tx_hash}:${e.wallet_id}`));
-    }
-
-    const rows = candidates.filter((r) => !existingKeys.has(`${r.tx_hash}:${r.wallet_id}`));
-
+    // Upsert
+    let inserted = 0;
     if (rows.length) {
-      const { error: insErr } = await sb.from("contributions").insert(rows);
-      if (insErr) throw insErr;
+      const { data: upserted, error: iErr } = await sb
+        .from("contributions")
+        .upsert(rows, { onConflict: "tx_hash" })
+        .select("tx_hash");
+      if (iErr) throw iErr;
+      inserted = upserted?.length || 0;
     }
 
-    return NextResponse.json({
+    // Pomakni marker
+    await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: to } }, { onConflict: "key" });
+
+    const res: Json = {
       ok: true,
-      chain: "SOL",
-      wallets: wallets.length,
-      scanned_signatures: scanned,
-      candidates: candidates.length,
-      inserted: rows.length,
-      pages_per_wallet: PAGES,
-      page_limit: PAGE_LIMIT,
-    });
+      chain: "sol",
+      reason,
+      tip,
+      safeTip,
+      from,
+      to,
+      scanned,
+      matched: rows.length,
+      inserted,
+    };
+    if (richDebug) (res as any).debugLog = dbg;
+    return NextResponse.json(res);
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || "SOL contrib ingest failed" }, { status: 500 });
+    const msg = String(e?.message || e);
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
 }
 
