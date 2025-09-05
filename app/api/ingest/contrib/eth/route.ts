@@ -36,7 +36,7 @@ export const runtime = "nodejs";
 
 // ---------- Tunables & helpers ----------
 const DECIMALS = 18; // ETH
-const AVG_BLOCK_SEC = 12;
+const AVG_BLOCKSEC = 12;
 const DEFAULT_MAX_BLOCKS = 2000;
 const DEFAULT_MIN_CONF = 12;
 const DEFAULT_OVERLAP = 100;
@@ -230,7 +230,7 @@ export async function POST(req: Request) {
     const url = new URL(req.url);
     const qp = url.searchParams;
     const forceTx = qp.get("tx") || "";
-    const sinceBlock = Number(qp.get("sinceBlock") || "0");
+    the const sinceBlock = Number(qp.get("sinceBlock") || "0");
     const sinceHours = Number(qp.get("sinceHours") || "0");
     const overlap = Number(qp.get("overlap") || String(DEFAULT_OVERLAP));
     const maxBlocks = Number(qp.get("maxBlocks") || String(DEFAULT_MAX_BLOCKS));
@@ -302,7 +302,7 @@ export async function POST(req: Request) {
       from = sinceBlock;
       reason = "sinceBlock";
     } else if (sinceHours > 0) {
-      const approxBlocks = Math.floor((sinceHours * 3600) / AVG_BLOCK_SEC);
+      const approxBlocks = Math.floor((sinceHours * 3600) / AVG_BLOCKSEC);
       from = Math.max(0, safeTip - approxBlocks);
       reason = "sinceHours";
     } else if (prev > 0) {
@@ -365,8 +365,8 @@ export async function POST(req: Request) {
     if (rows.length) {
       const { data: upserted, error: iErr } = await sb
         .from("contributions")
-        .upsert(rows, { onConflict: "tx_hash", returning: "representation" })
-        .select("tx_hash"); // select only needed column; options arg removed (TypeScript fix)
+        .upsert(rows, { onConflict: "tx_hash" }) // ← remove `returning`
+        .select("tx_hash"); // ← only 1 arg allowed after upsert; gives inserted/updated rows
 
       if (iErr) throw iErr;
       inserted = upserted?.length || 0;
