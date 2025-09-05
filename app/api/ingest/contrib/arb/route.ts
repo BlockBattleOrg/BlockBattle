@@ -38,7 +38,7 @@ export const runtime = "nodejs";
 const DECIMALS = 18; // ARB native = ETH units
 const AVG_BLOCKSEC = 1; // for backoff approximation only
 const DEFAULT_MAX_BLOCKS = 2000;
-the const DEFAULT_MIN_CONF = 6;
+const DEFAULT_MIN_CONF = 6;
 const DEFAULT_OVERLAP = 100;
 const DEFAULT_BATCH_FALLBACK = 500; // small conservative window on first run
 
