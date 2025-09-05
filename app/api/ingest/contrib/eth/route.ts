@@ -230,7 +230,7 @@ export async function POST(req: Request) {
     const url = new URL(req.url);
     const qp = url.searchParams;
     const forceTx = qp.get("tx") || "";
-    the const sinceBlock = Number(qp.get("sinceBlock") || "0");
+    const sinceBlock = Number(qp.get("sinceBlock") || "0");
     const sinceHours = Number(qp.get("sinceHours") || "0");
     const overlap = Number(qp.get("overlap") || String(DEFAULT_OVERLAP));
     const maxBlocks = Number(qp.get("maxBlocks") || String(DEFAULT_MAX_BLOCKS));
@@ -365,8 +365,8 @@ export async function POST(req: Request) {
     if (rows.length) {
       const { data: upserted, error: iErr } = await sb
         .from("contributions")
-        .upsert(rows, { onConflict: "tx_hash" }) // ← remove `returning`
-        .select("tx_hash"); // ← only 1 arg allowed after upsert; gives inserted/updated rows
+        .upsert(rows, { onConflict: "tx_hash" })
+        .select("tx_hash");
 
       if (iErr) throw iErr;
       inserted = upserted?.length || 0;
