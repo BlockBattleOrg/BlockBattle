@@ -6,17 +6,15 @@ export const runtime = "nodejs";
 
 /**
  * ATOM (Cosmos Hub) native contributions ingest.
- * - Skenira blokove preko LCD (gRPC-gateway) i traži MsgSend (uatom) prema našim funding adresama.
+ * - Skenira blokove preko LCD i traži MsgSend (uatom) prema našim funding adresama.
  * - Piše u `public.contributions` (wallet_id, tx_hash, amount, block_time).
- * - Marker je u `public.settings` kao `atom_contrib_last_scanned`.
- *
- * Napomena: amount_usd ovdje se NE računa.
+ * - Marker je u `public.settings` pod `atom_contrib_last_scanned`.
+ * - amount_usd se ne računa ovdje.
  */
 
-// -------- Tunables --------
 const DECIMALS = 6;                 // 1 ATOM = 1e6 uatom
 const AVG_BLOCKSEC = 6;
-const DEFAULT_MAX_BLOCKS = 90;      // mali default za brzi smoke
+const DEFAULT_MAX_BLOCKS = 80;      // mali default za brzi smoke
 const DEFAULT_MIN_CONF = 3;
 const DEFAULT_OVERLAP = 120;
 const DEFAULT_BATCH_FALLBACK = 240; // ~24 min
@@ -56,7 +54,7 @@ function canonChain(x: string | null | undefined): string {
   return v.toUpperCase();
 }
 
-// -------- LCD pool & NowNodes fallback --------
+// -------- LCD pool & NowNodes/public fallbacks --------
 function parsePool(envPool?: string, envSingle?: string) {
   const list: string[] = [];
   const push = (s?: string) => {
@@ -65,19 +63,16 @@ function parsePool(envPool?: string, envSingle?: string) {
     if (t) list.push(t);
   };
 
-  // 1) projektni env
   if (envPool) for (const part of envPool.split(/[\n,]+/)) push(part);
   push(envSingle);
   if (process.env.ATOM_PUBLIC_LCD_URL) push(process.env.ATOM_PUBLIC_LCD_URL);
 
-  // 2) ugrađeni javni fallbackovi (redom proći dok neki ne radi)
-  // Ako preferiraš čisto ENV, slobodno izbriši ove tri linije.
+  // ugrađeni fallbackovi
   push("https://lcd-cosmoshub.keplr.app");
   push("https://cosmoshub-lcd.stakewolle.com");
   push("https://lcd-cosmoshub.blockapsis.com");
   push("https://cosmos-lcd.publicnode.com");
 
-  // dedupe
   return Array.from(new Set(list));
 }
 
@@ -116,7 +111,7 @@ async function lcdGet<T = any>(
   opts?: { retries?: number; timeoutMs?: number; debugLog?: string[] }
 ): Promise<{ json: T; used: { url: string; headerTip: string } }> {
   const retries = opts?.retries ?? 2;
-  const timeoutMs = opts?.timeoutMs ?? 25_000; // malo dulje
+  const timeoutMs = opts?.timeoutMs ?? 25_000;
   const debugLog = opts?.debugLog;
   let lastErr: any = null;
 
@@ -145,7 +140,7 @@ async function lcdGet<T = any>(
         lastErr = e;
         if (debugLog) debugLog.push(`LCD fetch error: ${(e?.message || e)} @ ${u.toString()} [${att.headerTip}]`);
       }
-      await sleep(150);
+      await sleep(120);
     }
   }
 
@@ -172,6 +167,51 @@ function extractAtomFromAmounts(amounts: any): number {
     }
   }
   return 0;
+}
+
+// unified fetch of txs for a given height: try `events`, fallback to `query`
+async function fetchTxsForHeight(
+  h: number,
+  pool: string[],
+  apiKey: string | null,
+  dbg: string[]
+): Promise<{ txs: any[]; tx_responses: any[] }> {
+  // A) try newer style (events)
+  try {
+    const a = await lcdGet<any>(
+      "/cosmos/tx/v1beta1/txs",
+      {
+        "events": `tx.height=${h}`,
+        "pagination.limit": 200,
+        "pagination.offset": 0,
+      },
+      pool,
+      apiKey,
+      { debugLog: dbg }
+    );
+    const txsA: any[] = Array.isArray(a.json?.txs) ? a.json.txs : [];
+    const respsA: any[] = Array.isArray(a.json?.tx_responses) ? a.json.tx_responses : [];
+    if (txsA.length || respsA.length) return { txs: txsA, tx_responses: respsA };
+    dbg.push(`events-query returned empty for height ${h}, will try legacy query param`);
+  } catch (e: any) {
+    dbg.push(`events-query error @h=${h}: ${e?.message || e}`);
+  }
+
+  // B) fallback to older style (query)
+  const b = await lcdGet<any>(
+    "/cosmos/tx/v1beta1/txs",
+    {
+      "query": `tx.height=${h}`,
+      "pagination.limit": 200,
+      "pagination.offset": 0,
+    },
+    pool,
+    apiKey,
+    { debugLog: dbg }
+  );
+  const txsB: any[] = Array.isArray(b.json?.txs) ? b.json.txs : [];
+  const respsB: any[] = Array.isArray(b.json?.tx_responses) ? b.json.tx_responses : [];
+  return { txs: txsB, tx_responses: respsB };
 }
 
 // -------- Main --------
@@ -253,7 +293,7 @@ export async function POST(req: Request) {
 
       const res: Json = { chain: "atom", mode: "forceTx", tip, safeTip, tx: String(txResp.txhash || ""), inserted };
       if (richDebug) (res as any).debugLog = dbg;
-      return ok(res);
+      return NextResponse.json(res);
     }
 
     // Range
@@ -284,30 +324,16 @@ export async function POST(req: Request) {
       return ok(body);
     }
 
-    // Scan blokove: /cosmos/tx/v1beta1/txs?events=tx.height=H&pagination.limit=...&pagination.offset=...
+    // Scan blokove (events or query fallback)
     let scanned = 0;
     const rows: Array<{ wallet_id: string; tx_hash: string; amount: number; block_time: string }> = [];
 
     for (let h = from; h <= to; h++) {
-      const txsQ = await lcdGet<any>(
-        "/cosmos/tx/v1beta1/txs",
-        {
-          "events": `tx.height=${h}`,
-          "order_by": "ORDER_BY_UNSPECIFIED",
-          "pagination.limit": 200,
-          "pagination.offset": 0,
-        },
-        pool,
-        apiKey,
-        { debugLog: dbg }
-      );
+      const { txs, tx_responses } = await fetchTxsForHeight(h, pool, apiKey, dbg);
       scanned++;
 
-      const resps: any[] = Array.isArray(txsQ.json?.tx_responses) ? txsQ.json.tx_responses : [];
-      const txs: any[] = Array.isArray(txsQ.json?.txs) ? txsQ.json.txs : [];
-
-      for (let i = 0; i < resps.length; i++) {
-        const resp = resps[i] || {};
+      for (let i = 0; i < tx_responses.length; i++) {
+        const resp = tx_responses[i] || {};
         const tx = (resp?.tx as any) || txs[i] || {};
         const whenISO = String(resp?.timestamp || new Date().toISOString());
         const txhash = String(resp?.txhash || "");
