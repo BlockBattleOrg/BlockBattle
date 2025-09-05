@@ -1,261 +1,386 @@
 // app/api/ingest/contrib/pol/route.ts
 import { NextResponse } from "next/server";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = "force-dynamic";
+// Keep Node.js runtime for fetch/AbortController and non-edge compat
 export const runtime = "nodejs";
 
-type Hex = `0x${string}`;
-type Address = `0x${string}`;
+/**
+ * POL (Polygon) native contributions ingest (EVM).
+ * - Scans blocks and picks txs where `to` equals one of our funding addresses.
+ * - Writes into `public.contributions` (wallet_id, tx_hash, amount, block_time).
+ * - Cursor (last scanned block) is stored in `public.settings` under `pol_contrib_last_scanned`.
+ *
+ * ENV required:
+ *  - CRON_SECRET
+ *  - NEXT_PUBLIC_SUPABASE_URL
+ *  - SUPABASE_SERVICE_ROLE_KEY
+ *
+ * Preferred ENV for RPC (NowNodes):
+ *  - POL_RPC_POOL   (optional, comma/newline-separated list of base URLs)
+ *  - POL_RPC_URL    (fallback single base, e.g. https://matic.nownodes.io)
+ *  - NOWNODES_API_KEY (optional; multiple header/query variants attempted)
+ *
+ * Query params:
+ *  - tx=<hash>                    // force single tx ingest path
+ *  - sinceBlock=<height>          // start from height
+ *  - sinceHours=<n>               // approximate backoff by time
+ *  - overlap=<n=100>              // re-scan this many blocks before cursor
+ *  - maxBlocks=<n=2000>           // hard limit per run
+ *  - minConf=<n=12>               // confirmations before including a block
+ *  - debug=1                      // include rich debug info
+ *
+ * IMPORTANT:
+ *  - We DO NOT write amount_usd here. Pricing is handled elsewhere.
+ */
 
-const BATCH_BLOCKS = 250;
-const MAX_LOOKBACK = 5000; // safety cap for sinceHours lookback
+// ---------- Tunables & helpers ----------
+const DECIMALS = 18; // MATIC/POL
+const AVG_BLOCKSEC = 2; // Polygon is fast; for backoff approximation only
+const DEFAULT_MAX_BLOCKS = 2000;
+const DEFAULT_MIN_CONF = 12;
+const DEFAULT_OVERLAP = 100;
+const DEFAULT_BATCH_FALLBACK = 500; // small conservative window on first run
 
-// ---------- Utils ----------
-function need(name: string): string {
+const CURSOR_KEY = "pol_contrib_last_scanned";
+
+type Json = Record<string, any>;
+const ok = (b: Json = {}) => NextResponse.json({ ok: true, ...b });
+const err = (m: string, status = 500, extra?: Json) =>
+  NextResponse.json({ ok: false, error: m, ...(extra || {}) }, { status });
+
+function need(name: string) {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing ENV: ${name}`);
+  if (!v) throw new Error(`Missing ${name}`);
   return v;
 }
-function rpcBase(): string {
-  const u =
-    (process.env.POL_RPC_URL || "").trim() ||
-    (process.env.MATIC_RPC_URL || "").trim() ||
-    "https://pol.nownodes.io";
-  return u.replace(/\/+$/, "");
+
+function supa() {
+  const url = need("NEXT_PUBLIC_SUPABASE_URL");
+  const key = need("SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key, { auth: { persistSession: false } });
 }
-function rpcHeaders() {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const key = process.env.NOWNODES_API_KEY;
-  if (key) headers["api-key"] = key; // NowNodes
-  return headers;
+
+// Canonical chain ticker normalizer; shared logic with other EVM routes.
+function canonChain(x: string | null | undefined): string {
+  const v = (x || "").toLowerCase();
+  if (v.includes("eth") || v.includes("ethereum")) return "ETH";
+  if (v.includes("bsc") || v.includes("bnb")) return "BNB";
+  if (v.includes("matic") || v.includes("polygon") || v === "pol") return "POL";
+  if (v.startsWith("arb")) return "ARB";
+  if (v === "op" || v.includes("optimism")) return "OP";
+  if (v.includes("avax") || v.includes("avalanche")) return "AVAX";
+  return v.toUpperCase();
 }
-async function evmRpc<T = any>(method: string, params: any[], attempt = 0): Promise<T> {
-  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
-  const res = await fetch(rpcBase(), { method: "POST", headers: rpcHeaders(), body });
-  if (!res.ok) {
-    if (attempt < 2) return evmRpc<T>(method, params, attempt + 1);
-    throw new Error(`RPC ${method} failed: HTTP ${res.status}`);
+
+// ---------- RPC pool & NowNodes auth fallbacks ----------
+function parsePool(envPool?: string, envSingle?: string) {
+  const list: string[] = [];
+  const push = (s?: string) => {
+    if (!s) return;
+    const t = s.trim().replace(/\/+$/, "");
+    if (t) list.push(t);
+  };
+
+  if (envPool) {
+    for (const part of envPool.split(/[\n,]+/)) push(part);
   }
-  const j = await res.json();
-  if (j.error) throw new Error(`RPC ${method} error: ${j.error?.message || j.error}`);
-  return j.result as T;
-}
-const toBig = (x: Hex | string | null | undefined) => BigInt(x ?? "0x0");
-const hexToInt = (x: Hex | string) => Number(BigInt(x as any));
-function weiToDecimalString(wei: Hex | string, decimals = 18): string {
-  const v = toBig(wei);
-  const base = 10n ** BigInt(decimals);
-  const whole = v / base;
-  const frac = v % base;
-  if (frac === 0n) return whole.toString();
-  const f = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
-  return `${whole.toString()}.${f}`;
-}
-function isAddress(x: any): x is Address {
-  return typeof x === "string" && /^0x[a-fA-F0-9]{40}$/.test(x);
-}
-const lc = (x: string | null | undefined) => (x || "").toLowerCase();
+  push(envSingle);
 
-// ---------- Supabase ----------
-function supa(): SupabaseClient {
-  return createClient(need("NEXT_PUBLIC_SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE_KEY"), {
-    auth: { persistSession: false },
-  });
+  // Minimal last-resort (only if provided by user)
+  if (process.env.POL_PUBLIC_RPC_URL) push(process.env.POL_PUBLIC_RPC_URL);
+
+  return Array.from(new Set(list));
 }
 
-type WalletRow = { id: string; address: string; chain: string };
+type RpcAttempt = {
+  url: string;
+  headers: Record<string, string>;
+  queryAppend?: string;
+  headerTip: string;
+};
 
-async function getPolygonWallets(client: SupabaseClient): Promise<{ byAddr: Map<string, WalletRow>; list: WalletRow[] }> {
-  const { data, error } = await client
-    .from("wallets")
-    .select("id,address,chain")
-    .in("chain", ["pol", "matic", "polygon"])
-    .order("address");
-  if (error) throw new Error(`Supabase wallets: ${error.message}`);
-  const list: WalletRow[] = (data || []).filter((w: any) => isAddress(w.address));
-  const byAddr = new Map<string, WalletRow>();
-  for (const w of list) byAddr.set(lc(w.address), w);
-  return { byAddr, list };
+function buildRpcAttempts(base: string, apiKey?: string | null): RpcAttempt[] {
+  const attempts: RpcAttempt[] = [];
+  const clean = base.replace(/\/+$/, "");
+  const baseHeaders: Record<string, string> = { "Content-Type": "application/json" };
+
+  if (apiKey && apiKey.trim()) {
+    const k = apiKey.trim();
+    attempts.push({ url: clean, headers: { ...baseHeaders, "api-key": k }, headerTip: "api-key" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, "x-api-key": k }, headerTip: "x-api-key" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, "X-API-KEY": k }, headerTip: "X-API-KEY" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, Authorization: `Bearer ${k}` }, headerTip: "Bearer" });
+    attempts.push({ url: `${clean}?apikey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apikey", queryAppend: "apikey" });
+    attempts.push({ url: `${clean}?api_key=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:api_key", queryAppend: "api_key" });
+    attempts.push({ url: `${clean}?apiKey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apiKey", queryAppend: "apiKey" });
+  } else {
+    attempts.push({ url: clean, headers: baseHeaders, headerTip: "no-key" });
+  }
+  return attempts;
 }
 
-async function getLastScanned(client: SupabaseClient): Promise<number | null> {
-  const { data, error } = await client
-    .from("settings")
-    .select("key,value")
-    .eq("key", "pol_contrib_last_scanned")
-    .maybeSingle();
-  if (error) throw new Error(`Supabase settings: ${error.message}`);
-  const v = data?.value ? Number(data.value) : null;
-  return Number.isFinite(v as any) ? (v as number) : null;
-}
-async function setLastScanned(client: SupabaseClient, value: number): Promise<void> {
-  const { error } = await client
-    .from("settings")
-    .upsert([{ key: "pol_contrib_last_scanned", value: String(value) }], { onConflict: "key" });
-  if (error) throw new Error(`Supabase settings upsert: ${error.message}`);
-}
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// ---------- RPC Types ----------
-interface RpcTx {
-  hash: Hex;
-  from?: Address;
-  to?: Address | null;
-  value: Hex;
-  blockNumber: Hex;
-}
-interface RpcBlock {
-  number: Hex;
-  timestamp: Hex;
-  transactions: RpcTx[];
-}
+async function evmRpc<T = any>(
+  method: string,
+  params: any[],
+  pool: string[],
+  apiKey?: string | null,
+  opts?: { retries?: number; timeoutMs?: number; signal?: AbortSignal; debugLog?: string[] }
+): Promise<{ result: T; used: { url: string; headerTip: string } }> {
+  const retries = opts?.retries ?? 2;
+  const timeoutMs = opts?.timeoutMs ?? 20_000;
+  const debugLog = opts?.debugLog;
 
-// ---------- Handler ----------
-export async function POST(req: Request) {
-  try {
-    const url = new URL(req.url);
-    const secret = req.headers.get("x-cron-secret") || "";
-    if (secret !== need("CRON_SECRET")) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-    }
+  let lastErr: any = null;
 
-    const client = supa();
-    const debug = url.searchParams.get("debug") === "1";
-    const sinceHours = Number(url.searchParams.get("sinceHours") || "0");
-    const sinceBlockParam = url.searchParams.get("sinceBlock");
-    const maxBlocks = Math.min(Number(url.searchParams.get("maxBlocks") || "0") || 0, 20000) || 0;
-    const forceTx = url.searchParams.get("tx"); // direct single-tx debug path
-
-    const tipHex = await evmRpc<Hex>("eth_blockNumber", []);
-    const tip = hexToInt(tipHex);
-
-    const { byAddr, list: wallets } = await getPolygonWallets(client);
-    if (wallets.length === 0) {
-      return NextResponse.json({ ok: false, error: "No Polygon wallets configured (chain in pol/matic/polygon)" }, { status: 500 });
-    }
-
-    // ---------- Direct TX path ----------
-    if (forceTx) {
-      const tx = await evmRpc<RpcTx>("eth_getTransactionByHash", [forceTx]);
-      if (!tx) return NextResponse.json({ ok: false, error: "tx not found" }, { status: 404 });
-
-      const to = lc(tx.to || "");
-      const hit = to && byAddr.get(to);
-      if (!hit || toBig(tx.value) === 0n) {
-        return NextResponse.json({ ok: false, error: "tx is not a native POL transfer to our wallet" }, { status: 200 });
-      }
-
-      const blk = hexToInt(tx.blockNumber);
-      const blkData = await evmRpc<RpcBlock>("eth_getBlockByNumber", [tx.blockNumber, false]);
-      const ts = Number((blkData as any).timestamp ? BigInt((blkData as any).timestamp) : 0n);
-
-      // idempotent insert on (wallet_id, tx_hash)
-      const { error } = await client
-        .from("contributions")
-        .upsert(
-          [
-            {
-              wallet_id: hit.id,
-              tx_hash: tx.hash,
-              amount: weiToDecimalString(tx.value), // NUMERIC via text
-              block_time: new Date(ts * 1000).toISOString(),
-            },
-          ],
-          { onConflict: "wallet_id,tx_hash", ignoreDuplicates: true }
-        );
-
-      if (error) return NextResponse.json({ ok: false, error: `insert failed: ${error.message}` }, { status: 500 });
-
-      await setLastScanned(client, Math.max((await getLastScanned(client)) || 0, blk));
-
-      const resp: any = { ok: true, inserted: 1, reason: "forceTx", tx: tx.hash, wallet_id: hit.id };
-      if (debug) resp.funding = wallets.map(w => w.address.toLowerCase());
-      return NextResponse.json(resp);
-    }
-
-    // ---------- Range scan ----------
-    let fromBlock: number | null = null;
-    if (sinceBlockParam) {
-      const n = Number(sinceBlockParam);
-      if (!Number.isFinite(n) || n < 0) {
-        return NextResponse.json({ ok: false, error: "sinceBlock must be a positive integer" }, { status: 400 });
-      }
-      fromBlock = n;
-    } else if (sinceHours > 0) {
-      // Polygon ~2s per block → ~1800 blocks/hour
-      const approx = Math.min(MAX_LOOKBACK, sinceHours * 1800);
-      fromBlock = Math.max(0, tip - approx);
-    } else {
-      fromBlock = (await getLastScanned(client)) ?? null;
-      if (fromBlock !== null) fromBlock = Math.min(fromBlock + 1, tip);
-    }
-    if (fromBlock === null) fromBlock = Math.max(0, tip - 1000);
-
-    const limitTo = maxBlocks > 0 ? Math.min(tip, fromBlock + maxBlocks) : tip;
-    let cursor = fromBlock;
-    let inserted = 0;
-    let scannedBlocks = 0;
-    let lastSeen = (await getLastScanned(client)) ?? 0;
-
-    while (cursor <= limitTo) {
-      const toBlock = Math.min(cursor + BATCH_BLOCKS - 1, limitTo);
-
-      // fetch blocks with full txs
-      const blockPromises: Promise<RpcBlock>[] = [];
-      for (let b = cursor; b <= toBlock; b++) {
-        blockPromises.push(evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true]));
-      }
-      const blocks = await Promise.all(blockPromises);
-      scannedBlocks += blocks.length;
-
-      const rows: any[] = [];
-
-      for (const blk of blocks) {
-        const bn = hexToInt(blk.number);
-        const ts = Number(BigInt(blk.timestamp));
-        for (const tx of blk.transactions || []) {
-          const to = lc(tx.to || "");
-          const hit = to && byAddr.get(to);
-          if (hit && toBig(tx.value) > 0n) {
-            rows.push({
-              wallet_id: hit.id,
-              tx_hash: tx.hash,
-              amount: weiToDecimalString(tx.value),
-              block_time: new Date(ts * 1000).toISOString(),
-            });
-          }
+  for (const base of pool) {
+    const variants = buildRpcAttempts(base, apiKey);
+    for (const att of variants) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(att.url, {
+          method: "POST",
+          headers: att.headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+          signal: controller.signal,
+        });
+        const j = await res.json().catch(() => ({}));
+        clearTimeout(timer);
+        if (res.ok && !j?.error) {
+          if (debugLog) debugLog.push(`RPC OK via ${att.url} [${att.headerTip}]`);
+          return { result: j.result as T, used: { url: att.url, headerTip: att.headerTip } };
         }
-        lastSeen = Math.max(lastSeen, bn);
+        lastErr = new Error(`RPC ${res.status} ${JSON.stringify(j?.error || {})} @ ${att.url} [${att.headerTip}]`);
+        if (debugLog) debugLog.push(String(lastErr));
+      } catch (e: any) {
+        clearTimeout(timer);
+        lastErr = e;
+        if (debugLog) debugLog.push(`RPC error: ${(e?.message || e)} @ ${att.url} [${att.headerTip}]`);
       }
+      await sleep(200);
+    }
+  }
 
-      if (rows.length) {
-        const { error } = await client
-          .from("contributions")
-          .upsert(rows, { onConflict: "wallet_id,tx_hash", ignoreDuplicates: true });
-        if (error) throw new Error(`insert failed: ${error.message}`);
-        inserted += rows.length;
-      }
+  for (let i = 0; i < retries; i++) {
+    await sleep(400 * (i + 1));
+    const { result, used } = await evmRpc<T>(method, params, pool, apiKey, { retries: 0, timeoutMs, debugLog });
+    return { result, used };
+  }
 
-      await setLastScanned(client, toBlock);
-      cursor = toBlock + 1;
+  throw lastErr || new Error("All RPC attempts failed");
+}
 
-      if (!maxBlocks) break; // one batch per run if maxBlocks not specified
+// Hex helpers
+const hexToNum = (h: string) => parseInt(h.startsWith("0x") ? h.slice(2) : h, 16);
+const toBN = (h?: string | null) => BigInt((h || "0x0").startsWith("0x") ? (h || "0x0") : `0x${h}`);
+const weiToAmount = (wei: bigint) => Number(wei) / 10 ** DECIMALS;
+
+// ---------- Main handler ----------
+export async function POST(req: Request) {
+  const dbg: string[] = [];
+  try {
+    // Auth
+    const expected = need("CRON_SECRET");
+    if ((req.headers.get("x-cron-secret") || "") !== expected) {
+      return err("Unauthorized", 401);
     }
 
-    const resp: any = {
+    const sb = supa();
+
+    // Load wallets and filter to POL via canonChain
+    const { data: wallets, error: wErr } = await sb
+      .from("wallets")
+      .select("id,address,chain,is_active")
+      .eq("is_active", true);
+    if (wErr) throw wErr;
+
+    const funding = (wallets || [])
+      .filter(w => canonChain(String(w.chain)) === "POL")
+      .map(w => ({ id: String(w.id), addr: String((w as any).address || "").toLowerCase() }))
+      .filter(w => !!w.addr);
+
+    if (!funding.length) {
+      return ok({ note: "No active POL wallets", inserted: 0, scanned: 0 });
+    }
+
+    const addrMap = new Map<string, string>();
+    for (const w of funding) addrMap.set(w.addr, w.id);
+
+    // RPC pool
+    const pool = parsePool(process.env.POL_RPC_POOL, process.env.POL_RPC_URL || "https://matic.nownodes.io");
+    const apiKey = process.env.NOWNODES_API_KEY || null;
+
+    // Parse query
+    const url = new URL(req.url);
+    const qp = url.searchParams;
+    const forceTx = qp.get("tx") || "";
+    const sinceBlock = Number(qp.get("sinceBlock") || "0");
+    const sinceHours = Number(qp.get("sinceHours") || "0");
+    const overlap = Number(qp.get("overlap") || String(DEFAULT_OVERLAP));
+    const maxBlocks = Number(qp.get("maxBlocks") || String(DEFAULT_MAX_BLOCKS));
+    const minConf = Math.max(0, Number(qp.get("minConf") || String(DEFAULT_MIN_CONF)));
+    const richDebug = qp.get("debug") === "1";
+
+    // Tip and safe head
+    const tipRes = await evmRpc<string>("eth_blockNumber", [], pool, apiKey, { debugLog: dbg });
+    const tip = hexToNum(tipRes.result);
+    const safeTip = Math.max(0, tip - minConf);
+
+    // Force single tx mode
+    if (forceTx) {
+      const txRes = await evmRpc<any>("eth_getTransactionByHash", [forceTx], pool, apiKey, { debugLog: dbg });
+      const tx = txRes.result;
+      if (!tx || !tx.hash) return err("Transaction not found", 404, { tx: forceTx });
+
+      const to = String(tx.to || "").toLowerCase();
+      const wallet_id = addrMap.get(to);
+      if (!wallet_id) {
+        return ok({
+          note: "Tx not to a funding address",
+          tx: forceTx,
+          to,
+          funding: funding.map(f => f.addr).slice(0, 10),
+        });
+      }
+
+      // Block time
+      const blockNum = hexToNum(String(tx.blockNumber || "0x0"));
+      const blkRes = await evmRpc<any>("eth_getBlockByNumber", [tx.blockNumber, false], pool, apiKey, { debugLog: dbg });
+      const ts = hexToNum(String(blkRes.result?.timestamp || "0x0"));
+      const whenISO = new Date(ts * 1000).toISOString();
+
+      // Insert (NO amount_usd)
+      const amount = weiToAmount(toBN(tx.value));
+      const { error: iErr } = await sb
+        .from("contributions")
+        .upsert([{ wallet_id, tx_hash: tx.hash, amount, block_time: whenISO }], { onConflict: "tx_hash" });
+      if (iErr) throw iErr;
+
+      // Cursor forward
+      await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: blockNum } }, { onConflict: "key" });
+
+      const resBody: Json = {
+        chain: "pol",
+        mode: "forceTx",
+        tip,
+        safeTip,
+        tx: tx.hash,
+        to,
+        inserted: 1,
+        rpcTipFrom: tipRes.used,
+        rpcHeadersUsed: tipRes.used?.headerTip,
+      };
+      if (richDebug) resBody.debugLog = dbg;
+      return ok(resBody);
+    }
+
+    // Determine range
+    const { data: st } = await sb.from("settings").select("value").eq("key", CURSOR_KEY).maybeSingle();
+    const prev = Number(st?.value?.n ?? 0);
+
+    let from: number;
+    let reason = "";
+
+    if (sinceBlock > 0) {
+      from = sinceBlock;
+      reason = "sinceBlock";
+    } else if (sinceHours > 0) {
+      const approxBlocks = Math.floor((sinceHours * 3600) / AVG_BLOCKSEC);
+      from = Math.max(0, safeTip - approxBlocks);
+      reason = "sinceHours";
+    } else if (prev > 0) {
+      from = Math.max(0, prev - overlap + 1);
+      reason = "marker/overlap";
+    } else {
+      from = Math.max(0, safeTip - Math.min(DEFAULT_BATCH_FALLBACK, maxBlocks) + 1);
+      reason = "fallback";
+    }
+
+    let to = Math.min(safeTip, from + Math.max(1, maxBlocks) - 1);
+    if (to < from) {
+      const body: Json = { tip, safeTip, from, to, scanned: 0, inserted: 0, note: "Nothing to scan (waiting for confirmations)" };
+      if (richDebug) {
+        body.rpcTipFrom = tipRes.used;
+        body.debugLog = dbg;
+        body.funding = funding.map(f => f.addr);
+      }
+      return ok(body);
+    }
+
+    // Scan
+    let scanned = 0;
+    const rows: Array<{ wallet_id: string; tx_hash: string; amount: number; block_time: string }> = [];
+
+    for (let h = from; h <= to; h++) {
+      const blockHex = `0x${h.toString(16)}`;
+      const { result: block } = await evmRpc<any>("eth_getBlockByNumber", [blockHex, true], pool, apiKey, { debugLog: dbg });
+      scanned++;
+
+      const ts = hexToNum(String(block?.timestamp || "0x0"));
+      const whenISO = new Date(ts * 1000).toISOString();
+      const txs: any[] = Array.isArray(block?.transactions) ? block.transactions : [];
+
+      for (const tx of txs) {
+        const to = String(tx?.to || "").toLowerCase();
+        const wallet_id = to ? addrMap.get(to) : undefined;
+        if (!wallet_id) continue;
+
+        const val = toBN(tx.value);
+        if (val <= 0n) continue;
+
+        // Status via receipt
+        const { result: rcpt } = await evmRpc<any>("eth_getTransactionReceipt", [tx.hash], pool, apiKey, { debugLog: dbg });
+        const statusOk = String(rcpt?.status || "0x1") !== "0x0";
+        if (!statusOk) continue;
+
+        rows.push({
+          wallet_id,
+          tx_hash: tx.hash,
+          amount: weiToAmount(val),
+          block_time: whenISO,
+        });
+      }
+    }
+
+    // Upsert all matches (idempotent on tx_hash)
+    let inserted = 0;
+    if (rows.length) {
+      const { data: upserted, error: iErr } = await sb
+        .from("contributions")
+        .upsert(rows, { onConflict: "tx_hash" })
+        .select("tx_hash");
+
+      if (iErr) throw iErr;
+      inserted = upserted?.length || 0;
+    }
+
+    // Move cursor forward
+    await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: to } }, { onConflict: "key" });
+
+    const res: Json = {
       ok: true,
+      chain: "pol",
+      reason,
       tip,
-      from: fromBlock,
-      to: Math.min(limitTo, fromBlock + BATCH_BLOCKS - 1),
-      scanned: scannedBlocks,
+      safeTip,
+      from,
+      to,
+      scanned,
+      matched: rows.length,
       inserted,
-      lastSeen,
-      reason: sinceBlockParam ? "sinceBlock" : sinceHours ? "sinceHours" : "marker",
+      rpcTipFrom: tipRes.used,
+      funding: richDebug ? funding.map(f => f.addr) : undefined,
+      rpcHeadersUsed: richDebug ? tipRes.used?.headerTip : undefined,
     };
-    if (debug) resp.funding = wallets.map(w => w.address.toLowerCase());
-    return NextResponse.json(resp);
+    if (richDebug) res.debugLog = dbg;
+    return NextResponse.json(res);
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+    const msg = String(e?.message || e);
+    const body: Json = { ok: false, error: msg };
+    return NextResponse.json(body, { status: 500 });
   }
 }
 
