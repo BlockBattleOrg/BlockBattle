@@ -2,192 +2,386 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = "force-dynamic";
+// Keep Node.js runtime for fetch/AbortController and non-edge compat
 export const runtime = "nodejs";
-export const revalidate = 0;
 
-const RPC = (process.env.OP_RPC_URL || "").trim();
-const KEY = (process.env.NOWNODES_API_KEY || "").trim();
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const CRON_SECRET = (process.env.CRON_SECRET || "").trim();
+/**
+ * OP (Optimism) native contributions ingest (EVM).
+ * - Scans blocks and picks txs where `to` equals one of our funding addresses.
+ * - Writes into `public.contributions` (wallet_id, tx_hash, amount, block_time).
+ * - Cursor (last scanned block) is stored in `public.settings` under `op_contrib_last_scanned`.
+ *
+ * ENV required:
+ *  - CRON_SECRET
+ *  - NEXT_PUBLIC_SUPABASE_URL
+ *  - SUPABASE_SERVICE_ROLE_KEY
+ *
+ * Preferred ENV for RPC (NowNodes or compatible):
+ *  - OP_RPC_POOL   (optional, comma/newline-separated list of base URLs)
+ *  - OP_RPC_URL    (fallback single base, e.g. https://optimism.nownodes.io)
+ *  - NOWNODES_API_KEY (optional; multiple header/query variants attempted)
+ *
+ * Query params:
+ *  - tx=<hash>                    // force single tx ingest path
+ *  - sinceBlock=<height>          // start from height
+ *  - sinceHours=<n>               // approximate backoff by time
+ *  - overlap=<n=100>              // re-scan this many blocks before cursor
+ *  - maxBlocks=<n=2000>           // hard limit per run
+ *  - minConf=<n=6>                // confirmations before including a block
+ *  - debug=1                      // include rich debug info
+ *
+ * IMPORTANT:
+ *  - We DO NOT write amount_usd here. Pricing is handled elsewhere.
+ */
 
-type Hex = string;
+// ---------- Tunables & helpers ----------
+const DECIMALS = 18; // OP uses ETH units for native value accounting
+const AVG_BLOCKSEC = 2; // for backoff approximation only
+const DEFAULT_MAX_BLOCKS = 2000;
+const DEFAULT_MIN_CONF = 6;
+const DEFAULT_OVERLAP = 100;
+const DEFAULT_BATCH_FALLBACK = 500; // small conservative window on first run
 
-type EvmTx = {
-  hash: string;
-  to: string | null;
-  value: Hex;
-};
+const CURSOR_KEY = "op_contrib_last_scanned";
 
-type EvmBlock = {
-  number: Hex;
-  timestamp: Hex;
-  transactions: EvmTx[];
-};
+type Json = Record<string, any>;
+const ok = (b: Json = {}) => NextResponse.json({ ok: true, ...b });
+const err = (m: string, status = 500, extra?: Json) =>
+  NextResponse.json({ ok: false, error: m, ...(extra || {}) }, { status });
 
-function toDec(hex?: string | null) {
-  if (!hex) return 0;
-  const s = hex.startsWith("0x") ? hex.slice(2) : hex;
-  return s ? parseInt(s, 16) : 0;
+function need(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing ${name}`);
+  return v;
 }
 
-async function rpc<T>(method: string, params: any[]): Promise<T> {
-  if (!RPC) throw new Error("Missing OP_RPC_URL");
-  if (!KEY) throw new Error("Missing NOWNODES_API_KEY");
+function supa() {
+  const url = need("NEXT_PUBLIC_SUPABASE_URL");
+  const key = need("SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key, { auth: { persistSession: false } });
+}
 
-  const res = await fetch(RPC, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "api-key": KEY,
-    },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
+// Canonical chain ticker normalizer; shared logic across EVM routes.
+function canonChain(x: string | null | undefined): string {
+  const v = (x || "").toLowerCase();
+  if (v.includes("eth") || v.includes("ethereum")) return "ETH";
+  if (v.includes("bsc") || v.includes("bnb")) return "BNB";
+  if (v.includes("matic") || v.includes("polygon") || v === "pol") return "POL";
+  if (v.startsWith("arb")) return "ARB";
+  if (v === "op" || v.includes("optimism")) return "OP";
+  if (v.includes("avax") || v.includes("avalanche")) return "AVAX";
+  return v.toUpperCase();
+}
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`EVM RPC HTTP ${res.status} ${res.statusText}${txt ? `: ${txt}` : ""}`);
+// ---------- RPC pool & NowNodes auth fallbacks ----------
+function parsePool(envPool?: string, envSingle?: string) {
+  const list: string[] = [];
+  const push = (s?: string) => {
+    if (!s) return;
+    const t = s.trim().replace(/\/+$/, "");
+    if (t) list.push(t);
+  };
+
+  if (envPool) for (const part of envPool.split(/[\n,]+/)) push(part);
+  push(envSingle);
+
+  // Minimal last-resort (only if provided in env)
+  if (process.env.OP_PUBLIC_RPC_URL) push(process.env.OP_PUBLIC_RPC_URL);
+
+  return Array.from(new Set(list));
+}
+
+type RpcAttempt = {
+  url: string;
+  headers: Record<string, string>;
+  queryAppend?: string;
+  headerTip: string;
+};
+
+function buildRpcAttempts(base: string, apiKey?: string | null): RpcAttempt[] {
+  const attempts: RpcAttempt[] = [];
+  const clean = base.replace(/\/+$/, "");
+  const baseHeaders: Record<string, string> = { "Content-Type": "application/json" };
+
+  if (apiKey && apiKey.trim()) {
+    const k = apiKey.trim();
+    attempts.push({ url: clean, headers: { ...baseHeaders, "api-key": k }, headerTip: "api-key" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, "x-api-key": k }, headerTip: "x-api-key" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, "X-API-KEY": k }, headerTip: "X-API-KEY" });
+    attempts.push({ url: clean, headers: { ...baseHeaders, Authorization: `Bearer ${k}` }, headerTip: "Bearer" });
+
+    // Query variants (if server accepts)
+    attempts.push({ url: `${clean}?apikey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apikey", queryAppend: "apikey" });
+    attempts.push({ url: `${clean}?api_key=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:api_key", queryAppend: "api_key" });
+    attempts.push({ url: `${clean}?apiKey=${encodeURIComponent(k)}`, headers: baseHeaders, headerTip: "query:apiKey", queryAppend: "apiKey" });
+  } else {
+    attempts.push({ url: clean, headers: baseHeaders, headerTip: "no-key" });
   }
-  const json = (await res.json()) as any;
-  if (json.error) throw new Error(String(json.error?.message || "RPC error"));
-  return json.result as T;
+  return attempts;
 }
 
-// tolerant symbol/chain resolver (OP / OPTIMISM)
-function isOP(symbol?: string | null, chain?: string | null) {
-  const s = String(symbol || "").trim().toUpperCase();
-  const c = String(chain || "").trim().toUpperCase();
-  return s === "OP" || c === "OP" || c === "OPTIMISM";
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function evmRpc<T = any>(
+  method: string,
+  params: any[],
+  pool: string[],
+  apiKey?: string | null,
+  opts?: { retries?: number; timeoutMs?: number; signal?: AbortSignal; debugLog?: string[] }
+): Promise<{ result: T; used: { url: string; headerTip: string } }> {
+  const retries = opts?.retries ?? 2;
+  const timeoutMs = opts?.timeoutMs ?? 20_000;
+  const debugLog = opts?.debugLog;
+
+  let lastErr: any = null;
+
+  for (const base of pool) {
+    const variants = buildRpcAttempts(base, apiKey);
+    for (const att of variants) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(att.url, {
+          method: "POST",
+          headers: att.headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+          signal: controller.signal,
+        });
+        const j = await res.json().catch(() => ({}));
+        clearTimeout(timer);
+        if (res.ok && !j?.error) {
+          if (debugLog) debugLog.push(`RPC OK via ${att.url} [${att.headerTip}]`);
+          return { result: j.result as T, used: { url: att.url, headerTip: att.headerTip } };
+        }
+        lastErr = new Error(`RPC ${res.status} ${JSON.stringify(j?.error || {})} @ ${att.url} [${att.headerTip}]`);
+        if (debugLog) debugLog.push(String(lastErr));
+      } catch (e: any) {
+        clearTimeout(timer);
+        lastErr = e;
+        if (debugLog) debugLog.push(`RPC error: ${(e?.message || e)} @ ${att.url} [${att.headerTip}]`);
+      }
+      await sleep(200);
+    }
+  }
+
+  // One more pass with light retry if configured
+  for (let i = 0; i < retries; i++) {
+    await sleep(400 * (i + 1));
+    const { result, used } = await evmRpc<T>(method, params, pool, apiKey, { retries: 0, timeoutMs, debugLog });
+    return { result, used };
+  }
+
+  throw lastErr || new Error("All RPC attempts failed");
 }
 
-// helpers for Supabase relation that may be object OR array
-function relFirst<T = any>(maybe: any): T | undefined {
-  if (!maybe) return undefined;
-  return Array.isArray(maybe) ? maybe[0] : maybe;
-}
+// Hex helpers
+const hexToNum = (h: string) => parseInt(h.startsWith("0x") ? h.slice(2) : h, 16);
+const toBN = (h?: string | null) => BigInt((h || "0x0").startsWith("0x") ? (h || "0x0") : `0x${h}`);
+const weiToAmount = (wei: bigint) => Number(wei) / 10 ** DECIMALS;
 
+// ---------- Main handler ----------
 export async function POST(req: Request) {
+  const dbg: string[] = [];
   try {
-    // auth
-    if (!CRON_SECRET) {
-      return NextResponse.json({ ok: false, error: "Missing CRON_SECRET env" }, { status: 500 });
-    }
-    const hdr = req.headers.get("x-cron-secret") || "";
-    if (hdr !== CRON_SECRET) {
-      return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+    // Auth
+    const expected = need("CRON_SECRET");
+    if ((req.headers.get("x-cron-secret") || "") !== expected) {
+      return err("Unauthorized", 401);
     }
 
-    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-      return NextResponse.json({ ok: false, error: "Missing Supabase env" }, { status: 500 });
-    }
-    const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+    const sb = supa();
 
-    // load active wallets; use explicit FK alias for clarity
-    const { data: walletsAll, error: wErr } = await sb
+    // Load wallets and filter to OP via canonChain
+    const { data: wallets, error: wErr } = await sb
       .from("wallets")
-      .select(
-        `
-        id, address, chain, is_active, currency_id,
-        currencies:currency_id ( symbol, decimals )
-      `
-      )
+      .select("id,address,chain,is_active")
       .eq("is_active", true);
-
     if (wErr) throw wErr;
 
-    const wallets = (walletsAll || []).filter((w: any) => {
-      const cur = relFirst(w?.currencies);
-      return w?.address && isOP(cur?.symbol, w?.chain);
-    });
+    const funding = (wallets || [])
+      .filter(w => canonChain(String(w.chain)) === "OP")
+      .map(w => ({ id: String(w.id), addr: String((w as any).address || "").toLowerCase() }))
+      .filter(w => !!w.addr);
 
-    if (wallets.length === 0) {
-      return NextResponse.json({ ok: true, info: "No OP wallets active; nothing to ingest.", inserted: 0 });
+    if (!funding.length) {
+      return ok({ note: "No active OP wallets", inserted: 0, scanned: 0 });
     }
 
-    // map address -> wallet_id/decimals (decimals default 18 for OP)
-    const map = new Map<string, { wallet_id: string; decimals: number }>();
-    for (const w of wallets) {
-      const addr = String((w as any).address).toLowerCase();
-      const cur = relFirst((w as any).currencies);
-      const decimals = Number(cur?.decimals ?? 18) || 18;
-      if (addr) map.set(addr, { wallet_id: (w as any).id, decimals });
+    const addrMap = new Map<string, string>();
+    for (const w of funding) addrMap.set(w.addr, w.id);
+
+    // RPC pool
+    const pool = parsePool(process.env.OP_RPC_POOL, process.env.OP_RPC_URL || "https://optimism.nownodes.io");
+    const apiKey = process.env.NOWNODES_API_KEY || null;
+
+    // Parse query
+    const url = new URL(req.url);
+    const qp = url.searchParams;
+    const forceTx = qp.get("tx") || "";
+    const sinceBlock = Number(qp.get("sinceBlock") || "0");
+    const sinceHours = Number(qp.get("sinceHours") || "0");
+    const overlap = Number(qp.get("overlap") || String(DEFAULT_OVERLAP));
+    const maxBlocks = Number(qp.get("maxBlocks") || String(DEFAULT_MAX_BLOCKS));
+    const minConf = Math.max(0, Number(qp.get("minConf") || String(DEFAULT_MIN_CONF)));
+    const richDebug = qp.get("debug") === "1";
+
+    // Tip and safe head
+    const tipRes = await evmRpc<string>("eth_blockNumber", [], pool, apiKey, { debugLog: dbg });
+    const tip = hexToNum(tipRes.result);
+    const safeTip = Math.max(0, tip - minConf);
+
+    // Force single tx mode
+    if (forceTx) {
+      const txRes = await evmRpc<any>("eth_getTransactionByHash", [forceTx], pool, apiKey, { debugLog: dbg });
+      const tx = txRes.result;
+      if (!tx || !tx.hash) return err("Transaction not found", 404, { tx: forceTx });
+
+      const to = String(tx.to || "").toLowerCase();
+      const wallet_id = addrMap.get(to);
+      if (!wallet_id) {
+        return ok({
+          note: "Tx not to a funding address",
+          tx: forceTx,
+          to,
+          funding: funding.map(f => f.addr).slice(0, 10),
+        });
+      }
+
+      // Block time
+      const blockNum = hexToNum(String(tx.blockNumber || "0x0"));
+      const blkRes = await evmRpc<any>("eth_getBlockByNumber", [tx.blockNumber, false], pool, apiKey, { debugLog: dbg });
+      const ts = hexToNum(String(blkRes.result?.timestamp || "0x0"));
+      const whenISO = new Date(ts * 1000).toISOString();
+
+      // Insert (NO amount_usd)
+      const amount = weiToAmount(toBN(tx.value));
+      const { error: iErr } = await sb
+        .from("contributions")
+        .upsert([{ wallet_id, tx_hash: tx.hash, amount, block_time: whenISO }], { onConflict: "tx_hash" });
+      if (iErr) throw iErr;
+
+      // Cursor forward
+      await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: blockNum } }, { onConflict: "key" });
+
+      const resBody: Json = {
+        chain: "op",
+        mode: "forceTx",
+        tip,
+        safeTip,
+        tx: tx.hash,
+        to,
+        inserted: 1,
+        rpcTipFrom: tipRes.used,
+        rpcHeadersUsed: tipRes.used?.headerTip,
+      };
+      if (richDebug) resBody.debugLog = dbg;
+      return ok(resBody);
     }
 
-    // latest block
-    const latestHex = await rpc<Hex>("eth_blockNumber", []);
-    const latest = toDec(latestHex);
+    // Determine range
+    const { data: st } = await sb.from("settings").select("value").eq("key", CURSOR_KEY).maybeSingle();
+    const prev = Number(st?.value?.n ?? 0);
 
-    // scan window (settings marker)
-    const key = "op_contrib_last_scanned";
-    const { data: sRow } = await sb.from("settings").select("value").eq("key", key).maybeSingle();
-    const last = Number(sRow?.value?.n ?? NaN);
-    const SPAN = 250;
+    let from: number;
+    let reason = "";
 
-    const startBase = Number.isFinite(last) ? last : Math.max(0, latest - SPAN);
-    const from = Math.max(0, startBase + 1);
-    const to = Math.min(latest, from + SPAN - 1);
-    const scanned = to >= from ? to - from + 1 : 0;
+    if (sinceBlock > 0) {
+      from = sinceBlock;
+      reason = "sinceBlock";
+    } else if (sinceHours > 0) {
+      const approxBlocks = Math.floor((sinceHours * 3600) / AVG_BLOCKSEC);
+      from = Math.max(0, safeTip - approxBlocks);
+      reason = "sinceHours";
+    } else if (prev > 0) {
+      from = Math.max(0, prev - overlap + 1);
+      reason = "marker/overlap";
+    } else {
+      from = Math.max(0, safeTip - Math.min(DEFAULT_BATCH_FALLBACK, maxBlocks) + 1);
+      reason = "fallback";
+    }
 
-    let matches: Array<{ wallet_id: string; hash: string; tsMs: number; amount: number }> = [];
+    let to = Math.min(safeTip, from + Math.max(1, maxBlocks) - 1);
+    if (to < from) {
+      const body: Json = { tip, safeTip, from, to, scanned: 0, inserted: 0, note: "Nothing to scan (waiting for confirmations)" };
+      if (richDebug) {
+        body.rpcTipFrom = tipRes.used;
+        body.debugLog = dbg;
+        body.funding = funding.map(f => f.addr);
+      }
+      return ok(body);
+    }
 
-    for (let n = from; n <= to; n++) {
-      const bHex = "0x" + n.toString(16);
-      const block = await rpc<EvmBlock>("eth_getBlockByNumber", [bHex, true]);
-      if (!block) continue;
-      const tsMs = toDec(block.timestamp) * 1000;
+    // Scan
+    let scanned = 0;
+    const rows: Array<{ wallet_id: string; tx_hash: string; amount: number; block_time: string }> = [];
 
-      for (const tx of block.transactions || []) {
-        const toAddr = (tx.to || "").toLowerCase();
-        if (!toAddr) continue;
-        const info = map.get(toAddr);
-        if (!info) continue;
+    for (let h = from; h <= to; h++) {
+      const blockHex = `0x${h.toString(16)}`;
+      const { result: block } = await evmRpc<any>("eth_getBlockByNumber", [blockHex, true], pool, apiKey, { debugLog: dbg });
+      scanned++;
 
-        const raw = toDec(tx.value);
-        if (!raw) continue;
+      const ts = hexToNum(String(block?.timestamp || "0x0"));
+      const whenISO = new Date(ts * 1000).toISOString();
+      const txs: any[] = Array.isArray(block?.transactions) ? block.transactions : [];
 
-        const amount = raw / Math.pow(10, info.decimals);
-        matches.push({ wallet_id: info.wallet_id, hash: tx.hash, tsMs, amount });
+      for (const tx of txs) {
+        const to = String(tx?.to || "").toLowerCase();
+        const wallet_id = to ? addrMap.get(to) : undefined;
+        if (!wallet_id) continue;
+
+        const val = toBN(tx.value);
+        if (val <= 0n) continue;
+
+        // Status via receipt
+        const { result: rcpt } = await evmRpc<any>("eth_getTransactionReceipt", [tx.hash], pool, apiKey, { debugLog: dbg });
+        const statusOk = String(rcpt?.status || "0x1") !== "0x0";
+        if (!statusOk) continue;
+
+        rows.push({
+          wallet_id,
+          tx_hash: tx.hash,
+          amount: weiToAmount(val),
+          block_time: whenISO,
+        });
       }
     }
 
-    // de-dup by hash
-    const hashes = Array.from(new Set(matches.map((m) => m.hash)));
-    let existing = new Set<string>();
-    if (hashes.length) {
-      const { data: ex } = await sb.from("contributions").select("tx_hash").in("tx_hash", hashes);
-      existing = new Set((ex || []).map((r: any) => String(r.tx_hash)));
-    }
-
-    const rows = matches
-      .filter((m) => !existing.has(m.hash))
-      .map((m) => ({
-        wallet_id: m.wallet_id,
-        tx_hash: m.hash,
-        amount: m.amount,
-        block_time: new Date(m.tsMs).toISOString(),
-      }));
-
+    // Upsert all matches (idempotent on tx_hash)
+    let inserted = 0;
     if (rows.length) {
-      const { error: insErr } = await sb.from("contributions").insert(rows);
-      if (insErr) throw insErr;
+      const { data: upserted, error: iErr } = await sb
+        .from("contributions")
+        .upsert(rows, { onConflict: "tx_hash" })
+        .select("tx_hash");
+
+      if (iErr) throw iErr;
+      inserted = upserted?.length || 0;
     }
 
-    // advance marker
-    await sb.from("settings").upsert({ key, value: { n: to } }, { onConflict: "key" });
+    // Move cursor forward
+    await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: to } }, { onConflict: "key" });
 
-    return NextResponse.json({
+    const res: Json = {
       ok: true,
-      chain: "OP",
-      latest,
+      chain: "op",
+      reason,
+      tip,
+      safeTip,
       from,
       to,
       scanned,
-      found: matches.length,
-      inserted: rows.length,
-    });
+      matched: rows.length,
+      inserted,
+      rpcTipFrom: tipRes.used,
+      funding: richDebug ? funding.map(f => f.addr) : undefined,
+      rpcHeadersUsed: richDebug ? tipRes.used?.headerTip : undefined,
+    };
+    if (richDebug) res.debugLog = dbg;
+    return NextResponse.json(res);
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || "OP contrib ingest failed" }, { status: 500 });
+    const msg = String(e?.message || e);
+    const body: Json = { ok: false, error: msg };
+    return NextResponse.json(body, { status: 500 });
   }
 }
 
