@@ -88,7 +88,6 @@ function parsePool(envPool?: string, envSingle?: string) {
   push(envSingle);
 
   // Minimal last-resort fallback to NowNodes public host (only if defined by user in env)
-  // We deliberately do NOT invent new providers.
   if (process.env.ETH_PUBLIC_RPC_URL) push(process.env.ETH_PUBLIC_RPC_URL);
 
   // Ensure uniqueness
@@ -364,12 +363,13 @@ export async function POST(req: Request) {
     // Upsert all matches (idempotent on tx_hash)
     let inserted = 0;
     if (rows.length) {
-      const { error: iErr, count } = await sb
+      const { data: upserted, error: iErr } = await sb
         .from("contributions")
-        .upsert(rows, { onConflict: "tx_hash" })
-        .select("*", { count: "exact", head: true });
+        .upsert(rows, { onConflict: "tx_hash", returning: "representation" })
+        .select("tx_hash"); // select only needed column; options arg removed (TypeScript fix)
+
       if (iErr) throw iErr;
-      inserted = count || 0;
+      inserted = upserted?.length || 0;
     }
 
     // Move cursor forward
