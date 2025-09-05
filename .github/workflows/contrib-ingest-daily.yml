@@ -1,10 +1,8 @@
-name: Contrib Ingest (daily, tiny windows)
+name: "Contrib Ingest (daily, tiny windows)"
 
 on:
-  # Run once per day at 02:15 UTC (adjust as needed)
   schedule:
-    - cron: '15 2 * * *'
-  # Allow manual trigger
+    - cron: "15 2 * * *"   # once per day at 02:15 UTC
   workflow_dispatch: {}
 
 concurrency:
@@ -21,11 +19,11 @@ jobs:
   daily:
     runs-on: ubuntu-latest
     steps:
-      - name: Check required secrets
+      - name: "Check required secrets"
         run: |
           test -n "${{ secrets.CRON_SECRET }}" || { echo "CRON_SECRET missing in repo secrets"; exit 1; }
 
-      - name: Run tiny-window ingests (EVM-like: ARB, AVAX, ETH, OP, POL, BSC)
+      - name: "Run tiny-window ingests (EVM-like: ARB, AVAX, ETH, OP, POL, BSC)"
         shell: bash
         run: |
           set -euo pipefail
@@ -47,7 +45,7 @@ jobs:
             sleep 0.2
           done
 
-      - name: Run tiny-window ingests (UTXO: BTC, LTC, DOGE)
+      - name: "Run tiny-window ingests (UTXO: BTC, LTC, DOGE)"
         shell: bash
         run: |
           set -euo pipefail
@@ -64,7 +62,7 @@ jobs:
             sleep 0.2
           done
 
-      - name: Run tiny-window ingests (Ripple/Stellar: XRP, XLM)
+      - name: "Run tiny-window ingests (Ripple/Stellar: XRP, XLM)"
         shell: bash
         run: |
           set -euo pipefail
@@ -80,7 +78,7 @@ jobs:
             sleep 0.2
           done
 
-      - name: Run tiny-window ingests (Solana/Tron/Substrate/Cosmos: SOL, TRX, DOT, ATOM)
+      - name: "Run tiny-window ingests (Solana/Tron/Substrate/Cosmos: SOL, TRX, DOT, ATOM)"
         shell: bash
         run: |
           set -euo pipefail
@@ -99,4 +97,3 @@ jobs:
             echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a")"'
             sleep 0.2
           done
-
