@@ -2,45 +2,24 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// Node runtime (fetch/AbortController)
 export const runtime = "nodejs";
 
 /**
  * ATOM (Cosmos Hub) native contributions ingest.
- * - Čita transakcije po blokovima iz LCD (gRPC-gateway) i traži MsgSend (uatom) prema našim funding adresama.
+ * - Skenira blokove preko LCD (gRPC-gateway) i traži MsgSend (uatom) prema našim funding adresama.
  * - Piše u `public.contributions` (wallet_id, tx_hash, amount, block_time).
- * - Marker (zadnji skenirani blok) čuvamo u `public.settings` pod ključem `atom_contrib_last_scanned`.
+ * - Marker je u `public.settings` kao `atom_contrib_last_scanned`.
  *
- * ENV:
- *  - CRON_SECRET
- *  - NEXT_PUBLIC_SUPABASE_URL
- *  - SUPABASE_SERVICE_ROLE_KEY
- *
- * LCD pool (NowNodes ili javni REST endpoints):
- *  - ATOM_LCD_POOL   (opcionalno; lista baza, comma/newline-separated, npr. https://cosmoshub-lcd.stakewolle.com)
- *  - ATOM_LCD_URL    (fallback single base)
- *  - NOWNODES_API_KEY (opcionalno; probavamo više header/query varijanti)
- *
- * Query:
- *  - tx=<hash>                      // forsiraj single tx ingest
- *  - sinceBlock=<n>                 // početni blok (visina)
- *  - sinceHours=<n>                 // vremenski backoff (~6s/block)
- *  - overlap=<n=300>                // re-scan toliki broj blokova iza markera
- *  - maxBlocks=<n=1800>             // limit blokova po runu
- *  - minConf=<n=3>                  // sigurnosni razmak iza tipa
- *  - debug=1                        // uključi detaljan debug
- *
- * Napomena:
- *  - amount_usd se ne računa ovdje.
+ * Napomena: amount_usd ovdje se NE računa.
  */
 
-// ---------- Tunables ----------
-const DECIMALS = 6;                // 1 ATOM = 1e6 uatom
-const AVG_BLOCKSEC = 6;            // gruba aproksimacija
-const DEFAULT_MAX_BLOCKS = 1800;   // ~3h skeniranja max
+// -------- Tunables --------
+const DECIMALS = 6;                 // 1 ATOM = 1e6 uatom
+const AVG_BLOCKSEC = 6;
+const DEFAULT_MAX_BLOCKS = 90;      // mali default za brzi smoke
 const DEFAULT_MIN_CONF = 3;
-const DEFAULT_OVERLAP = 300;
-const DEFAULT_BATCH_FALLBACK = 1200;
+const DEFAULT_OVERLAP = 120;
+const DEFAULT_BATCH_FALLBACK = 240; // ~24 min
 
 const CURSOR_KEY = "atom_contrib_last_scanned";
 
@@ -61,13 +40,12 @@ function supa() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-// Canonical chain normalizer
 function canonChain(x: string | null | undefined): string {
   const v = (x || "").toLowerCase();
   if (v.includes("atom") || v.includes("cosmos")) return "ATOM";
   if (v.includes("dot") || v.includes("polkadot")) return "DOT";
-  if (v.includes("btc") || v.includes("bitcoin")) return "BTC";
-  if (v.includes("ltc") || v.includes("litecoin")) return "LTC";
+  if (v.includes("btc")) return "BTC";
+  if (v.includes("ltc")) return "LTC";
   if (v.includes("doge")) return "DOGE";
   if (v.includes("xrp") || v.includes("ripple")) return "XRP";
   if (v.includes("xlm") || v.includes("stellar")) return "XLM";
@@ -78,7 +56,7 @@ function canonChain(x: string | null | undefined): string {
   return v.toUpperCase();
 }
 
-// ---------- LCD pool & auth fallbacks ----------
+// -------- LCD pool & NowNodes fallback --------
 function parsePool(envPool?: string, envSingle?: string) {
   const list: string[] = [];
   const push = (s?: string) => {
@@ -86,11 +64,20 @@ function parsePool(envPool?: string, envSingle?: string) {
     const t = s.trim().replace(/\/+$/, "");
     if (t) list.push(t);
   };
+
+  // 1) projektni env
   if (envPool) for (const part of envPool.split(/[\n,]+/)) push(part);
   push(envSingle);
   if (process.env.ATOM_PUBLIC_LCD_URL) push(process.env.ATOM_PUBLIC_LCD_URL);
-  // par korisnih defaultova ako želiš (možeš ih staviti u ATOM_LCD_POOL u env-u):
-  // https://lcd-cosmoshub.keplr.app , https://cosmoshub-lcd.stakewolle.com , https://lcd-cosmoshub.blockapsis.com
+
+  // 2) ugrađeni javni fallbackovi (redom proći dok neki ne radi)
+  // Ako preferiraš čisto ENV, slobodno izbriši ove tri linije.
+  push("https://lcd-cosmoshub.keplr.app");
+  push("https://cosmoshub-lcd.stakewolle.com");
+  push("https://lcd-cosmoshub.blockapsis.com");
+  push("https://cosmos-lcd.publicnode.com");
+
+  // dedupe
   return Array.from(new Set(list));
 }
 
@@ -98,7 +85,10 @@ type HttpAttempt = { url: string; headers: Record<string, string>; headerTip: st
 
 function buildHttpAttempts(base: string, apiKey?: string | null): HttpAttempt[] {
   const clean = base.replace(/\/+$/, "");
-  const baseHeaders: Record<string, string> = { "Content-Type": "application/json" };
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+  };
   const attempts: HttpAttempt[] = [];
 
   if (apiKey && apiKey.trim()) {
@@ -126,7 +116,7 @@ async function lcdGet<T = any>(
   opts?: { retries?: number; timeoutMs?: number; debugLog?: string[] }
 ): Promise<{ json: T; used: { url: string; headerTip: string } }> {
   const retries = opts?.retries ?? 2;
-  const timeoutMs = opts?.timeoutMs ?? 20_000;
+  const timeoutMs = opts?.timeoutMs ?? 25_000; // malo dulje
   const debugLog = opts?.debugLog;
   let lastErr: any = null;
 
@@ -148,33 +138,32 @@ async function lcdGet<T = any>(
           if (debugLog) debugLog.push(`LCD OK ${u.pathname} via ${att.url} [${att.headerTip}]`);
           return { json: j as T, used: { url: att.url, headerTip: att.headerTip } };
         }
-        lastErr = new Error(`LCD ${res.status} @ ${u.toString()} [${att.headerTip}] => ${JSON.stringify(j).slice(0, 200)}`);
+        lastErr = new Error(`LCD ${res.status} @ ${u.toString()} [${att.headerTip}] ${JSON.stringify(j).slice(0, 180)}`);
         if (debugLog) debugLog.push(String(lastErr));
       } catch (e: any) {
         clearTimeout(timer);
         lastErr = e;
-        if (debugLog) debugLog.push(`LCD error: ${(e?.message || e)} @ ${att.url} [${att.headerTip}]`);
+        if (debugLog) debugLog.push(`LCD fetch error: ${(e?.message || e)} @ ${u.toString()} [${att.headerTip}]`);
       }
-      await sleep(200);
+      await sleep(150);
     }
   }
 
   for (let i = 0; i < retries; i++) {
-    await sleep(400 * (i + 1));
+    await sleep(300 * (i + 1));
     const { json, used } = await lcdGet<T>(path, query, pool, apiKey, { retries: 0, timeoutMs, debugLog });
     return { json, used };
   }
   throw lastErr || new Error("All LCD attempts failed");
 }
 
-// ---------- Helpers ----------
+// -------- Helpers --------
 function uatomToAtom(s: string | number): number {
   const n = typeof s === "number" ? s : Number(s || 0);
   return n / 10 ** DECIMALS;
 }
 
 function extractAtomFromAmounts(amounts: any): number {
-  // amounts: [{ denom: "uatom", amount: "12345" }, ...]
   const arr = Array.isArray(amounts) ? amounts : [];
   for (const a of arr) {
     if ((a?.denom || "").toLowerCase() === "uatom") {
@@ -185,7 +174,7 @@ function extractAtomFromAmounts(amounts: any): number {
   return 0;
 }
 
-// ---------- Main handler ----------
+// -------- Main --------
 export async function POST(req: Request) {
   const dbg: string[] = [];
   try {
@@ -213,7 +202,7 @@ export async function POST(req: Request) {
     const addrToWallet = new Map(funding.map(f => [f.addr, f.id]));
 
     // LCD pool
-    const pool = parsePool(process.env.ATOM_LCD_POOL, process.env.ATOM_LCD_URL || "https://cosmoshub-lcd.stakewolle.com");
+    const pool = parsePool(process.env.ATOM_LCD_POOL, process.env.ATOM_LCD_URL);
     const apiKey = process.env.NOWNODES_API_KEY || null;
 
     // Query
@@ -229,13 +218,13 @@ export async function POST(req: Request) {
 
     // Tip & safe head
     const latest = await lcdGet<any>("/cosmos/base/tendermint/v1beta1/blocks/latest", {}, pool, apiKey, { debugLog: dbg });
-    const tip = Number(latest.json?.block?.header?.height || latest.json?.block?.header?.height?.height || 0);
+    const tip = Number(latest.json?.block?.header?.height || 0);
     const safeTip = Math.max(0, tip - minConf);
 
     // Force single tx
     if (forceTx) {
       const txq = await lcdGet<any>(`/cosmos/tx/v1beta1/txs/${forceTx}`, {}, pool, apiKey, { debugLog: dbg });
-      const tx = txq.json?.tx;
+      const tx = txq.json?.tx ?? txq.json?.tx_response?.tx;
       const txResp = txq.json?.tx_response;
       if (!tx || !txResp) return err("Transaction not found", 404, { tx: forceTx });
 
@@ -244,7 +233,6 @@ export async function POST(req: Request) {
 
       const msgs: any[] = Array.isArray(tx?.body?.messages) ? tx.body.messages : [];
       for (const m of msgs) {
-        // @typeUrl: "/cosmos.bank.v1beta1.MsgSend"
         const t = String(m?.["@type"] || m?.typeUrl || "");
         if (!t.includes("MsgSend")) continue;
 
@@ -268,7 +256,7 @@ export async function POST(req: Request) {
       return ok(res);
     }
 
-    // Determine range
+    // Range
     const { data: st } = await sb.from("settings").select("value").eq("key", CURSOR_KEY).maybeSingle();
     const prev = Number(st?.value?.n ?? 0);
 
@@ -296,7 +284,7 @@ export async function POST(req: Request) {
       return ok(body);
     }
 
-    // Scan: za svaki blok, povuci tx-eve preko /cosmos/tx/v1beta1/txs?events=tx.height=H
+    // Scan blokove: /cosmos/tx/v1beta1/txs?events=tx.height=H&pagination.limit=...&pagination.offset=...
     let scanned = 0;
     const rows: Array<{ wallet_id: string; tx_hash: string; amount: number; block_time: string }> = [];
 
@@ -304,11 +292,10 @@ export async function POST(req: Request) {
       const txsQ = await lcdGet<any>(
         "/cosmos/tx/v1beta1/txs",
         {
-          // events supports multiple; ovdje gledamo točno taj blok
           "events": `tx.height=${h}`,
           "order_by": "ORDER_BY_UNSPECIFIED",
-          "page": 1,
-          "limit": 200,
+          "pagination.limit": 200,
+          "pagination.offset": 0,
         },
         pool,
         apiKey,
@@ -316,40 +303,35 @@ export async function POST(req: Request) {
       );
       scanned++;
 
+      const resps: any[] = Array.isArray(txsQ.json?.tx_responses) ? txsQ.json.tx_responses : [];
       const txs: any[] = Array.isArray(txsQ.json?.txs) ? txsQ.json.txs : [];
-      const txResps: any[] = Array.isArray(txsQ.json?.tx_responses) ? txsQ.json.tx_responses : [];
-      const byHashTime = new Map<string, string>();
-      for (const r of txResps) {
-        byHashTime.set(String(r?.txhash || ""), String(r?.timestamp || ""));
-      }
 
-      for (const tx of txs) {
+      for (let i = 0; i < resps.length; i++) {
+        const resp = resps[i] || {};
+        const tx = (resp?.tx as any) || txs[i] || {};
+        const whenISO = String(resp?.timestamp || new Date().toISOString());
+        const txhash = String(resp?.txhash || "");
+
         const msgs: any[] = Array.isArray(tx?.body?.messages) ? tx.body.messages : [];
-        const txhash = String((tx as any)?.hash || "");
-        // Ako LCD ne vraća hash u tx objektu, uzmi iz paralelnog niza odgovora
-        const hash = txhash || (txResps.find(r => (r?.tx?.body?.messages || []) === msgs) as any)?.txhash || "";
-
-        const whenISO = byHashTime.get(hash) || new Date().toISOString();
-
-        // agregiraj per-wallet u ovom tx-u
         const agg = new Map<string, number>();
+
         for (const m of msgs) {
           const t = String(m?.["@type"] || m?.typeUrl || "");
           if (!t.includes("MsgSend")) continue;
 
-          const to = String(m?.to_address || m?.toAddress || "");
-          if (!addrSet.has(to)) continue;
+          const toAddr = String(m?.to_address || m?.toAddress || "");
+          if (!addrSet.has(toAddr)) continue;
 
           const amount = extractAtomFromAmounts(m?.amount);
           if (amount <= 0) continue;
 
-          agg.set(to, (agg.get(to) || 0) + amount);
+          agg.set(toAddr, (agg.get(toAddr) || 0) + amount);
         }
 
-        if (agg.size && hash) {
-          for (const [to, amount] of agg.entries()) {
-            const wallet_id = addrToWallet.get(to)!;
-            rows.push({ wallet_id, tx_hash: hash, amount, block_time: whenISO });
+        if (agg.size && txhash) {
+          for (const [toAddr, amount] of agg.entries()) {
+            const wallet_id = addrToWallet.get(toAddr)!;
+            rows.push({ wallet_id, tx_hash: txhash, amount, block_time: whenISO });
           }
         }
       }
@@ -366,7 +348,7 @@ export async function POST(req: Request) {
       inserted = upserted?.length || 0;
     }
 
-    // Spremi marker
+    // Save cursor
     await sb.from("settings").upsert({ key: CURSOR_KEY, value: { n: to } }, { onConflict: "key" });
 
     const res: Json = {
