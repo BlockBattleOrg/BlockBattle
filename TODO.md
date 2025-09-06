@@ -48,6 +48,7 @@
 - ✅ `[x]` `/api/public/wallets` (fetch donation address by chain)
 - ✅ `[x]` `/api/public/contributions/leaderboard`
 - ✅ `[x]` `/api/public/contributions/recent`
+- ✅ `[x]` `/api/claim` (public endpoint to claim contribution by tx hash)
 - ✅ `[x]` APIs marked **dynamic** (`no-store`) to avoid stale data
 - ✅ `[x]` Daily rollups (`/api/admin/snapshot-heights` + cron at 00:05 UTC) for contributions & heights
 - ✅ `[x]` Contributions rollup job adjusted to 2-hourly schedule
@@ -64,6 +65,7 @@
 - ✅ `[x]` Contributions panel (Leaderboard + Recent)
 - ✅ `[x]` Explorer links (Etherscan/Polygonscan) for recent tx
 - ✅ `[x]` Amount rendering with full native precision per chain (no confusing “0”)
+- ✅ `[x]` `/claim` page (form for claiming contributions)
 - ☐ `[ ]` Status badges per chain (OK/STALE/ERR) sourced from API metadata
 - ☐ `[ ]` Empty/loading/error states polish across the app
 
@@ -91,7 +93,7 @@
 ---
 
 ## Phase 9 — Exploratory Visualizations
-- ✅ `[x]` Tetris grid view
+- ☐ `[ ]` Tetris grid view
 - ☐ `[ ]` Three.js 3D prototype
 
 ---
@@ -138,5 +140,6 @@
 - ✅ CORS allow-list + rate limiting on public routes implemented.  
 - ✅ Normalize `amount_usd` implemented.  
 - ✅ Production-only CORS allow-list + token-bucket RL enabled.  
-- ✅ Tetris grid view implemented with falling animation, auto-refresh and chain filter.
+- ✅ New `/api/claim` endpoint with tx validation, rate limiting & optional hCaptcha.  
+- ✅ New `/claim` UI form for public contribution claiming.  
 
