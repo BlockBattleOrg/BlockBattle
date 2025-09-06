@@ -48,7 +48,7 @@
 - ✅ `[x]` `/api/public/wallets` (fetch donation address by chain)
 - ✅ `[x]` `/api/public/contributions/leaderboard`
 - ✅ `[x]` `/api/public/contributions/recent`
-- ✅ `[x]` `/api/claim` (public endpoint to claim contribution by tx hash)
+- ✅ `[x]` `/api/claim` (public endpoint to claim contribution by tx hash, with Supabase pre-check for idempotency)
 - ✅ `[x]` APIs marked **dynamic** (`no-store`) to avoid stale data
 - ✅ `[x]` Daily rollups (`/api/admin/snapshot-heights` + cron at 00:05 UTC) for contributions & heights
 - ✅ `[x]` Contributions rollup job adjusted to 2-hourly schedule
@@ -140,6 +140,6 @@
 - ✅ CORS allow-list + rate limiting on public routes implemented.  
 - ✅ Normalize `amount_usd` implemented.  
 - ✅ Production-only CORS allow-list + token-bucket RL enabled.  
-- ✅ New `/api/claim` endpoint with tx validation, rate limiting & optional hCaptcha.  
+- ✅ New `/api/claim` endpoint with Supabase pre-check for existing tx.  
 - ✅ New `/claim` UI form for public contribution claiming.  
 
