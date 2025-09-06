@@ -31,7 +31,6 @@ const CHAINS = [
 ];
 
 const HCAPTCHA_SITE_KEY = process.env.NEXT_PUBLIC_HCAPTCHA_SITE_KEY || '';
-const SHOW_DEBUG = process.env.NEXT_PUBLIC_SHOW_CAPTCHA_DEBUG === '1';
 
 declare global {
   interface Window {
@@ -39,12 +38,12 @@ declare global {
       render: (
         container: HTMLElement,
         opts: {
-        sitekey: string;
-        callback?: (token: string) => void;
-        'expired-callback'?: () => void;
-        'error-callback'?: () => void;
-        theme?: 'light' | 'dark';
-        size?: 'normal' | 'invisible' | 'compact';
+          sitekey: string;
+          callback?: (token: string) => void;
+          'expired-callback'?: () => void;
+          'error-callback'?: () => void;
+          theme?: 'light' | 'dark';
+          size?: 'normal' | 'invisible' | 'compact';
         }
       ) => number;
       reset: (widgetId?: number) => void;
@@ -69,7 +68,6 @@ export default function ClaimPage() {
   const captchaContainerRef = useRef<HTMLDivElement | null>(null);
   const captchaWidgetIdRef = useRef<number | null>(null);
 
-  // Load & render hCaptcha explicitly (no hydration mismatch)
   useEffect(() => {
     if (!hcaptchaEnabled) return;
 
@@ -88,9 +86,7 @@ export default function ClaimPage() {
           }, 50);
           setTimeout(() => {
             clearInterval(check);
-            if (!(window.hcaptcha && typeof window.hcaptcha.render === 'function')) {
-              reject(new Error('hcaptcha_not_ready'));
-            }
+            reject(new Error('hcaptcha_not_ready'));
           }, 5000);
           return;
         }
@@ -108,7 +104,7 @@ export default function ClaimPage() {
     ensureScript()
       .then(() => {
         if (!captchaContainerRef.current) return;
-        if (captchaWidgetIdRef.current !== null) return; // already rendered
+        if (captchaWidgetIdRef.current !== null) return;
 
         captchaWidgetIdRef.current = window.hcaptcha!.render(captchaContainerRef.current, {
           sitekey: HCAPTCHA_SITE_KEY,
@@ -121,7 +117,6 @@ export default function ClaimPage() {
             setCaptchaState('expired');
           },
           'error-callback': () => {
-            // tipični slučaj: pogrešan sitekey ili domena nije dopuštena
             setHcaptchaToken(undefined);
             setCaptchaState('error');
           },
@@ -183,10 +178,7 @@ export default function ClaimPage() {
   const submitDisabled =
     loading ||
     !tx.trim() ||
-    (hcaptchaEnabled && !hcaptchaToken); // block submit until captcha solved
-
-  const sitekeyMasked =
-    HCAPTCHA_SITE_KEY ? `${HCAPTCHA_SITE_KEY.slice(0, 6)}…${HCAPTCHA_SITE_KEY.slice(-4)}` : '(empty)';
+    (hcaptchaEnabled && !hcaptchaToken);
 
   return (
     <main className="mx-auto max-w-xl px-4 py-10">
@@ -198,16 +190,6 @@ export default function ClaimPage() {
       {!hcaptchaEnabled && (
         <div className="mt-4 rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
           hCaptcha is not configured. Set <code>NEXT_PUBLIC_HCAPTCHA_SITE_KEY</code> and redeploy.
-        </div>
-      )}
-
-      {SHOW_DEBUG && (
-        <div className="mt-3 rounded-xl border bg-gray-50 p-3 text-xs text-gray-700">
-          <div><strong>DEBUG</strong></div>
-          <div>host: {typeof window !== 'undefined' ? window.location.host : ''}</div>
-          <div>sitekey: {sitekeyMasked}</div>
-          <div>captchaState: {captchaState}</div>
-          <div>token: {hcaptchaToken ? 'present' : 'none'}</div>
         </div>
       )}
 
@@ -243,20 +225,9 @@ export default function ClaimPage() {
             <label className="block text-sm font-medium">Verification</label>
             <div ref={captchaContainerRef} className="mt-2" />
             {!hcaptchaToken && (
-              <>
-                <p className="mt-2 text-xs text-gray-500">
-                  Please complete the verification to enable submission.
-                </p>
-                {captchaState === 'error' && (
-                  <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
-                    If you see “The sitekey for this hCaptcha is incorrect”, check:
-                    <ul className="ml-4 list-disc">
-                      <li><strong>Allowed Domains</strong> include <code>blockbattle.org</code> and <code>www.blockbattle.org</code> (and preview domains if used).</li>
-                      <li><strong>Sitekey</strong> in env matches the same hCaptcha project as server <code>HCAPTCHA_SECRET</code>.</li>
-                    </ul>
-                  </div>
-                )}
-              </>
+              <p className="mt-2 text-xs text-gray-500">
+                Please complete the verification to enable submission.
+              </p>
             )}
             <div className="mt-1 text-[11px] text-gray-400">Captcha: {captchaState}</div>
           </div>
@@ -279,12 +250,15 @@ export default function ClaimPage() {
 
       {resp && (
         <div className="mt-4 rounded-xl border bg-gray-50 p-3 text-sm">
-          <div><strong>ok:</strong> {String(resp.ok)}</div>
-          {resp.chain && <div><strong>chain:</strong> {resp.chain}</div>}
-          {resp.tx && <div><strong>tx:</strong> {resp.tx}</div>}
-          {'inserted' in resp && <div><strong>inserted:</strong> {JSON.stringify(resp.inserted)}</div>}
-          {'alreadyRecorded' in resp && <div><strong>alreadyRecorded:</strong> {String(resp.alreadyRecorded)}</div>}
-          {resp.error && <div><strong>error:</strong> {resp.error}</div>}
+          {resp.ok && resp.alreadyRecorded && (
+            <div>Your transaction is already recorded in our database ✅</div>
+          )}
+          {resp.ok && !resp.alreadyRecorded && (
+            <div>Your transaction has been successfully recorded ✅</div>
+          )}
+          {!resp.ok && (
+            <div>Error: {resp.error}</div>
+          )}
         </div>
       )}
     </main>
