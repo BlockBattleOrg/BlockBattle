@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-// Backward-compat types (old public /api/claim shape)
+// Legacy public /api/claim shape (kept for backward compatibility)
 type ClaimResponseOld = {
   ok: boolean;
   chain?: string;
@@ -12,35 +12,34 @@ type ClaimResponseOld = {
   error?: string | null;
 };
 
-// New standardized shape (claim-first routes)
+// New standardized shape from claim-ingest routes
 type ClaimResponseNew = {
   ok: boolean;
-  code?: string;      // 'inserted' | 'duplicate' | 'not_project_wallet' | 'tx_not_found' | 'invalid_payload' | 'rpc_error' | ...
-  message?: string;   // human-readable message
+  code?: string;    // 'inserted' | 'duplicate' | 'not_project_wallet' | 'tx_not_found' | 'invalid_payload' | 'rpc_error' | 'unsupported_chain' | ...
+  message?: string; // human-readable
   data?: any;
 };
 
 type AnyClaimResponse = ClaimResponseOld | ClaimResponseNew;
-
 type UiMsg = { kind: 'success' | 'info' | 'error'; text: string };
 
-// Chains UI
+// Full chain list (as requested)
 const CHAINS = [
-  { value: 'eth', label: 'Ethereum (ETH)' },
-  { value: 'op', label: 'Optimism (OP)' },
-  { value: 'arb', label: 'Arbitrum (ARB)' },
-  { value: 'pol', label: 'Polygon (POL)' },
+  { value: 'eth',  label: 'Ethereum (ETH)' },
+  { value: 'arb',  label: 'Arbitrum (ARB)' },
   { value: 'avax', label: 'Avalanche (AVAX)' },
-  { value: 'bsc', label: 'BNB Smart Chain (BSC)' },
-  { value: 'btc', label: 'Bitcoin (BTC)' },
-  { value: 'ltc', label: 'Litecoin (LTC)' },
+  { value: 'op',   label: 'Optimism (OP)' },
+  { value: 'pol',  label: 'Polygon (POL)' },
+  { value: 'dot',  label: 'Polkadot (DOT)' },
+  { value: 'btc',  label: 'Bitcoin (BTC)' },
+  { value: 'ltc',  label: 'Litecoin (LTC)' },
   { value: 'doge', label: 'Dogecoin (DOGE)' },
-  { value: 'dot', label: 'Polkadot (DOT)' },
+  { value: 'xrp',  label: 'XRP (XRP)' },
+  { value: 'xlm',  label: 'Stellar (XLM)' },
+  { value: 'sol',  label: 'Solana (SOL)' },
+  { value: 'trx',  label: 'Tron (TRX)' },
+  { value: 'bsc',  label: 'BNB Smart Chain (BSC)' },
   { value: 'atom', label: 'Cosmos (ATOM)' },
-  { value: 'xrp', label: 'XRP (XRP)' },
-  { value: 'sol', label: 'Solana (SOL)' },
-  { value: 'xlm', label: 'Stellar (XLM)' },
-  { value: 'trx', label: 'Tron (TRX)' },
 ];
 
 const HCAPTCHA_SITE_KEY = process.env.NEXT_PUBLIC_HCAPTCHA_SITE_KEY || '';
@@ -70,7 +69,7 @@ type CaptchaState = 'idle' | 'ready' | 'solved' | 'expired' | 'error';
 const EVM_CHAINS = ['eth', 'op', 'arb', 'pol', 'avax', 'bsc'] as const;
 const isEvm = (c: string) => (EVM_CHAINS as unknown as string[]).includes(c);
 
-// Normalize EVM hashes: allow 64-hex without 0x; emit 0x + lowercase
+// Normalize & validate EVM hashes
 function normalizeEvmTx(input: string) {
   const raw = input.trim();
   if (/^0x[0-9a-fA-F]{64}$/.test(raw)) return raw.toLowerCase();
@@ -81,28 +80,28 @@ function isValidEvmHash(input: string) {
   return /^0x[0-9a-fA-F]{64}$/.test(input.trim());
 }
 
-// Expected format hint per chain
+// Hints
 function expectedFormatHint(chain: string) {
   if (isEvm(chain)) return 'Expected format: 0x + 64 hex (EVM).';
   if (chain === 'sol') return 'Expected format: base58 signature (Solana).';
   return 'Expected format: chain-native transaction id/hash.';
 }
 
-// Explorer URL per chain
+// Explorers
 function txExplorerUrl(chain: string, tx: string): string | null {
   switch (chain) {
     case 'eth': return `https://etherscan.io/tx/${tx}`;
-    case 'op': return `https://optimistic.etherscan.io/tx/${tx}`;
+    case 'op':  return `https://optimistic.etherscan.io/tx/${tx}`;
     case 'arb': return `https://arbiscan.io/tx/${tx}`;
     case 'pol': return `https://polygonscan.com/tx/${tx}`;
-    case 'avax': return `https://snowtrace.io/tx/${tx}`;
+    case 'avax':return `https://snowtrace.io/tx/${tx}`;
     case 'bsc': return `https://bscscan.com/tx/${tx}`;
     case 'sol': return `https://solscan.io/tx/${tx}`;
     case 'btc': return `https://blockchair.com/bitcoin/transaction/${tx}`;
     case 'ltc': return `https://blockchair.com/litecoin/transaction/${tx}`;
-    case 'doge': return `https://blockchair.com/dogecoin/transaction/${tx}`;
+    case 'doge':return `https://blockchair.com/dogecoin/transaction/${tx}`;
     case 'dot': return `https://polkadot.subscan.io/extrinsic/${tx}`;
-    case 'atom': return `https://www.mintscan.io/cosmos/txs/${tx}`;
+    case 'atom':return `https://www.mintscan.io/cosmos/txs/${tx}`;
     case 'xrp': return `https://xrpscan.com/tx/${tx}`;
     case 'xlm': return `https://steexp.com/tx/${tx}`;
     case 'trx': return `https://tronscan.org/#/transaction/${tx}`;
@@ -110,103 +109,44 @@ function txExplorerUrl(chain: string, tx: string): string | null {
   }
 }
 
-/**
- * Normalize any server response to the new {ok, code, message} contract,
- * while preserving compatibility with the legacy shape used by the old /api/claim.
- */
+/** Normalize any server response to the new {ok, code, message} contract (backward compatible). */
 function normalizeResponse(resp: AnyClaimResponse): ClaimResponseNew {
-  // New style (preferred)
+  // New style
   if (Object.prototype.hasOwnProperty.call(resp, 'code') || Object.prototype.hasOwnProperty.call(resp, 'message')) {
     const r = resp as ClaimResponseNew;
-    return {
-      ok: !!r.ok,
-      code: r.code || '',
-      message: r.message || '',
-      data: (r as any).data,
-    };
+    return { ok: !!r.ok, code: r.code || '', message: r.message || '', data: (r as any).data };
   }
-
-  // Legacy style mapping
+  // Legacy mapping
   const o = resp as ClaimResponseOld;
   if (o.ok && o.alreadyRecorded) {
-    return {
-      ok: true,
-      code: 'duplicate',
-      message: 'The transaction has already been recorded in our project before.',
-      data: { chain: o.chain, txHash: o.tx },
-    };
+    return { ok: true, code: 'duplicate', message: 'The transaction has already been recorded in our project before.', data: { chain: o.chain, txHash: o.tx } };
   }
   if (o.ok && !o.alreadyRecorded) {
-    return {
-      ok: true,
-      code: 'inserted',
-      message: 'The transaction was successfully recorded on our project.',
-      data: { chain: o.chain, txHash: o.tx, inserted: o.inserted },
-    };
+    return { ok: true, code: 'inserted', message: 'The transaction was successfully recorded on our project.', data: { chain: o.chain, txHash: o.tx, inserted: o.inserted } };
   }
-
-  // Legacy error mapping
   const err = (o.error || '').toString();
-  if (err === 'tx_not_found') {
-    return {
-      ok: false,
-      code: 'tx_not_found',
-      message: 'The hash of this transaction does not exist on the blockchain.',
-      data: { chain: o.chain, txHash: o.tx },
-    };
-  }
-  if (err === 'tx_pending') {
-    return {
-      ok: false,
-      code: 'rpc_error',
-      message: 'Transaction is not yet confirmed on-chain.',
-      data: { chain: o.chain, txHash: o.tx },
-    };
-  }
-  if (err === 'invalid_tx_format') {
-    return {
-      ok: false,
-      code: 'invalid_payload',
-      message: 'Hash format is not correct.',
-    };
-  }
-  return {
-    ok: false,
-    code: 'rpc_error',
-    message: err || 'Your request could not be processed.',
-    data: { chain: o.chain, txHash: o.tx },
-  };
+  if (err === 'tx_not_found') return { ok: false, code: 'tx_not_found', message: 'The hash of this transaction does not exist on the blockchain.', data: { chain: o.chain, txHash: o.tx } };
+  if (err === 'tx_pending')   return { ok: false, code: 'rpc_error',     message: 'Transaction is not yet confirmed on-chain.', data: { chain: o.chain, txHash: o.tx } };
+  if (err === 'invalid_tx_format') return { ok: false, code: 'invalid_payload', message: 'Hash format is not correct.' };
+  return { ok: false, code: 'rpc_error', message: err || 'Your request could not be processed.', data: { chain: o.chain, txHash: o.tx } };
 }
 
 function classify(resp: ClaimResponseNew): UiMsg {
   const code = resp.code || '';
-  if (resp.ok && code === 'inserted') {
-    return { kind: 'success', text: 'The transaction was successfully recorded on our project.' };
-  }
-  if (resp.ok && code === 'duplicate') {
-    return { kind: 'info', text: 'The transaction has already been recorded in our project before.' };
-  }
-  if (!resp.ok && code === 'not_project_wallet') {
-    return { kind: 'error', text: 'The transaction is not directed to our project. The wallet address does not belong to this project.' };
-  }
-  if (!resp.ok && code === 'tx_not_found') {
-    return { kind: 'error', text: 'The hash of this transaction does not exist on the blockchain.' };
-  }
-  if (!resp.ok && code === 'invalid_payload') {
-    return { kind: 'error', text: 'Hash format is not correct.' };
-  }
-  if (!resp.ok) {
-    return { kind: 'error', text: resp.message || 'Your request could not be processed.' };
-  }
+  if (resp.ok && code === 'inserted')  return { kind: 'success', text: 'The transaction was successfully recorded on our project.' };
+  if (resp.ok && code === 'duplicate') return { kind: 'info',    text: 'The transaction has already been recorded in our project before.' };
+  if (!resp.ok && code === 'not_project_wallet') return { kind: 'error', text: 'The transaction is not directed to our project. The wallet address does not belong to this project.' };
+  if (!resp.ok && code === 'tx_not_found')       return { kind: 'error', text: 'The hash of this transaction does not exist on the blockchain.' };
+  if (!resp.ok && code === 'invalid_payload')    return { kind: 'error', text: 'Hash format is not correct.' };
+  if (!resp.ok && code === 'unsupported_chain')  return { kind: 'error', text: 'Selected chain is not yet supported.' };
+  if (!resp.ok) return { kind: 'error', text: resp.message || 'Your request could not be processed.' };
   return { kind: 'info', text: resp.message || 'Processed.' };
 }
 
 function renderUserMessage(resp: ClaimResponseNew | null, chain: string, tx: string) {
   if (!resp) return null;
   const link = tx ? txExplorerUrl(chain, tx) : null;
-
   const ui = classify(resp);
-
   return (
     <div className="space-y-1">
       <div>{ui.text}</div>
@@ -219,7 +159,7 @@ export default function ClaimPage() {
   const [chain, setChain] = useState('eth');
   const [tx, setTx] = useState('');
   const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const [resp, setResp] = useState<ClaimResponseNew | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -233,37 +173,29 @@ export default function ClaimPage() {
 
   useEffect(() => {
     if (!hcaptchaEnabled) return;
-
     function ensureScript(): Promise<void> {
       return new Promise((resolve, reject) => {
-        if (window.hcaptcha && typeof window.hcaptcha.render === 'function') {
-          resolve(); return;
-        }
+        if (window.hcaptcha && typeof window.hcaptcha.render === 'function') { resolve(); return; }
         if (document.getElementById('hcaptcha-script')) {
           const check = setInterval(() => {
-            if (window.hcaptcha && typeof window.hcaptcha.render === 'function') {
-              clearInterval(check); resolve();
-            }
+            if (window.hcaptcha && typeof window.hcaptcha.render === 'function') { clearInterval(check); resolve(); }
           }, 50);
           setTimeout(() => { clearInterval(check); reject(new Error('hcaptcha_not_ready')); }, 5000);
           return;
         }
         const s = document.createElement('script');
         s.id = 'hcaptcha-script';
-        s.async = true;
-        s.defer = true;
+        s.async = true; s.defer = true;
         s.src = 'https://hcaptcha.com/1/api.js?render=explicit';
         s.onload = () => resolve();
         s.onerror = () => reject(new Error('hcaptcha_script_failed'));
         document.head.appendChild(s);
       });
     }
-
     ensureScript()
       .then(() => {
         if (!captchaContainerRef.current) return;
         if (captchaWidgetIdRef.current !== null) return;
-
         captchaWidgetIdRef.current = window.hcaptcha!.render(captchaContainerRef.current, {
           sitekey: HCAPTCHA_SITE_KEY,
           callback: (token: string) => { setHcaptchaToken(token); setCaptchaState('solved'); },
@@ -273,8 +205,7 @@ export default function ClaimPage() {
             typeof window !== 'undefined' &&
             window.matchMedia &&
             window.matchMedia('(prefers-color-scheme: dark)').matches
-              ? 'dark'
-              : 'light',
+              ? 'dark' : 'light',
           size: 'normal',
         });
         setCaptchaState('ready');
@@ -290,27 +221,28 @@ export default function ClaimPage() {
     }
   };
 
-  async function onSubmit(e: React.FormEvent) {
+  const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setResp(null);
+    setLoading(true);
 
-    // Normalize & validate
     const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
     if (isEvm(chain) && !isValidEvmHash(normalizedTx)) {
       const norm: ClaimResponseNew = { ok: false, code: 'invalid_payload', message: 'Hash format is not correct.' };
       setResp(norm);
       setError(norm.message || 'Invalid payload');
+      setLoading(false);
       return;
     }
 
     const msg = message.trim();
     if (msg.length > 280) {
       setError('Message is too long (max 280 characters).');
+      setLoading(false);
       return;
     }
 
-    setBusy(true);
     try {
       const r = await fetch('/api/claim', {
         method: 'POST',
@@ -335,11 +267,11 @@ export default function ClaimPage() {
       setError('Network error');
       resetCaptcha();
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
-  }
+  };
 
-  const submitDisabled = busy || !tx.trim() || (hcaptchaEnabled && !hcaptchaToken);
+  const submitDisabled = loading || !tx.trim() || (hcaptchaEnabled && !hcaptchaToken);
   const msgLen = message.trim().length;
 
   return (
@@ -358,14 +290,8 @@ export default function ClaimPage() {
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
         <div>
           <label className="block text-sm font-medium">Chain</label>
-          <select
-            className="mt-1 w-full rounded-xl border px-3 py-2"
-            value={chain}
-            onChange={(e) => setChain(e.target.value)}
-          >
-            {CHAINS.map((c) => (
-              <option key={c.value} value={c.value}>{c.label}</option>
-            ))}
+          <select className="mt-1 w-full rounded-xl border px-3 py-2" value={chain} onChange={(e) => setChain(e.target.value)}>
+            {CHAINS.map((c) => (<option key={c.value} value={c.value}>{c.label}</option>))}
           </select>
         </div>
 
@@ -401,20 +327,14 @@ export default function ClaimPage() {
             <label className="block text-sm font-medium">Verification</label>
             <div ref={captchaContainerRef} className="mt-2" />
             {!hcaptchaToken && (
-              <p className="mt-2 text-xs text-gray-500">
-                Please complete the verification to enable submission.
-              </p>
+              <p className="mt-2 text-xs text-gray-500">Please complete the verification to enable submission.</p>
             )}
             <div className="mt-1 text-[11px] text-gray-400">Captcha: {captchaState}</div>
           </div>
         )}
 
-        <button
-          type="submit"
-          disabled={submitDisabled}
-          className="rounded-2xl bg-black px-4 py-2 text-white disabled:opacity-60"
-        >
-          {busy ? 'Submitting…' : 'Submit'}
+        <button type="submit" disabled={submitDisabled} className="rounded-2xl bg-black px-4 py-2 text-white disabled:opacity-60">
+          {loading ? 'Submitting…' : 'Submit'}
         </button>
       </form>
 

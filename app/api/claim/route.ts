@@ -1,173 +1,130 @@
 // app/api/claim/route.ts
+// Public claim proxy.
+// Accepts { chain, tx, message, hcaptchaToken? } from the UI and forwards
+// to the appropriate internal claim-ingest route, mapping `message` -> `note`.
+//
+// Behavior:
+// - Validates EVM hash format for EVM chains only (ETH, ARB, AVAX, OP, POL, BSC).
+// - Forwards to /api/claim-ingest/<chain> with x-cron-secret and JSON body.
+// - If the inner route returns JSON, proxy returns it verbatim (status 200).
+// - If the inner route does not exist (404) or returns non-JSON, proxy returns:
+//     { ok:false, code:"unsupported_chain", message:"Selected chain is not yet supported." }
+// - For other fetch failures: { ok:false, code:"rpc_error", message:"Request failed." }
+
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-type ClaimBody = { chain?: string; tx?: string; hcaptchaToken?: string; message?: string };
+const CRON_SECRET = process.env.CRON_SECRET || '';
 
-const CRON_SECRET = process.env.CRON_SECRET!;
-const HCAPTCHA_SECRET = process.env.HCAPTCHA_SECRET || '';
-const CLAIM_BYPASS_SECRET = process.env.CLAIM_BYPASS_SECRET || '';
-const HCAPTCHA_ENABLED = !!HCAPTCHA_SECRET;
+const EVM_CHAINS = new Set(['eth', 'arb', 'avax', 'op', 'pol', 'bsc']);
+const ALL_CHAINS = new Set([
+  'eth',  // Ethereum
+  'arb',  // Arbitrum
+  'avax', // Avalanche
+  'op',   // Optimism
+  'pol',  // Polygon
+  'dot',  // Polkadot
+  'btc',  // Bitcoin
+  'ltc',  // Litecoin
+  'doge', // Dogecoin
+  'xrp',  // XRP
+  'xlm',  // Stellar
+  'sol',  // Solana
+  'trx',  // Tron
+  'bsc',  // BNB Smart Chain
+  'atom', // Cosmos
+]);
 
-const BASE_URL =
-  process.env.NEXT_PUBLIC_BASE_URL ??
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+const isEvmHash = (s: unknown): s is string =>
+  typeof s === 'string' && /^0x[0-9a-fA-F]{64}$/.test(s || '');
 
-function json(status: number, payload: Record<string, unknown>) {
-  return NextResponse.json(payload, { status });
-}
-function supa() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
-const EVM_CHAINS = ['eth', 'op', 'arb', 'pol', 'avax', 'bsc'] as const;
-const isEvm = (c: string) => (EVM_CHAINS as unknown as string[]).includes(c);
-function normalizeChain(input?: string): string | null {
-  if (!input) return null;
-  const v = input.toLowerCase().trim();
-  const map: Record<string, string> = {
-    eth: 'eth', optimism: 'op', op: 'op', arbitrum: 'arb', arb: 'arb',
-    polygon: 'pol', pol: 'pol', avax: 'avax', bsc: 'bsc',
-    btc: 'btc', ltc: 'ltc', doge: 'doge', dot: 'dot',
-    atom: 'atom', xrp: 'xrp', sol: 'sol', xlm: 'xlm', trx: 'trx',
-  };
-  return map[v] ?? null;
-}
-function normalizeEvmTx(s: string) {
-  const raw = s.trim();
-  if (/^0x[0-9a-fA-F]{64}$/.test(raw)) return raw.toLowerCase();
-  if (/^[0-9a-fA-F]{64}$/.test(raw)) return ('0x' + raw).toLowerCase();
-  return raw;
-}
-function evmVariants(s: string) {
-  const set = new Set<string>();
-  const a = s.trim();
-  set.add(a);
-  if (/^0x[0-9a-fA-F]{64}$/.test(a)) {
-    set.add(a.toLowerCase());
-    set.add(a.slice(2).toLowerCase());
-  } else if (/^[0-9a-fA-F]{64}$/.test(a)) {
-    set.add(('0x' + a).toLowerCase());
-    set.add(a.toLowerCase());
-  }
-  return Array.from(set);
-}
-function validateTxHash(chain: string, tx: string) {
-  if (!tx) return { ok: false as const, reason: 'empty' };
-  if (isEvm(chain)) return /^0x[0-9a-f]{64}$/.test(tx) ? { ok: true as const } : { ok: false as const, reason: 'expect_0x64_hex' };
-  if (chain === 'sol') return /^[1-9A-HJ-NP-Za-km-z]{43,88}$/.test(tx) ? { ok: true as const } : { ok: false as const, reason: 'expect_base58' };
-  return /^[0-9a-fA-F]{16,}$/.test(tx) ? { ok: true as const } : { ok: false as const, reason: 'expect_hex_like' };
-}
-async function verifyHCaptcha(token?: string) {
-  if (!token) return { ok: false as const, error: 'missing hcaptchaToken' };
-  try {
-    const form = new URLSearchParams();
-    form.set('response', token);
-    form.set('secret', HCAPTCHA_SECRET);
-    const res = await fetch('https://hcaptcha.com/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
-    });
-    const data = await res.json();
-    if (!data?.success) return { ok: false as const, error: `hcaptcha_failed:${(data['error-codes'] || []).join(',')}` };
-    return { ok: true as const };
-  } catch {
-    return { ok: false as const, error: 'hcaptcha_error' };
-  }
+function bad(message: string, code = 'invalid_payload') {
+  return NextResponse.json(
+    { ok: false, code, message },
+    { status: 200, headers: { 'cache-control': 'no-store' } },
+  );
 }
 
 export async function POST(req: NextRequest) {
-  let body: ClaimBody;
-  try { body = await req.json(); } catch { return json(400, { ok: false, error: 'invalid_json' }); }
-
-  const chain0 = normalizeChain(body.chain);
-  if (!chain0) return json(400, { ok: false, error: 'unsupported_chain' });
-
-  let tx = (body.tx || '').trim();
-  if (!tx) return json(400, { ok: false, error: 'missing_chain_or_tx' });
-  if (isEvm(chain0)) tx = normalizeEvmTx(tx);
-
-  const valid = validateTxHash(chain0, tx);
-  if (!valid.ok) return json(400, { ok: false, chain: chain0, error: `invalid_tx_format:${valid.reason}` });
-
-  const message = (body.message || '').trim();
-  if (message && message.length > 280) {
-    return json(400, { ok: false, error: 'message_too_long' });
-  }
-
-  if (!CRON_SECRET) return json(500, { ok: false, error: 'server_misconfigured_missing_cron_secret' });
-
-  // Captcha (unless bypass)
-  const bypassHeader = req.headers.get('x-claim-bypass') || '';
-  const bypassCaptcha = CLAIM_BYPASS_SECRET && bypassHeader === CLAIM_BYPASS_SECRET;
-  if (HCAPTCHA_ENABLED && !bypassCaptcha) {
-    const hc = await verifyHCaptcha(body.hcaptchaToken);
-    if (!hc.ok) return json(400, { ok: false, chain: chain0, tx, error: hc.error });
-  }
-
-  // 1) tolerant DB pre-check
   try {
-    const candidates = isEvm(chain0) ? evmVariants(tx) : [tx];
-    const { data: rows, error: qErr } = await supa()
-      .from('contributions')
-      .select('id, tx_hash')
-      .in('tx_hash', candidates)
-      .limit(1);
+    const body = await req.json().catch(() => ({} as any));
+    const chain = String(body?.chain || '').trim().toLowerCase();
+    const tx = String(body?.tx || '').trim();
+    const message = typeof body?.message === 'string' ? body.message.trim() : '';
 
-    if (!qErr && rows && rows.length > 0) {
-      // already recorded -> for safety, do NOT update note here
-      return json(200, { ok: true, chain: chain0, tx, inserted: null, alreadyRecorded: true, error: null });
+    if (!chain || !tx) {
+      return bad('Invalid transaction hash format.');
     }
-  } catch {
-    // ignore and continue
-  }
+    if (!ALL_CHAINS.has(chain)) {
+      return NextResponse.json(
+        { ok: false, code: 'unsupported_chain', message: 'Selected chain is not yet supported.' },
+        { status: 200, headers: { 'cache-control': 'no-store' } },
+      );
+    }
 
-  // 2) forward to ingest (verifies on-chain + inserts)
-  const url = new URL(`${BASE_URL}/api/ingest/contrib/${chain0}`);
-  url.searchParams.set('tx', tx);
+    // Minimal local validation for EVM chains only
+    if (EVM_CHAINS.has(chain) && !isEvmHash(tx)) {
+      return bad('Hash format is not correct.', 'invalid_payload');
+    }
 
-  try {
-    const r = await fetch(url.toString(), {
+    // Map chain -> inner path (we include all; if some are not implemented yet, we translate 404 to unsupported_chain)
+    const innerPath = `/api/claim-ingest/${chain}`;
+
+    const url = new URL(innerPath, req.nextUrl.origin);
+    // keep compatibility with inner routes that also read ?tx=
+    url.searchParams.set('tx', tx);
+
+    const forward = await fetch(url.toString(), {
       method: 'POST',
-      headers: { 'x-cron-secret': CRON_SECRET, 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-cron-secret': CRON_SECRET,
+      },
+      body: JSON.stringify({
+        txHash: tx,
+        note: message || undefined,    // ensure note is forwarded to be stored
+        message: message || undefined, // backward-compat if inner route reads 'message'
+      }),
+      cache: 'no-store',
     });
-    const data = await r.json().catch(() => ({} as any));
 
-    let ok = !!data?.ok;
-    let inserted = data?.inserted ?? null;
-    let error = data?.error ?? null;
-    let alreadyRecorded = false;
-
-    if (!ok && typeof error === 'string' && /duplicate key|unique/i.test(error)) {
-      ok = true; inserted = null; alreadyRecorded = true; error = null;
-    }
-    if (!ok && typeof error === 'string' && /no unique or exclusion constraint matching the ON CONFLICT/i.test(error)) {
-      return json(500, { ok: false, chain: chain0, tx, error: 'server_misconfigured_no_unique' });
-    }
-    if (!ok && typeof error === 'string') {
-      if (/tx_not_found|not_found/i.test(error)) return json(404, { ok: false, chain: chain0, tx, error: 'tx_not_found' });
-      if (/tx_pending|pending|not_confirmed/i.test(error)) return json(409, { ok: false, chain: chain0, tx, error: 'tx_pending' });
+    // If inner route is missing (404) or not JSON -> present a clean unsupported message
+    if (!forward.ok) {
+      if (forward.status === 404) {
+        return NextResponse.json(
+          { ok: false, code: 'unsupported_chain', message: 'Selected chain is not yet supported.' },
+          { status: 200, headers: { 'cache-control': 'no-store' } },
+        );
+      }
+      return NextResponse.json(
+        { ok: false, code: 'rpc_error', message: 'Request failed.' },
+        { status: 200, headers: { 'cache-control': 'no-store' } },
+      );
     }
 
-    // 3) If a brand-new insert and we have a message, persist it (once)
-    if (ok && !alreadyRecorded && message) {
-      await supa()
-        .from('contributions')
-        .update({ note: message })
-        .eq('tx_hash', tx)
-        .is('note', null);
-      // ignore update error silently; core result still returned
+    let payload: any = null;
+    try {
+      payload = await forward.json();
+    } catch {
+      // Non-JSON from inner route
+      return NextResponse.json(
+        { ok: false, code: 'unsupported_chain', message: 'Selected chain is not yet supported.' },
+        { status: 200, headers: { 'cache-control': 'no-store' } },
+      );
     }
 
-    return json(r.ok ? 200 : ok ? 200 : 400, { ok, chain: chain0, tx, inserted, alreadyRecorded, error });
+    // Pass-through JSON (new or legacy shapes; UI normalizes)
+    return NextResponse.json(
+      payload,
+      { status: 200, headers: { 'cache-control': 'no-store' } },
+    );
   } catch {
-    return json(502, { ok: false, chain: chain0, tx, error: 'upstream_error' });
+    return NextResponse.json(
+      { ok: false, code: 'rpc_error', message: 'Request failed.' },
+      { status: 200, headers: { 'cache-control': 'no-store' } },
+    );
   }
 }
 
