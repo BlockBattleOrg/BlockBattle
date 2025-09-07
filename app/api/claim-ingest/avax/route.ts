@@ -1,5 +1,5 @@
 // app/api/claim-ingest/avax/route.ts
-// Avalanche claim-ingest, chain='avax' (EVM C-Chain)
+// Avalanche C-Chain claim-ingest, chain='avax'
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
@@ -9,9 +9,13 @@ export const dynamic = 'force-dynamic';
 type J = Record<string, unknown>;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
-const AVAX_RPC_URL = process.env.AVAX_RPC_URL || process.env.EVM_RPC_URL || 'https://avax.nownodes.io';
+// ⚠️ No fallback to EVM_RPC_URL. Require correct per-chain RPC.
+const AVAX_RPC_URL = process.env.AVAX_RPC_URL || '';
 
-const json = (status: number, payload: J) => NextResponse.json(payload, { status, headers: { 'cache-control': 'no-store' } });
+const EXPECTED_CHAIN_ID_HEX = '0xa86a'; // 43114
+
+const json = (status: number, payload: J) =>
+  NextResponse.json(payload, { status, headers: { 'cache-control': 'no-store' } });
 const json200 = (payload: J) => json(200, payload);
 
 function supa() {
@@ -50,7 +54,10 @@ async function rpc(method: string, params: any[]) {
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (NOWNODES_API_KEY) { headers['api-key'] = NOWNODES_API_KEY; headers['x-api-key'] = NOWNODES_API_KEY; }
+    if (NOWNODES_API_KEY) {
+      headers['api-key'] = NOWNODES_API_KEY;
+      headers['x-api-key'] = NOWNODES_API_KEY;
+    }
     const res = await fetch(AVAX_RPC_URL, { method: 'POST', headers, body, cache: 'no-store' });
     const txt = await res.text();
     let j: any = null; try { j = txt ? JSON.parse(txt) : null; } catch {}
@@ -61,11 +68,12 @@ async function rpc(method: string, params: any[]) {
     return { ok: false as const, error: `rpc_network:${e?.message || 'unknown'}` };
   }
 }
-const getReceipt = (h: string) => rpc('eth_getTransactionReceipt', [h]);
-const getTx      = (h: string) => rpc('eth_getTransactionByHash', [h]);
-const getBlock   = (n: string) => rpc('eth_getBlockByNumber', [n, false]);
+const chainId   = () => rpc('eth_chainId', []);
+const getTx     = (h: string) => rpc('eth_getTransactionByHash', [h]);
+const getReceipt= (h: string) => rpc('eth_getTransactionReceipt', [h]);
+const getBlock  = (n: string) => rpc('eth_getBlockByNumber', [n, false]);
 
-// ---------- USD pricing (best-effort) ----------
+// ---------- USD pricing ----------
 async function priceEthToUsdOrNull(amountEthStr: string): Promise<{ usd: number; pricedAt: string } | null> {
   try {
     const fx: any = await import('@/lib/fx');
@@ -100,9 +108,20 @@ async function findAvaxWalletIdByToAddress(addr: string): Promise<string | null>
 
 // ---------- handler ----------
 export async function POST(req: NextRequest) {
+  // auth
   const sec = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || sec !== CRON_SECRET) return json(401, { ok: false, error: 'unauthorized' });
 
+  // config sanity
+  if (!AVAX_RPC_URL) {
+    return json(500, { ok: false, code: 'rpc_misconfigured', message: 'RPC endpoint for Avalanche is not configured.' });
+  }
+  const id = await chainId();
+  if (!id.ok || String(id.result).toLowerCase() !== EXPECTED_CHAIN_ID_HEX) {
+    return json(500, { ok: false, code: 'rpc_chain_mismatch', message: 'RPC endpoint is not an Avalanche C-Chain node.' });
+  }
+
+  // input
   const url = new URL(req.url);
   const body = await req.json().catch(() => ({} as any));
   let tx = (url.searchParams.get('tx') || body?.txHash || body?.tx_hash || body?.hash || '').trim();
@@ -113,7 +132,7 @@ export async function POST(req: NextRequest) {
   tx = normalizeTxHash(tx);
   if (!isEvmHash(tx)) return json(400, { ok: false, code: 'invalid_payload', message: 'Invalid transaction hash format.' });
 
-  // fetch both tx and receipt to distinguish not found vs pending
+  // fetch tx & receipt
   const [tr, rr] = await Promise.all([ getTx(tx), getReceipt(tx) ]);
   if (!tr.ok || !rr.ok) return json(502, { ok: false, code: 'rpc_error', message: 'An error occurred while fetching the transaction.' });
 
