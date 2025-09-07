@@ -1,11 +1,11 @@
 // app/api/claim-ingest/eth/route.ts
-// ETH claim-ingest (claim-first, schema-aware)
+// ETH claim-ingest (claim-first, schema-aware with safe fallback)
 // - Auth via x-cron-secret
-// - Verify on-chain: receipt (confirmed) + tx (value/from/to) + block (timestamp)
-// - Insert only into columns that actually exist in public.contributions
-// - Fills NOT NULLs like block_time if present
-// - Best-effort amount_usd/priced_at via lib/fx.ts
-// - Tries to resolve wallet_id by matching to_address to public.wallets.address (case-insensitive) with optional chain/network/symbol filters
+// - Verify: receipt (confirmed) + tx (value/from/to) + block (timestamp)
+// - Insert samo u kolone koje stvarno postoje (detekcija + robustan fallback)
+// - Popunjava NOT NULL polja poput block_time (ako postoji)
+// - Best-effort amount_usd/priced_at preko lib/fx.ts (ako postoji)
+// - Povezuje wallet_id prema public.wallets.address (case-insensitive, uz network/chain/symbol filter ako postoje)
 // - Idempotent: SELECT -> INSERT; duplicate => alreadyRecorded:true
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -103,48 +103,58 @@ async function priceEthToUsdOrNull(amountEthStr: string): Promise<{ usd: number;
 }
 
 // ---------- schema-aware helpers ----------
+function fallbackContributionCols(): Set<string> {
+  // robustan default skup kolona (NE smeta ako neke ne postoje; koristimo ih uvjetno)
+  return new Set([
+    'id','wallet_id','tx_hash','amount','amount_usd','priced_at',
+    'block_time','block_number','block_hash','from_address','to_address',
+    'status','fee','currency','symbol','asset','network','source','note'
+  ]);
+}
+
 async function getTableColumns(schema: string, table: string): Promise<Set<string>> {
+  // pokušaj čitanja information_schema
   const { data, error } = await supa()
     .from('information_schema.columns' as any)
     .select('column_name')
     .eq('table_schema', schema as any)
     .eq('table_name', table as any);
 
-  if (!error && Array.isArray(data)) {
+  if (!error && Array.isArray(data) && data.length) {
     return new Set((data as any[]).map((r) => r.column_name));
   }
-  return new Set(); // fallback empty; caller must handle
+  // fallback ako je information_schema blokiran ili prazan
+  if (table === 'contributions') return fallbackContributionCols();
+  if (table === 'wallets') return new Set(['id','wallet_id','address','addr','network','symbol','chain']);
+  return new Set();
 }
 
 async function resolveWalletIdByAddress(toAddrLower: string): Promise<string | null> {
-  // Detect wallets columns
   const wcols = await getTableColumns('public', 'wallets');
 
-  // Determine ID column name
-  const idCol = wcols.has('id') ? 'id'
-             : wcols.has('wallet_id') ? 'wallet_id'
-             : null;
-
-  // Determine address column
-  const addrCol = wcols.has('address') ? 'address'
-               : wcols.has('addr') ? 'addr'
-               : null;
-
+  const idCol = wcols.has('id') ? 'id' : (wcols.has('wallet_id') ? 'wallet_id' : null);
+  const addrCol = wcols.has('address') ? 'address' : (wcols.has('addr') ? 'addr' : null);
   if (!idCol || !addrCol) return null;
 
-  // Build query
-  let q = supa().from('wallets').select(`${idCol}, ${addrCol}${wcols.has('network') ? ', network' : ''}${wcols.has('symbol') ? ', symbol' : ''}${wcols.has('chain') ? ', chain' : ''}`);
+  // Probaj exact lowercase match (eq), a ako ne nađe, probaj pattern (ilike)
+  let q: any = supa().from('wallets').select(`${idCol}, ${addrCol}${wcols.has('network') ? ', network' : ''}${wcols.has('symbol') ? ', symbol' : ''}${wcols.has('chain') ? ', chain' : ''}`).limit(1);
 
-  // Case-insensitive match by address
-  q = (q as any).ilike(addrCol, toAddrLower);
+  // prefer eq (ako adrese u tablici već jesu lowercased)
+  q = q.eq(addrCol, toAddrLower);
 
-  // Optional narrowing if columns exist
-  if (wcols.has('network')) (q as any).eq('network', 'ethereum');
-  else if (wcols.has('chain')) (q as any).in('chain', ['eth', 'ethereum']);
-  else if (wcols.has('symbol')) (q as any).in('symbol', ['ETH', 'eth']);
+  // dopunsko sužavanje po mreži/simbolu/lancu ako kolone postoje
+  if (wcols.has('network')) q = q.eq('network', 'ethereum');
+  else if (wcols.has('chain')) q = q.in('chain', ['eth', 'ethereum']);
+  else if (wcols.has('symbol')) q = q.in('symbol', ['ETH', 'eth']);
 
-  const { data, error } = await q.limit(1);
-  if (error || !data || !data.length) return null;
+  let { data, error } = await q;
+  if ((!data || !data.length) && !error) {
+    // fallback: ilike s točnim patternom (bez %); u većini slučajeva će se poklopiti
+    let q2: any = supa().from('wallets').select(`${idCol}, ${addrCol}`).limit(1);
+    q2 = q2.ilike(addrCol, toAddrLower);
+    ({ data } = await q2);
+  }
+  if (!data || !data.length) return null;
 
   const row = data[0] as any;
   return String(row[idCol]) || null;
@@ -235,14 +245,14 @@ export async function POST(req: NextRequest) {
     const cols = await getTableColumns('public', 'contributions');
     const payload: Record<string, any> = {};
 
-    // required minimal
+    // minimal (mora postojati; fallback brine da su ovi nazivi uključeni)
     if (cols.has('tx_hash')) payload.tx_hash = tx;
     if (cols.has('amount')) payload.amount = amountEthStr;
 
-    // NOT NULL fields commonly present
+    // NOT NULL u tvojoj shemi (prethodno je falio block_time)
     if (blockTimeISO && cols.has('block_time')) payload.block_time = blockTimeISO;
 
-    // standard helpful columns (only if exist)
+    // metapodaci (samo ako kolone postoje)
     if (cols.has('block_number') && receipt.blockNumber) payload.block_number = hexToNumber(String(receipt.blockNumber));
     if (cols.has('block_hash') && receipt.blockHash) payload.block_hash = String(receipt.blockHash);
     if (cols.has('from_address') && fromAddress) payload.from_address = fromAddress;
@@ -254,14 +264,14 @@ export async function POST(req: NextRequest) {
     if (amountUsd !== null && cols.has('amount_usd')) payload.amount_usd = amountUsd;
     if (pricedAt !== null && cols.has('priced_at')) payload.priced_at = pricedAt;
 
-    // identity columns (if postoje)
+    // identitet (ako postoje)
     if (cols.has('currency')) payload.currency = 'ETH';
     if (cols.has('symbol')) payload.symbol = 'ETH';
     if (cols.has('asset')) payload.asset = 'ETH';
     if (cols.has('network')) payload.network = 'ethereum';
     if (cols.has('source')) payload.source = 'claim';
 
-    // --- NEW: wallet_id mapiranje prema public.wallets ---
+    // pokušaj mapiranja walleta
     if (toAddress) {
       const walletId = await resolveWalletIdByAddress(toAddress);
       if (walletId && cols.has('wallet_id')) {
