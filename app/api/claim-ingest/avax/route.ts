@@ -1,5 +1,5 @@
 // app/api/claim-ingest/avax/route.ts
-// Avalanche C-Chain claim-ingest, chain='avax'
+// Avalanche C-Chain claim-ingest, chain='avax' with robust tx/receipt handling
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
@@ -9,9 +9,8 @@ export const dynamic = 'force-dynamic';
 type J = Record<string, unknown>;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
-const AVAX_RPC_URL = process.env.AVAX_RPC_URL || ''; // <- ostaje ista env var
-
-const EXPECTED_CHAIN_ID_HEX = '0xa86a'; // 43114 (Avalanche C-Chain)
+const AVAX_RPC_URL = process.env.AVAX_RPC_URL || '';
+const EXPECTED_CHAIN_ID_HEX = '0xa86a'; // 43114
 
 const json = (status: number, payload: J) =>
   NextResponse.json(payload, { status, headers: { 'cache-control': 'no-store' } });
@@ -109,7 +108,7 @@ export async function POST(req: NextRequest) {
   const sec = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || sec !== CRON_SECRET) return json(401, { ok: false, error: 'unauthorized' });
 
-  // sanity: RPC je Avalanche C-Chain
+  // sanity: chain id
   const id = await chainId();
   if (!id.ok || String(id.result).toLowerCase() !== EXPECTED_CHAIN_ID_HEX) {
     return json(500, { ok: false, code: 'rpc_chain_mismatch', message: 'RPC endpoint is not an Avalanche C-Chain node.' });
@@ -125,23 +124,30 @@ export async function POST(req: NextRequest) {
   tx = normalizeTxHash(tx);
   if (!isEvmHash(tx)) return json(400, { ok: false, code: 'invalid_payload', message: 'Invalid transaction hash format.' });
 
-  // fetch tx & receipt
   const [tr, rr] = await Promise.all([ getTx(tx), getReceipt(tx) ]);
   if (!tr.ok || !rr.ok) return json(502, { ok: false, code: 'rpc_error', message: 'An error occurred while fetching the transaction.' });
 
-  let txObj = tr.result;
-  const receipt = rr.result;
+  let txObj: any = tr.result;
+  let receipt: any = rr.result; // <-- let
+
+  if (!txObj && !receipt) {
+    // neki provideri kasne: pokušaj rekonstruirati preko receipt-a iz block/index ako kasnije stigne
+    // (ovdje nemamo dodatni fallback URL; oslanjamo se na postojeći)
+    // probaj još jedan receipt fetch
+    const rr2 = await getReceipt(tx);
+    if (rr2.ok && rr2.result) receipt = rr2.result;
+  }
+
+  if (!txObj && receipt?.blockHash && typeof receipt?.transactionIndex === 'string') {
+    const byIdx = await getTxByBlockAndIndex(String(receipt.blockHash), String(receipt.transactionIndex));
+    if (byIdx.ok) txObj = (byIdx as any).result;
+  }
 
   if (!txObj && !receipt) {
     return json200({ ok: false, code: 'tx_not_found', message: 'The hash of this transaction does not exist on the blockchain.', data: { txHash: tx } });
   }
   if (receipt && !receipt.blockNumber) {
     return json200({ ok: false, code: 'rpc_error', message: 'Transaction is not yet confirmed on-chain.', data: { txHash: tx } });
-  }
-
-  if (!txObj && receipt?.blockHash && typeof receipt?.transactionIndex === 'string') {
-    const byIdx = await getTxByBlockAndIndex(String(receipt.blockHash), String(receipt.transactionIndex));
-    if (byIdx.ok) txObj = byIdx.result;
   }
 
   const br = await getBlock(String(receipt.blockNumber));

@@ -10,7 +10,7 @@ type J = Record<string, unknown>;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
 const PRIMARY_RPC = process.env.BSC_RPC_URL || '';
-const FALLBACK_RPC = process.env.BSC_RPC_URL_FALLBACK || ''; // optional, e.g. https://bsc-dataseed.binance.org
+const FALLBACK_RPC = process.env.BSC_RPC_URL_FALLBACK || ''; // e.g. https://bsc-dataseed.binance.org
 const EXPECTED_CHAIN_ID_HEX = '0x38'; // 56 (BSC mainnet)
 
 const json = (status: number, payload: J) =>
@@ -55,7 +55,7 @@ async function rpcOnce(url: string, method: string, params: any[]): Promise<RpcR
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
-    // harmless on non-NowNodes endpoints
+    // harmless na public endpointima, potrebni na NowNodes
     if (NOWNODES_API_KEY) { headers['api-key'] = NOWNODES_API_KEY; headers['x-api-key'] = NOWNODES_API_KEY; }
     const res = await fetch(url, { method: 'POST', headers, body, cache: 'no-store' });
     const txt = await res.text();
@@ -69,10 +69,8 @@ async function rpcOnce(url: string, method: string, params: any[]): Promise<RpcR
 }
 
 async function rpc(method: string, params: any[]) {
-  // try primary
   const first = await rpcOnce(PRIMARY_RPC, method, params);
   if (first.ok) return first;
-  // if primary has hard error and we have fallback, try fallback
   if (FALLBACK_RPC) {
     const second = await rpcOnce(FALLBACK_RPC, method, params);
     if (second.ok) return second;
@@ -148,17 +146,16 @@ export async function POST(req: NextRequest) {
   if (!tr.ok || !rr.ok) return json(502, { ok: false, code: 'rpc_error', message: 'An error occurred while fetching the transaction.' });
 
   let txObj: any = tr.result;
-  const receipt: any = rr.result;
+  let receipt: any = rr.result; // <-- mora biti let da ga možemo ažurirati
 
-  // If both null, try hard-fallback only when we have an explicit fallback URL.
+  // Ako su oba null i imamo fallback URL, probaj direktno fallback endpoint (hard fallback)
   if (!txObj && !receipt && FALLBACK_RPC) {
     const [tr2, rr2] = await Promise.all([
       rpcOnce(FALLBACK_RPC, 'eth_getTransactionByHash', [tx]),
       rpcOnce(FALLBACK_RPC, 'eth_getTransactionReceipt', [tx]),
     ]);
     txObj = tr2.ok ? tr2.result : null;
-    const rc2 = rr2.ok ? rr2.result : null;
-    if (!receipt && rc2) (Object as any).assign((rr as any), { result: rc2 }); // keep same var name
+    receipt = rr2.ok ? rr2.result : null; // <-- ispravno ažuriranje
   }
 
   if (!txObj && !receipt) {
@@ -168,13 +165,23 @@ export async function POST(req: NextRequest) {
     return json200({ ok: false, code: 'rpc_error', message: 'Transaction is not yet confirmed on-chain.', data: { txHash: tx } });
   }
 
-  // If getTransactionByHash is null but we have receipt, reconstruct tx via block/index
+  // Ako i dalje nemamo txObj, ali imamo receipt, pokušaj iz bloka+indeksa
   if (!txObj && receipt?.blockHash && typeof receipt?.transactionIndex === 'string') {
     const byIdx = await getTxByBlockAndIndex(String(receipt.blockHash), String(receipt.transactionIndex));
     if (byIdx.ok) txObj = (byIdx as any).result;
   }
 
-  // need block time
+  // Ako receipt i dalje nedostaje, ali imamo txObj s blockHash, pokušaj ponovno receipt
+  if (!receipt && txObj?.blockHash) {
+    const rr3 = await getReceipt(tx);
+    if (rr3.ok) receipt = rr3.result;
+  }
+
+  if (!receipt?.blockNumber) {
+    return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
+  }
+
+  // block time
   const br = await getBlock(String(receipt.blockNumber));
   if (!br.ok) return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
   const tsSec = br.result?.timestamp ? hexToNumber(String(br.result.timestamp)) : null;
