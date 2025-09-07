@@ -54,6 +54,27 @@ declare global {
 
 type CaptchaState = 'idle' | 'ready' | 'solved' | 'expired' | 'error';
 
+// ---- helpers for chain-specific behavior ----
+const EVM_CHAINS = ['eth', 'op', 'arb', 'pol', 'avax', 'bsc'] as const;
+const isEvm = (c: string) => EVM_CHAINS.includes(c as any);
+
+// Normalize EVM tx hashes:
+// - allow 64 hex without 0x
+// - enforce 0x prefix + lowercase for consistent DB lookups
+function normalizeEvmTx(input: string) {
+  const raw = input.trim();
+  if (/^0x[0-9a-fA-F]{64}$/.test(raw)) return raw.toLowerCase();
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) return ('0x' + raw).toLowerCase();
+  return raw;
+}
+
+function expectedFormatHint(chain: string) {
+  if (isEvm(chain)) return 'Expected format: 0x + 64 hex (EVM).';
+  if (chain === 'sol') return 'Expected format: base58 signature (Solana).';
+  // generic note for UTXO & others
+  return 'Expected format: chain-native transaction id/hash.';
+}
+
 export default function ClaimPage() {
   const [chain, setChain] = useState('eth');
   const [tx, setTx] = useState('');
@@ -149,13 +170,16 @@ export default function ClaimPage() {
     setResp(null);
     setLoading(true);
 
+    // Normalize per chain before sending
+    const txToSend = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
+
     try {
       const r = await fetch('/api/claim', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           chain,
-          tx,
+          tx: txToSend,
           ...(hcaptchaEnabled ? { hcaptchaToken } : {}),
         }),
       });
@@ -218,6 +242,7 @@ export default function ClaimPage() {
             autoCapitalize="off"
             autoCorrect="off"
           />
+          <p className="mt-1 text-xs text-gray-500">{expectedFormatHint(chain)}</p>
         </div>
 
         {hcaptchaEnabled && (
