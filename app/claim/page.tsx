@@ -1,9 +1,9 @@
-// app/claim/page.tsx
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-type ClaimResponse = {
+// Backward-compat types (old public /api/claim shape)
+type ClaimResponseOld = {
   ok: boolean;
   chain?: string;
   tx?: string;
@@ -12,6 +12,19 @@ type ClaimResponse = {
   error?: string | null;
 };
 
+// New standardized shape (claim-first routes)
+type ClaimResponseNew = {
+  ok: boolean;
+  code?: string;      // 'inserted' | 'duplicate' | 'not_project_wallet' | 'tx_not_found' | 'invalid_payload' | 'rpc_error' | ...
+  message?: string;   // human-readable message
+  data?: any;
+};
+
+type AnyClaimResponse = ClaimResponseOld | ClaimResponseNew;
+
+type UiMsg = { kind: 'success' | 'info' | 'error'; text: string };
+
+// Chains UI
 const CHAINS = [
   { value: 'eth', label: 'Ethereum (ETH)' },
   { value: 'op', label: 'Optimism (OP)' },
@@ -57,12 +70,15 @@ type CaptchaState = 'idle' | 'ready' | 'solved' | 'expired' | 'error';
 const EVM_CHAINS = ['eth', 'op', 'arb', 'pol', 'avax', 'bsc'] as const;
 const isEvm = (c: string) => (EVM_CHAINS as unknown as string[]).includes(c);
 
-// Normalize EVM tx hashes: allow 64-hex without 0x; emit 0x + lowercase
+// Normalize EVM hashes: allow 64-hex without 0x; emit 0x + lowercase
 function normalizeEvmTx(input: string) {
   const raw = input.trim();
   if (/^0x[0-9a-fA-F]{64}$/.test(raw)) return raw.toLowerCase();
   if (/^[0-9a-fA-F]{64}$/.test(raw)) return ('0x' + raw).toLowerCase();
   return raw;
+}
+function isValidEvmHash(input: string) {
+  return /^0x[0-9a-fA-F]{64}$/.test(input.trim());
 }
 
 // Expected format hint per chain
@@ -94,43 +110,118 @@ function txExplorerUrl(chain: string, tx: string): string | null {
   }
 }
 
-function renderUserMessage(resp: ClaimResponse | null) {
+/**
+ * Normalize any server response to the new {ok, code, message} contract,
+ * while preserving compatibility with the legacy shape used by the old /api/claim.
+ */
+function normalizeResponse(resp: AnyClaimResponse): ClaimResponseNew {
+  // New style (preferred)
+  if (Object.prototype.hasOwnProperty.call(resp, 'code') || Object.prototype.hasOwnProperty.call(resp, 'message')) {
+    const r = resp as ClaimResponseNew;
+    return {
+      ok: !!r.ok,
+      code: r.code || '',
+      message: r.message || '',
+      data: (r as any).data,
+    };
+  }
+
+  // Legacy style mapping
+  const o = resp as ClaimResponseOld;
+  if (o.ok && o.alreadyRecorded) {
+    return {
+      ok: true,
+      code: 'duplicate',
+      message: 'The transaction has already been recorded in our project before.',
+      data: { chain: o.chain, txHash: o.tx },
+    };
+  }
+  if (o.ok && !o.alreadyRecorded) {
+    return {
+      ok: true,
+      code: 'inserted',
+      message: 'The transaction was successfully recorded on our project.',
+      data: { chain: o.chain, txHash: o.tx, inserted: o.inserted },
+    };
+  }
+
+  // Legacy error mapping
+  const err = (o.error || '').toString();
+  if (err === 'tx_not_found') {
+    return {
+      ok: false,
+      code: 'tx_not_found',
+      message: 'The hash of this transaction does not exist on the blockchain.',
+      data: { chain: o.chain, txHash: o.tx },
+    };
+  }
+  if (err === 'tx_pending') {
+    return {
+      ok: false,
+      code: 'rpc_error',
+      message: 'Transaction is not yet confirmed on-chain.',
+      data: { chain: o.chain, txHash: o.tx },
+    };
+  }
+  if (err === 'invalid_tx_format') {
+    return {
+      ok: false,
+      code: 'invalid_payload',
+      message: 'Hash format is not correct.',
+    };
+  }
+  return {
+    ok: false,
+    code: 'rpc_error',
+    message: err || 'Your request could not be processed.',
+    data: { chain: o.chain, txHash: o.tx },
+  };
+}
+
+function classify(resp: ClaimResponseNew): UiMsg {
+  const code = resp.code || '';
+  if (resp.ok && code === 'inserted') {
+    return { kind: 'success', text: 'The transaction was successfully recorded on our project.' };
+  }
+  if (resp.ok && code === 'duplicate') {
+    return { kind: 'info', text: 'The transaction has already been recorded in our project before.' };
+  }
+  if (!resp.ok && code === 'not_project_wallet') {
+    return { kind: 'error', text: 'The transaction is not directed to our project. The wallet address does not belong to this project.' };
+  }
+  if (!resp.ok && code === 'tx_not_found') {
+    return { kind: 'error', text: 'The hash of this transaction does not exist on the blockchain.' };
+  }
+  if (!resp.ok && code === 'invalid_payload') {
+    return { kind: 'error', text: 'Hash format is not correct.' };
+  }
+  if (!resp.ok) {
+    return { kind: 'error', text: resp.message || 'Your request could not be processed.' };
+  }
+  return { kind: 'info', text: resp.message || 'Processed.' };
+}
+
+function renderUserMessage(resp: ClaimResponseNew | null, chain: string, tx: string) {
   if (!resp) return null;
-  const link = resp.chain && resp.tx ? txExplorerUrl(resp.chain, resp.tx) : null;
+  const link = tx ? txExplorerUrl(chain, tx) : null;
 
-  if (resp.ok && resp.alreadyRecorded) {
-    return (
-      <div className="space-y-1">
-        <div>Your transaction is already recorded in our database ✅</div>
-        {link && <a href={link} target="_blank" rel="noreferrer" className="inline-block text-blue-600 underline">View on explorer</a>}
-      </div>
-    );
-  }
-  if (resp.ok && !resp.alreadyRecorded) {
-    return (
-      <div className="space-y-1">
-        <div>Your transaction has been successfully recorded ✅</div>
-        {link && <a href={link} target="_blank" rel="noreferrer" className="inline-block text-blue-600 underline">View on explorer</a>}
-      </div>
-    );
-  }
+  const ui = classify(resp);
 
-  const e = (resp.error || '').toString();
-  if (e === 'tx_not_found') {
-    return <div>We could not find this transaction on the selected chain yet. If it was just submitted, please try again in a few minutes.</div>;
-  }
-  if (e === 'tx_pending') {
-    return <div>This transaction is not confirmed on the selected chain yet. Please try again later once it has enough confirmations.</div>;
-  }
-  return <div>Error: {resp.error}</div>;
+  return (
+    <div className="space-y-1">
+      <div>{ui.text}</div>
+      {link && <a href={link} target="_blank" rel="noreferrer" className="inline-block text-blue-600 underline">View on explorer</a>}
+    </div>
+  );
 }
 
 export default function ClaimPage() {
   const [chain, setChain] = useState('eth');
   const [tx, setTx] = useState('');
   const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [resp, setResp] = useState<ClaimResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const [resp, setResp] = useState<ClaimResponseNew | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const hcaptchaEnabled = useMemo(() => !!HCAPTCHA_SITE_KEY, []);
@@ -146,20 +237,15 @@ export default function ClaimPage() {
     function ensureScript(): Promise<void> {
       return new Promise((resolve, reject) => {
         if (window.hcaptcha && typeof window.hcaptcha.render === 'function') {
-          resolve();
-          return;
+          resolve(); return;
         }
         if (document.getElementById('hcaptcha-script')) {
           const check = setInterval(() => {
             if (window.hcaptcha && typeof window.hcaptcha.render === 'function') {
-              clearInterval(check);
-              resolve();
+              clearInterval(check); resolve();
             }
           }, 50);
-          setTimeout(() => {
-            clearInterval(check);
-            reject(new Error('hcaptcha_not_ready'));
-          }, 5000);
+          setTimeout(() => { clearInterval(check); reject(new Error('hcaptcha_not_ready')); }, 5000);
           return;
         }
         const s = document.createElement('script');
@@ -180,18 +266,9 @@ export default function ClaimPage() {
 
         captchaWidgetIdRef.current = window.hcaptcha!.render(captchaContainerRef.current, {
           sitekey: HCAPTCHA_SITE_KEY,
-          callback: (token: string) => {
-            setHcaptchaToken(token);
-            setCaptchaState('solved');
-          },
-          'expired-callback': () => {
-            setHcaptchaToken(undefined);
-            setCaptchaState('expired');
-          },
-          'error-callback': () => {
-            setHcaptchaToken(undefined);
-            setCaptchaState('error');
-          },
+          callback: (token: string) => { setHcaptchaToken(token); setCaptchaState('solved'); },
+          'expired-callback': () => { setHcaptchaToken(undefined); setCaptchaState('expired'); },
+          'error-callback': () => { setHcaptchaToken(undefined); setCaptchaState('error'); },
           theme:
             typeof window !== 'undefined' &&
             window.matchMedia &&
@@ -202,9 +279,7 @@ export default function ClaimPage() {
         });
         setCaptchaState('ready');
       })
-      .catch(() => {
-        setCaptchaState('error');
-      });
+      .catch(() => setCaptchaState('error'));
   }, [hcaptchaEnabled]);
 
   const resetCaptcha = () => {
@@ -215,52 +290,56 @@ export default function ClaimPage() {
     }
   };
 
-  const onSubmit = async (e: React.FormEvent) => {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setResp(null);
-    setLoading(true);
 
-    const txToSend = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
-    const msg = message.trim();
-    if (msg.length > 280) {
-      setError('Message is too long (max 280 characters).');
-      setLoading(false);
+    // Normalize & validate
+    const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
+    if (isEvm(chain) && !isValidEvmHash(normalizedTx)) {
+      const norm: ClaimResponseNew = { ok: false, code: 'invalid_payload', message: 'Hash format is not correct.' };
+      setResp(norm);
+      setError(norm.message || 'Invalid payload');
       return;
     }
 
+    const msg = message.trim();
+    if (msg.length > 280) {
+      setError('Message is too long (max 280 characters).');
+      return;
+    }
+
+    setBusy(true);
     try {
       const r = await fetch('/api/claim', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           chain,
-          tx: txToSend,
+          tx: normalizedTx,
           message: msg || undefined,
           ...(hcaptchaEnabled ? { hcaptchaToken } : {}),
         }),
+        cache: 'no-store',
       });
-      const j = (await r.json()) as ClaimResponse;
-      setResp(j);
-      if (!j.ok) {
-        setError(j.error ?? 'Unknown error');
-        resetCaptcha();
-      } else {
-        resetCaptcha();
-      }
+
+      let raw: AnyClaimResponse;
+      try { raw = await r.json(); } catch { raw = { ok: false, error: 'invalid_response' } as ClaimResponseOld; }
+
+      const norm = normalizeResponse(raw);
+      setResp(norm);
+      if (!norm.ok) setError(norm.message || 'Request failed.');
+      resetCaptcha();
     } catch {
       setError('Network error');
       resetCaptcha();
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  };
+  }
 
-  const submitDisabled =
-    loading ||
-    !tx.trim() ||
-    (hcaptchaEnabled && !hcaptchaToken);
-
+  const submitDisabled = busy || !tx.trim() || (hcaptchaEnabled && !hcaptchaToken);
   const msgLen = message.trim().length;
 
   return (
@@ -305,9 +384,7 @@ export default function ClaimPage() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium">
-            Message (optional)
-          </label>
+          <label className="block text-sm font-medium">Message (optional)</label>
           <textarea
             className="mt-1 w-full rounded-xl border px-3 py-2"
             rows={3}
@@ -337,7 +414,7 @@ export default function ClaimPage() {
           disabled={submitDisabled}
           className="rounded-2xl bg-black px-4 py-2 text-white disabled:opacity-60"
         >
-          {loading ? 'Submitting…' : 'Submit'}
+          {busy ? 'Submitting…' : 'Submit'}
         </button>
       </form>
 
@@ -349,7 +426,7 @@ export default function ClaimPage() {
 
       {resp && (
         <div className="mt-4 rounded-xl border bg-gray-50 p-3 text-sm">
-          {renderUserMessage(resp)}
+          {renderUserMessage(resp, chain, isEvm(chain) ? normalizeEvmTx(tx) : tx.trim())}
         </div>
       )}
     </main>
