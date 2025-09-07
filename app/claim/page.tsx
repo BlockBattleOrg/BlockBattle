@@ -54,7 +54,6 @@ declare global {
 
 type CaptchaState = 'idle' | 'ready' | 'solved' | 'expired' | 'error';
 
-// ---- helpers for chain-specific behavior ----
 const EVM_CHAINS = ['eth', 'op', 'arb', 'pol', 'avax', 'bsc'] as const;
 const isEvm = (c: string) => (EVM_CHAINS as unknown as string[]).includes(c);
 
@@ -95,26 +94,15 @@ function txExplorerUrl(chain: string, tx: string): string | null {
   }
 }
 
-// Friendly message renderer (success + common errors)
 function renderUserMessage(resp: ClaimResponse | null) {
   if (!resp) return null;
-
   const link = resp.chain && resp.tx ? txExplorerUrl(resp.chain, resp.tx) : null;
 
   if (resp.ok && resp.alreadyRecorded) {
     return (
       <div className="space-y-1">
         <div>Your transaction is already recorded in our database ✅</div>
-        {link && (
-          <a
-            href={link}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-block text-blue-600 underline"
-          >
-            View on explorer
-          </a>
-        )}
+        {link && <a href={link} target="_blank" rel="noreferrer" className="inline-block text-blue-600 underline">View on explorer</a>}
       </div>
     );
   }
@@ -122,37 +110,17 @@ function renderUserMessage(resp: ClaimResponse | null) {
     return (
       <div className="space-y-1">
         <div>Your transaction has been successfully recorded ✅</div>
-        {link && (
-          <a
-            href={link}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-block text-blue-600 underline"
-          >
-            View on explorer
-          </a>
-        )}
+        {link && <a href={link} target="_blank" rel="noreferrer" className="inline-block text-blue-600 underline">View on explorer</a>}
       </div>
     );
   }
 
-  // Friendly error messages
   const e = (resp.error || '').toString();
   if (e === 'tx_not_found') {
-    return (
-      <div>
-        We could not find this transaction on the selected chain yet. If it was
-        just submitted, please try again in a few minutes.
-      </div>
-    );
+    return <div>We could not find this transaction on the selected chain yet. If it was just submitted, please try again in a few minutes.</div>;
   }
   if (e === 'tx_pending') {
-    return (
-      <div>
-        This transaction is not confirmed on the selected chain yet. Please try
-        again later once it has enough confirmations.
-      </div>
-    );
+    return <div>This transaction is not confirmed on the selected chain yet. Please try again later once it has enough confirmations.</div>;
   }
   return <div>Error: {resp.error}</div>;
 }
@@ -160,6 +128,7 @@ function renderUserMessage(resp: ClaimResponse | null) {
 export default function ClaimPage() {
   const [chain, setChain] = useState('eth');
   const [tx, setTx] = useState('');
+  const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<ClaimResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -252,8 +221,13 @@ export default function ClaimPage() {
     setResp(null);
     setLoading(true);
 
-    // Normalize per chain before sending
     const txToSend = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
+    const msg = message.trim();
+    if (msg.length > 280) {
+      setError('Message is too long (max 280 characters).');
+      setLoading(false);
+      return;
+    }
 
     try {
       const r = await fetch('/api/claim', {
@@ -262,6 +236,7 @@ export default function ClaimPage() {
         body: JSON.stringify({
           chain,
           tx: txToSend,
+          message: msg || undefined,
           ...(hcaptchaEnabled ? { hcaptchaToken } : {}),
         }),
       });
@@ -285,6 +260,8 @@ export default function ClaimPage() {
     loading ||
     !tx.trim() ||
     (hcaptchaEnabled && !hcaptchaToken);
+
+  const msgLen = message.trim().length;
 
   return (
     <main className="mx-auto max-w-xl px-4 py-10">
@@ -325,6 +302,21 @@ export default function ClaimPage() {
             autoCorrect="off"
           />
           <p className="mt-1 text-xs text-gray-500">{expectedFormatHint(chain)}</p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium">
+            Message (optional)
+          </label>
+          <textarea
+            className="mt-1 w-full rounded-xl border px-3 py-2"
+            rows={3}
+            maxLength={280}
+            placeholder="Say something about your contribution (max 280 chars)…"
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+          />
+          <div className="mt-1 text-xs text-gray-500">{msgLen}/280</div>
         </div>
 
         {hcaptchaEnabled && (
