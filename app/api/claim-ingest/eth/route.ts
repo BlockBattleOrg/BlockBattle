@@ -1,9 +1,10 @@
 // app/api/claim-ingest/eth/route.ts
-// ETH claim-ingest (schema-aware with safe MINIMAL fallback)
+// ETH claim-ingest (schema-aware with ULTRA-MINIMAL fallback)
 // - Auth: x-cron-secret
 // - Verify on-chain: receipt (confirmed) + tx (value/from/to) + block (timestamp)
-// - Insert ONLY into columns that truly exist; if information_schema is unavailable, use MINIMAL fallback payload
-// - Idempotent insert; optional wallet linking by to_address (if wallets table is readable)
+// - Insert ONLY columns that truly exist; if information_schema is unavailable, use MINIMAL payload:
+//   -> tx_hash, amount, block_time (if available), wallet_id (if exists & resolved)
+// - Idempotent insert
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -67,7 +68,7 @@ async function rpcCall(method: string, params: any[]) {
     const res = await fetch(ETH_RPC_URL, { method: 'POST', headers, body });
     const txt = await res.text();
     let j: any = null;
-    try { j = txt ? JSON.parse(txt) : null; } catch { /* pass */ }
+    try { j = txt ? JSON.parse(txt) : null; } catch {}
     if (!res.ok) return { ok: false as const, error: `rpc_http_${res.status}:${txt || 'no_body'}` };
     if (j?.error) return { ok: false as const, error: `rpc_${j.error?.code}:${j.error?.message}` };
     return { ok: true as const, result: j?.result };
@@ -79,29 +80,8 @@ const fetchEthReceipt = (h: string) => rpcCall('eth_getTransactionReceipt', [h])
 const fetchEthTx = (h: string) => rpcCall('eth_getTransactionByHash', [h]);
 const fetchBlockByNumber = (bnHex: string) => rpcCall('eth_getBlockByNumber', [bnHex, false]);
 
-// ---------- USD pricing via lib/fx.ts (optional, best-effort) ----------
-async function priceEthToUsdOrNull(amountEthStr: string): Promise<{ usd: number; pricedAt: string } | null> {
-  try {
-    const fx: any = await import('@/lib/fx');
-    const fns = ['getUsdPrices', 'fetchUsdPrices', 'getPrices', 'pricesForSymbols'].filter(
-      (k) => typeof fx[k] === 'function'
-    );
-    if (fns.length === 0) return null;
-    const getPrices = fx[fns[0]].bind(fx);
-    const prices: Record<string, number> = await getPrices(['ETH']);
-    const usdPrice = prices?.ETH ?? prices?.eth ?? null;
-    if (typeof usdPrice !== 'number') return null;
-    const eth = parseFloat(amountEthStr || '0');
-    if (!Number.isFinite(eth)) return null;
-    return { usd: +(eth * usdPrice).toFixed(2), pricedAt: new Date().toISOString() };
-  } catch {
-    return null;
-  }
-}
-
 // ---------- schema helpers ----------
 type ColsInfo = { cols: Set<string>; fromInfoSchema: boolean };
-
 async function getTableColumns(schema: string, table: string): Promise<ColsInfo> {
   const { data, error } = await supa()
     .from('information_schema.columns' as any)
@@ -112,9 +92,9 @@ async function getTableColumns(schema: string, table: string): Promise<ColsInfo>
   if (!error && Array.isArray(data) && data.length) {
     return { cols: new Set((data as any[]).map((r) => r.column_name)), fromInfoSchema: true };
   }
-  // MINIMAL fallback – samo ključna polja; NE uključuj asset/currency/symbol/network/source
+  // ULTRA-MINIMAL fallback: samo ključna polja za koja znamo da ih trebamo/želimo
   if (table === 'contributions') {
-    return { cols: new Set(['tx_hash', 'amount', 'block_time', 'block_number', 'block_hash', 'from_address', 'to_address', 'status', 'fee', 'amount_usd', 'priced_at', 'wallet_id']), fromInfoSchema: false };
+    return { cols: new Set(['tx_hash', 'amount', 'block_time', 'wallet_id']), fromInfoSchema: false };
   }
   if (table === 'wallets') {
     return { cols: new Set(['id','wallet_id','address','addr','network','symbol','chain']), fromInfoSchema: false };
@@ -184,23 +164,6 @@ export async function POST(req: NextRequest) {
   const valueHex = txObj.value ?? '0x0';
   const amountEthStr = weiToEthString(String(valueHex));
   const toAddress = (txObj.to ? String(txObj.to) : '').toLowerCase();
-  const fromAddress = (txObj.from ? String(txObj.from) : '').toLowerCase();
-  const status = receipt.status === '0x1' ? 'success' : 'failed';
-
-  // fee (optional)
-  let feeEthStr: string | null = null;
-  try {
-    const gasUsed = receipt.gasUsed ? hexToBigInt(String(receipt.gasUsed)) : 0n;
-    const effPrice = receipt.effectiveGasPrice ? hexToBigInt(String(receipt.effectiveGasPrice)) : 0n;
-    const feeWei = gasUsed * effPrice;
-    if (feeWei > 0) feeEthStr = weiToEthString('0x' + feeWei.toString(16));
-  } catch {}
-
-  // USD (best-effort)
-  let amountUsd: number | null = null;
-  let pricedAt: string | null = null;
-  const priced = await priceEthToUsdOrNull(amountEthStr);
-  if (priced) { amountUsd = priced.usd; pricedAt = priced.pricedAt; }
 
   try {
     // idempotent pre-check
@@ -214,44 +177,21 @@ export async function POST(req: NextRequest) {
       return json(200, { ok: true, inserted: null, alreadyRecorded: true });
     }
 
-    // detect columns
-    const { cols, fromInfoSchema } = await getTableColumns('public', 'contributions');
+    // detect columns (or minimal fallback)
+    const { cols } = await getTableColumns('public', 'contributions');
     const payload: Record<string, any> = {};
 
-    // always try to set these two (both in info_schema and minimal fallback)
+    // ULTRA-MINIMAL set
     if (cols.has('tx_hash')) payload.tx_hash = tx;
     if (cols.has('amount'))  payload.amount  = amountEthStr;
-
-    // block_time is often NOT NULL → fill if exists and we have timestamp
     if (blockTimeISO && cols.has('block_time')) payload.block_time = blockTimeISO;
 
-    // Only if columns exist (and ONLY if we got them from info_schema or they are in minimal fallback)
-    if (cols.has('block_number') && receipt.blockNumber) payload.block_number = hexToNumber(String(receipt.blockNumber));
-    if (cols.has('block_hash') && receipt.blockHash) payload.block_hash = String(receipt.blockHash);
-    if (cols.has('from_address') && fromAddress) payload.from_address = fromAddress;
-    if (cols.has('to_address') && toAddress) payload.to_address = toAddress;
-    if (cols.has('status')) payload.status = status;
-    if (feeEthStr && cols.has('fee')) payload.fee = feeEthStr;
-
-    if (amountUsd !== null && cols.has('amount_usd')) payload.amount_usd = amountUsd;
-    if (pricedAt !== null && cols.has('priced_at')) payload.priced_at = pricedAt;
-
-    // IMPORTANT: only set identity-ish fields if we REALLY saw them in information_schema
-    if (fromInfoSchema) {
-      if (cols.has('currency')) payload.currency = 'ETH';
-      if (cols.has('symbol'))   payload.symbol   = 'ETH';
-      if (cols.has('asset'))    payload.asset    = 'ETH';
-      if (cols.has('network'))  payload.network  = 'ethereum';
-      if (cols.has('source'))   payload.source   = 'claim';
-    }
-
-    // wallet mapping (best-effort)
+    // wallet mapping (only if wallet_id exists AND wallets have readable schema)
     if (toAddress && cols.has('wallet_id')) {
       const walletId = await resolveWalletIdByAddress(toAddress);
       if (walletId) payload.wallet_id = walletId;
     }
 
-    // safety
     if (!('tx_hash' in payload) || !('amount' in payload)) {
       return json(500, { ok: false, error: 'server_misconfigured_missing_columns(tx_hash/amount)' });
     }
