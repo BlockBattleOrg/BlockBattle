@@ -1,11 +1,11 @@
 // app/api/claim-ingest/eth/route.ts
-// ETH claim-ingest (schema-aware, robust wallet mapping + optional USD pricing)
+// ETH claim-ingest (schema-aware, ETH-first wallet resolution with scoring)
 // - Auth: x-cron-secret
-// - On-chain verify: receipt confirmed, tx (value/from/to), block (timestamp)
-// - Insert ONLY columns that truly exist; detection via information_schema if moguće,
-//   inače koristimo ultra-minimal (tx_hash, amount, block_time, wallet_id)
-// - wallet_id: tolerantno mapiranje po to_address (lowercase, bez 0x), bez dodatnih filtera
-// - amount_usd/priced_at: samo ako kolone postoje (detekcija preko 'select .. limit 0')
+// - Verify: receipt confirmed, tx (value/from/to), block (timestamp)
+// - Insert ONLY columns that exist (info_schema when available; ultra-minimal fallback otherwise)
+// - wallet_id resolution: fetch all wallet rows for address, score by ETH hints (network/chain/symbol/asset), pick best if confident
+// - amount_usd/priced_at only if columns exist
+// - Idempotent insert
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -111,73 +111,98 @@ async function infoSchemaColumns(schema: string, table: string): Promise<Set<str
   }
   return null;
 }
-
-// “probna selekcija” – ako stupci ne postoje, PostgREST će vratiti error
 async function tableHasColumns(table: string, cols: string[]): Promise<Record<string, boolean>> {
   const map: Record<string, boolean> = {};
   try {
     const sel = cols.join(',');
     const { error } = await supa().from(table as any).select(sel).limit(0);
-    // ako nije error, svi traženi stupci postoje
     cols.forEach((c) => (map[c] = !error));
   } catch {
     cols.forEach((c) => (map[c] = false));
   }
   return map;
 }
-
-// ultra-minimal fallback set (kad info_schema nije dostupna)
 function fallbackContributionCols(): Set<string> {
+  // ULTRA-MINIMAL fallback (neće spominjati opcionalne kolone)
   return new Set(['tx_hash','amount','block_time','wallet_id']);
 }
 
-// ---------- wallet resolver ----------
-async function resolveWalletIdByAddress(toAddr: string): Promise<string | null> {
+// ---------- wallet resolver (ETH-aware scoring) ----------
+function scoreWalletRowETH(row: any, addrCol: string): number {
+  const v = (s: any) => String(s ?? '').toLowerCase();
+  let score = 0;
+  // address equality već je uvjet :)
+  // prefer ETH mainnet hints:
+  if (v(row.network) === 'ethereum') score += 8;
+  const ch = v(row.chain);
+  if (ch === 'eth' || ch === 'ethereum' || ch === 'eth_mainnet') score += 4;
+  const sym = v(row.symbol);
+  if (sym === 'eth') score += 2;
+  const asset = v(row.asset);
+  if (asset === 'eth') score += 1;
+  return score;
+}
+async function resolveWalletIdByAddressETH(toAddr: string): Promise<string | null> {
   const addrLower = toAddr.toLowerCase();
   const addrNo0x  = lowerNo0x(toAddr);
 
-  // detektiraj kolone u wallets (ili pretpostavi minimalno)
-  const wcols = (await infoSchemaColumns('public','wallets')) ?? new Set(['id','wallet_id','address','addr']);
+  // detekcija kolona u wallets (ili minimalni set)
+  const wcols = (await infoSchemaColumns('public','wallets')) ?? new Set(['id','wallet_id','address','addr','network','symbol','chain','asset']);
   const idCol   = wcols.has('id') ? 'id' : (wcols.has('wallet_id') ? 'wallet_id' : null);
   const addrCol = wcols.has('address') ? 'address' : (wcols.has('addr') ? 'addr' : null);
   if (!idCol || !addrCol) return null;
 
-  const sel = `${idCol}, ${addrCol}`;
-  // 1) exact lowercase eq
-  let q: any = supa().from('wallets').select(sel).eq(addrCol, addrLower).limit(1);
-  let { data, error } = await q;
-  if (error) return null;
-  if (data && data.length) return String(data[0][idCol]);
+  // dohvat svih kandidata za tu adresu (eq/ilike i bez 0x)
+  const selCols = [idCol, addrCol].concat(['network','chain','symbol','asset'].filter(c => wcols.has(c))).join(', ');
 
-  // 2) ilike lowercase
-  q = supa().from('wallets').select(sel).ilike(addrCol, addrLower).limit(1);
-  ({ data, error } = await q);
-  if (!error && data && data.length) return String(data[0][idCol]);
+  const queries: any[] = [
+    supa().from('wallets').select(selCols).eq(addrCol, addrLower).limit(25),
+    supa().from('wallets').select(selCols).ilike(addrCol, addrLower).limit(25),
+    supa().from('wallets').select(selCols).or(`${addrCol}.eq.${addrNo0x},${addrCol}.ilike.${addrNo0x}`).limit(25),
+  ];
 
-  // 3) bez 0x varijanta (često se adrese spremaju bez prefiksa)
-  q = supa().from('wallets').select(sel).or(`${addrCol}.eq.${addrNo0x},${addrCol}.ilike.${addrNo0x}`).limit(1);
-  ({ data, error } = await q);
-  if (!error && data && data.length) return String(data[0][idCol]);
+  let candidates: any[] = [];
+  for (const q of queries) {
+    const { data, error } = await q;
+    if (!error && Array.isArray(data) && data.length) {
+      candidates = data;
+      break;
+    }
+  }
+  if (!candidates.length) return null;
 
-  return null;
+  // rangiraj po ETH hintovima
+  let best: { id: string; score: number } | null = null;
+  for (const row of candidates) {
+    const score = scoreWalletRowETH(row, addrCol);
+    const idVal = row[idCol];
+    if (idVal == null) continue;
+    if (!best || score > best.score) {
+      best = { id: String(idVal), score };
+    }
+  }
+
+  // prag sigurnosti: zahtijevamo barem neki ETH hint; ako 0, radije nemoj mapirati
+  if (!best || best.score <= 0) return null;
+  return best.id;
 }
 
 // ---------- handler ----------
 export async function POST(req: NextRequest) {
-  // auth
+  // 0) auth
   const sec = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || sec !== CRON_SECRET) {
     return json(401, { ok: false, error: 'unauthorized' });
   }
 
-  // input
+  // 1) input
   const url = new URL(req.url);
   let tx = (url.searchParams.get('tx') || '').trim();
   if (!tx) return json(400, { ok: false, error: 'missing_tx' });
   tx = normalizeEvm(tx);
   if (!isValidEvmHash(tx)) return json(400, { ok: false, error: 'invalid_tx_format:expect_0x64_hex' });
 
-  // chain data
+  // 2) on-chain data
   const rcp = await fetchEthReceipt(tx);
   if (!rcp.ok) {
     if (rcp.error.includes('notFound')) return json(404, { ok: false, error: 'tx_not_found' });
@@ -199,7 +224,7 @@ export async function POST(req: NextRequest) {
   const amountEthStr = weiToEthString(String(txObj.value ?? '0x0'));
   const toAddress = String(txObj.to || '').toLowerCase();
 
-  // idempotent pre-check
+  // 3) idempotent pre-check
   const { data: found, error: qErr } = await supa()
     .from('contributions')
     .select('id')
@@ -209,23 +234,23 @@ export async function POST(req: NextRequest) {
     return json(200, { ok: true, inserted: null, alreadyRecorded: true });
   }
 
-  // detekcija sheme contributions
+  // 4) schema detection (or fallback)
   const infoCols = await infoSchemaColumns('public','contributions');
   const cols = infoCols ?? fallbackContributionCols();
 
-  // payload (uvijek ova 2; block_time i wallet_id po potrebi)
+  // 5) payload (ultra-minimal + dodatci samo ako kolone postoje)
   const payload: Record<string, any> = {};
   if (cols.has('tx_hash')) payload.tx_hash = tx;
   if (cols.has('amount'))  payload.amount  = amountEthStr;
   if (blockTimeISO && cols.has('block_time')) payload.block_time = blockTimeISO;
 
-  // wallet mapiranje (ako kolona postoji)
+  // wallet mapiranje (ETH-aware scoring), samo ako kolona postoji
   if (toAddress && cols.has('wallet_id')) {
-    const walletId = await resolveWalletIdByAddress(toAddress);
+    const walletId = await resolveWalletIdByAddressETH(toAddress);
     if (walletId) payload.wallet_id = walletId;
   }
 
-  // optional USD pricing (samo ako kolone postoje!)
+  // optional USD pricing (samo ako kolone postoje)
   const usdFlags = await tableHasColumns('contributions', ['amount_usd','priced_at']);
   if ((usdFlags.amount_usd || usdFlags.priced_at)) {
     const priced = await priceEthToUsdOrNull(amountEthStr);
@@ -239,6 +264,7 @@ export async function POST(req: NextRequest) {
     return json(500, { ok: false, error: 'server_misconfigured_missing_columns(tx_hash/amount)' });
   }
 
+  // 6) insert
   const { data: ins, error: insErr } = await supa()
     .from('contributions')
     .insert(payload)
