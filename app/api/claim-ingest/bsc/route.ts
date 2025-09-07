@@ -9,10 +9,9 @@ export const dynamic = 'force-dynamic';
 type J = Record<string, unknown>;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
-// ⚠️ No fallback to EVM_RPC_URL. Require correct per-chain RPC.
-const BSC_RPC_URL = process.env.BSC_RPC_URL || '';
+const BSC_RPC_URL = process.env.BSC_RPC_URL || ''; // <- ostaje ista env var
 
-const EXPECTED_CHAIN_ID_HEX = '0x38'; // 56
+const EXPECTED_CHAIN_ID_HEX = '0x38'; // 56 (BSC mainnet)
 
 const json = (status: number, payload: J) =>
   NextResponse.json(payload, { status, headers: { 'cache-control': 'no-store' } });
@@ -69,6 +68,8 @@ const chainId   = () => rpc('eth_chainId', []);
 const getTx     = (h: string) => rpc('eth_getTransactionByHash', [h]);
 const getReceipt= (h: string) => rpc('eth_getTransactionReceipt', [h]);
 const getBlock  = (n: string) => rpc('eth_getBlockByNumber', [n, false]);
+const getTxByBlockAndIndex = (blockHash: string, txIndexHex: string) =>
+  rpc('eth_getTransactionByBlockHashAndIndex', [blockHash, txIndexHex]);
 
 // ---------- USD pricing ----------
 async function priceEthToUsdOrNull(amountEthStr: string): Promise<{ usd: number; pricedAt: string } | null> {
@@ -108,10 +109,7 @@ export async function POST(req: NextRequest) {
   const sec = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || sec !== CRON_SECRET) return json(401, { ok: false, error: 'unauthorized' });
 
-  // config sanity
-  if (!BSC_RPC_URL) {
-    return json(500, { ok: false, code: 'rpc_misconfigured', message: 'RPC endpoint for BSC is not configured.' });
-  }
+  // sanity: RPC is BSC
   const id = await chainId();
   if (!id.ok || String(id.result).toLowerCase() !== EXPECTED_CHAIN_ID_HEX) {
     return json(500, { ok: false, code: 'rpc_chain_mismatch', message: 'RPC endpoint is not a BNB Smart Chain node.' });
@@ -131,25 +129,31 @@ export async function POST(req: NextRequest) {
   const [tr, rr] = await Promise.all([ getTx(tx), getReceipt(tx) ]);
   if (!tr.ok || !rr.ok) return json(502, { ok: false, code: 'rpc_error', message: 'An error occurred while fetching the transaction.' });
 
-  const txObj = tr.result;
+  let txObj = tr.result;
   const receipt = rr.result;
 
-  if (!txObj) {
+  if (!txObj && !receipt) {
     return json200({ ok: false, code: 'tx_not_found', message: 'The hash of this transaction does not exist on the blockchain.', data: { txHash: tx } });
   }
-  if (!receipt?.blockNumber) {
+  if (receipt && !receipt.blockNumber) {
     return json200({ ok: false, code: 'rpc_error', message: 'Transaction is not yet confirmed on-chain.', data: { txHash: tx } });
   }
 
-  const br = await getBlock(receipt.blockNumber);
-  if (!br.ok) return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
+  // Some providers return null for getTransactionByHash even for confirmed tx.
+  if (!txObj && receipt?.blockHash && typeof receipt?.transactionIndex === 'string') {
+    const byIdx = await getTxByBlockAndIndex(String(receipt.blockHash), String(receipt.transactionIndex));
+    if (byIdx.ok) txObj = byIdx.result;
+  }
 
+  // need block time regardless
+  const br = await getBlock(String(receipt.blockNumber));
+  if (!br.ok) return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
   const tsSec = br.result?.timestamp ? hexToNumber(String(br.result.timestamp)) : null;
   if (!tsSec) return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
   const blockTimeISO = new Date(tsSec * 1000).toISOString();
 
-  const amountEthStr = weiToEthString(String(txObj.value ?? '0x0'));
-  const toAddress = String(txObj.to || '').toLowerCase();
+  const amountEthStr = txObj ? weiToEthString(String(txObj.value ?? '0x0')) : '0';
+  const toAddress = txObj ? String(txObj.to || '').toLowerCase() : (receipt?.to ? String(receipt.to).toLowerCase() : '');
 
   // idempotent pre-check
   {
