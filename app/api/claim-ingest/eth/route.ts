@@ -1,10 +1,10 @@
 // app/api/claim-ingest/eth/route.ts
-// ETH claim-ingest (claim-first, schema-agnostic)
-// - Auth: x-cron-secret
-// - Verify on-chain (receipt + tx.value)
-// - Insert contribution with required fields, but ONLY for columns that actually exist
-//   (reads information_schema.columns for 'public.contributions')
-// - Best-effort: amount_usd + priced_at via lib/fx.ts (if available)
+// ETH claim-ingest (claim-first, schema-aware)
+// - Auth via x-cron-secret
+// - Verify on-chain: receipt (confirmed) + tx (value) + block (timestamp)
+// - Insert only into columns that actually exist in public.contributions
+// - Fills NOT NULLs like block_time if present
+// - Best-effort amount_usd/priced_at via lib/fx.ts
 // - Idempotent: SELECT -> INSERT; duplicate => alreadyRecorded:true
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -45,6 +45,9 @@ function hexToBigInt(hex: string): bigint {
   const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
   return BigInt('0x' + (clean || '0'));
 }
+function hexToNumber(hex: string): number {
+  return Number(hexToBigInt(hex));
+}
 function weiToEthString(weiHexOrDec: string): string {
   const wei = weiHexOrDec.startsWith('0x') ? hexToBigInt(weiHexOrDec) : BigInt(weiHexOrDec);
   const ether = wei / 10n ** 18n;
@@ -55,7 +58,7 @@ function weiToEthString(weiHexOrDec: string): string {
 
 // ---------- RPC ----------
 async function rpcCall(method: string, params: any[]) {
-  if (!ETH_RPC_URL) return { ok: false, error: 'missing_eth_rpc_url' as const };
+  if (!ETH_RPC_URL) return { ok: false as const, error: 'missing_eth_rpc_url' };
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -76,11 +79,12 @@ async function rpcCall(method: string, params: any[]) {
 }
 const fetchEthReceipt = (h: string) => rpcCall('eth_getTransactionReceipt', [h]);
 const fetchEthTx = (h: string) => rpcCall('eth_getTransactionByHash', [h]);
+const fetchBlockByNumber = (bnHex: string) => rpcCall('eth_getBlockByNumber', [bnHex, false]);
 
 // ---------- optional USD pricing via lib/fx.ts ----------
 async function priceEthToUsdOrNull(amountEthStr: string): Promise<{ usd: number; pricedAt: string } | null> {
   try {
-    const fx: any = await import('@/lib/fx'); // your module
+    const fx: any = await import('@/lib/fx');
     const fns = ['getUsdPrices', 'fetchUsdPrices', 'getPrices', 'pricesForSymbols'].filter(
       (k) => typeof fx[k] === 'function'
     );
@@ -99,26 +103,18 @@ async function priceEthToUsdOrNull(amountEthStr: string): Promise<{ usd: number;
 
 // ---------- schema-aware helpers ----------
 async function getContributionColumns(): Promise<Set<string>> {
-  // Read available columns for public.contributions so we only write what exists.
-  const { data, error } = await supa().rpc('exec_sql', {
-    sql: `
-      select column_name
-      from information_schema.columns
-      where table_schema = 'public' and table_name = 'contributions'
-    `,
-  } as any);
-  // If you don't have a helper function exec_sql installed, fall back to a regular select (works with service role):
-  if (error || !Array.isArray(data)) {
-    const { data: cols, error: e2 } = await supa()
-      .from('information_schema.columns' as any)
-      .select('column_name')
-      .eq('table_schema', 'public' as any)
-      .eq('table_name', 'contributions' as any);
-    if (!e2 && Array.isArray(cols)) return new Set(cols.map((r: any) => r.column_name));
-    // Worst-case: assume minimal columns
-    return new Set(['tx_hash', 'amount']);
+  // Prefer direct query to information_schema (service role can read it)
+  const { data, error } = await supa()
+    .from('information_schema.columns' as any)
+    .select('column_name')
+    .eq('table_schema', 'public' as any)
+    .eq('table_name', 'contributions' as any);
+
+  if (!error && Array.isArray(data)) {
+    return new Set((data as any[]).map((r) => r.column_name));
   }
-  return new Set((data as any[]).map((r) => r.column_name));
+  // Fallback minimal set if somehow blocked:
+  return new Set(['tx_hash', 'amount', 'block_time']);
 }
 
 // ---------- handler ----------
@@ -138,7 +134,7 @@ export async function POST(req: NextRequest) {
     return json(400, { ok: false, error: 'invalid_tx_format:expect_0x64_hex' });
   }
 
-  // 2) on-chain confirm
+  // 2) on-chain confirm (receipt)
   const rcp = await fetchEthReceipt(tx);
   if (!rcp.ok) {
     if (rcp.error.includes('notFound')) return json(404, { ok: false, error: 'tx_not_found' });
@@ -148,13 +144,37 @@ export async function POST(req: NextRequest) {
   if (!receipt) return json(404, { ok: false, error: 'tx_not_found' });
   if (!receipt.blockNumber) return json(409, { ok: false, error: 'tx_pending' });
 
-  // 3) fetch tx (value)
-  const txr = await fetchEthTx(tx);
+  // 3) fetch tx (value/from/to) i block (timestamp)
+  const [txr, blkr] = await Promise.all([
+    fetchEthTx(tx),
+    fetchBlockByNumber(receipt.blockNumber),
+  ]);
   if (!txr.ok) return json(502, { ok: false, error: txr.error || 'rpc_error' });
   const txObj = txr.result;
   if (!txObj) return json(404, { ok: false, error: 'tx_not_found' });
+
+  if (!blkr.ok) return json(502, { ok: false, error: blkr.error || 'rpc_error' });
+  const blk = blkr.result;
+  // Ethereum block timestamp is hex seconds since epoch
+  const tsSec = blk?.timestamp ? hexToNumber(String(blk.timestamp)) : null;
+  const blockTimeISO = tsSec ? new Date(tsSec * 1000).toISOString() : null;
+
   const valueHex = txObj.value ?? '0x0';
   const amountEthStr = weiToEthString(String(valueHex));
+
+  // status: '0x1' success, '0x0' failed (post-Byzantium)
+  const status = receipt.status === '0x1' ? 'success' : 'failed';
+
+  // Fee (optional): gasUsed * effectiveGasPrice
+  let feeEthStr: string | null = null;
+  try {
+    const gasUsed = receipt.gasUsed ? hexToBigInt(String(receipt.gasUsed)) : 0n;
+    const effPrice = receipt.effectiveGasPrice ? hexToBigInt(String(receipt.effectiveGasPrice)) : 0n;
+    const feeWei = gasUsed * effPrice;
+    if (feeWei > 0) {
+      feeEthStr = weiToEthString('0x' + feeWei.toString(16));
+    }
+  } catch { /* ignore */ }
 
   // 4) optional USD pricing
   let amountUsd: number | null = null;
@@ -165,9 +185,9 @@ export async function POST(req: NextRequest) {
     pricedAt = priced.pricedAt;
   }
 
-  // 5) idempotent write; only include columns that exist
+  // 5) idempotent write; only include existing columns
   try {
-    // 5a) pre-check exact match
+    // pre-check
     const { data: found, error: qErr } = await supa()
       .from('contributions')
       .select('id')
@@ -178,27 +198,36 @@ export async function POST(req: NextRequest) {
       return json(200, { ok: true, inserted: null, alreadyRecorded: true });
     }
 
-    // 5b) build payload by schema
     const cols = await getContributionColumns();
     const payload: Record<string, any> = {};
 
-    // mandatory we rely on:
+    // required minimal
     if (cols.has('tx_hash')) payload.tx_hash = tx;
     if (cols.has('amount')) payload.amount = amountEthStr;
 
-    // optional columns if present:
+    // critical NOT NULL in your schema (from the error you saw)
+    if (blockTimeISO && cols.has('block_time')) payload.block_time = blockTimeISO;
+
+    // extra helpful fields if present
+    if (cols.has('block_number') && receipt.blockNumber) payload.block_number = hexToNumber(String(receipt.blockNumber));
+    if (cols.has('block_hash') && receipt.blockHash) payload.block_hash = String(receipt.blockHash);
+    if (cols.has('from_address') && txObj.from) payload.from_address = String(txObj.from).toLowerCase();
+    if (cols.has('to_address') && txObj.to) payload.to_address = String(txObj.to).toLowerCase();
+    if (cols.has('status')) payload.status = status;
+    if (feeEthStr && cols.has('fee')) payload.fee = feeEthStr;
+
+    // optional pricing
     if (amountUsd !== null && cols.has('amount_usd')) payload.amount_usd = amountUsd;
     if (pricedAt !== null && cols.has('priced_at')) payload.priced_at = pricedAt;
 
-    // common optional columns if they exist in your schema:
+    // other optional identity columns (only if exist)
     if (cols.has('currency')) payload.currency = 'ETH';
     if (cols.has('symbol')) payload.symbol = 'ETH';
     if (cols.has('asset')) payload.asset = 'ETH';
-    if (cols.has('chain')) payload.chain = 'eth';
     if (cols.has('network')) payload.network = 'ethereum';
-    if (cols.has('source')) payload.source = 'claim'; // helpful provenance flag
+    if (cols.has('source')) payload.source = 'claim';
 
-    // Safety: ensure we at least set tx_hash + amount
+    // safety check: at least tx_hash + amount, and if block_time is NOT NULL in schema, we added it above
     if (!('tx_hash' in payload) || !('amount' in payload)) {
       return json(500, { ok: false, error: 'server_misconfigured_missing_columns(tx_hash/amount)' });
     }
