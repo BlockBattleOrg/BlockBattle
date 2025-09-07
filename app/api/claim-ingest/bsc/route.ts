@@ -1,5 +1,5 @@
 // app/api/claim-ingest/bsc/route.ts
-// BNB Smart Chain claim-ingest, chain='bsc'
+// BNB Smart Chain claim-ingest, chain='bsc' with soft RPC fallback
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
@@ -9,8 +9,8 @@ export const dynamic = 'force-dynamic';
 type J = Record<string, unknown>;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
-const BSC_RPC_URL = process.env.BSC_RPC_URL || ''; // <- ostaje ista env var
-
+const PRIMARY_RPC = process.env.BSC_RPC_URL || '';
+const FALLBACK_RPC = process.env.BSC_RPC_URL_FALLBACK || ''; // optional, e.g. https://bsc-dataseed.binance.org
 const EXPECTED_CHAIN_ID_HEX = '0x38'; // 56 (BSC mainnet)
 
 const json = (status: number, payload: J) =>
@@ -48,13 +48,16 @@ const weiToEthString = (weiHexOrDec: string) => {
 };
 
 // ---------- RPC ----------
-async function rpc(method: string, params: any[]) {
-  if (!BSC_RPC_URL) return { ok: false as const, error: 'missing_rpc_url' };
+type RpcRes<T=any> = { ok: true; result: T } | { ok: false; error: string };
+
+async function rpcOnce(url: string, method: string, params: any[]): Promise<RpcRes> {
+  if (!url) return { ok: false as const, error: 'missing_rpc_url' };
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
+    // harmless on non-NowNodes endpoints
     if (NOWNODES_API_KEY) { headers['api-key'] = NOWNODES_API_KEY; headers['x-api-key'] = NOWNODES_API_KEY; }
-    const res = await fetch(BSC_RPC_URL, { method: 'POST', headers, body, cache: 'no-store' });
+    const res = await fetch(url, { method: 'POST', headers, body, cache: 'no-store' });
     const txt = await res.text();
     let j: any = null; try { j = txt ? JSON.parse(txt) : null; } catch {}
     if (!res.ok) return { ok: false as const, error: `rpc_http_${res.status}:${txt || 'no_body'}` };
@@ -64,6 +67,19 @@ async function rpc(method: string, params: any[]) {
     return { ok: false as const, error: `rpc_network:${e?.message || 'unknown'}` };
   }
 }
+
+async function rpc(method: string, params: any[]) {
+  // try primary
+  const first = await rpcOnce(PRIMARY_RPC, method, params);
+  if (first.ok) return first;
+  // if primary has hard error and we have fallback, try fallback
+  if (FALLBACK_RPC) {
+    const second = await rpcOnce(FALLBACK_RPC, method, params);
+    if (second.ok) return second;
+  }
+  return first;
+}
+
 const chainId   = () => rpc('eth_chainId', []);
 const getTx     = (h: string) => rpc('eth_getTransactionByHash', [h]);
 const getReceipt= (h: string) => rpc('eth_getTransactionReceipt', [h]);
@@ -106,15 +122,17 @@ async function findBscWalletIdByToAddress(addr: string): Promise<string | null> 
 
 // ---------- handler ----------
 export async function POST(req: NextRequest) {
+  // auth
   const sec = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || sec !== CRON_SECRET) return json(401, { ok: false, error: 'unauthorized' });
 
-  // sanity: RPC is BSC
+  // sanity: chain id
   const id = await chainId();
   if (!id.ok || String(id.result).toLowerCase() !== EXPECTED_CHAIN_ID_HEX) {
     return json(500, { ok: false, code: 'rpc_chain_mismatch', message: 'RPC endpoint is not a BNB Smart Chain node.' });
   }
 
+  // input
   const url = new URL(req.url);
   const body = await req.json().catch(() => ({} as any));
   let tx = (url.searchParams.get('tx') || body?.txHash || body?.tx_hash || body?.hash || '').trim();
@@ -125,12 +143,23 @@ export async function POST(req: NextRequest) {
   tx = normalizeTxHash(tx);
   if (!isEvmHash(tx)) return json(400, { ok: false, code: 'invalid_payload', message: 'Invalid transaction hash format.' });
 
-  // fetch tx & receipt
+  // fetch tx & receipt (primary, possibly fallback)
   const [tr, rr] = await Promise.all([ getTx(tx), getReceipt(tx) ]);
   if (!tr.ok || !rr.ok) return json(502, { ok: false, code: 'rpc_error', message: 'An error occurred while fetching the transaction.' });
 
-  let txObj = tr.result;
-  const receipt = rr.result;
+  let txObj: any = tr.result;
+  const receipt: any = rr.result;
+
+  // If both null, try hard-fallback only when we have an explicit fallback URL.
+  if (!txObj && !receipt && FALLBACK_RPC) {
+    const [tr2, rr2] = await Promise.all([
+      rpcOnce(FALLBACK_RPC, 'eth_getTransactionByHash', [tx]),
+      rpcOnce(FALLBACK_RPC, 'eth_getTransactionReceipt', [tx]),
+    ]);
+    txObj = tr2.ok ? tr2.result : null;
+    const rc2 = rr2.ok ? rr2.result : null;
+    if (!receipt && rc2) (Object as any).assign((rr as any), { result: rc2 }); // keep same var name
+  }
 
   if (!txObj && !receipt) {
     return json200({ ok: false, code: 'tx_not_found', message: 'The hash of this transaction does not exist on the blockchain.', data: { txHash: tx } });
@@ -139,13 +168,13 @@ export async function POST(req: NextRequest) {
     return json200({ ok: false, code: 'rpc_error', message: 'Transaction is not yet confirmed on-chain.', data: { txHash: tx } });
   }
 
-  // Some providers return null for getTransactionByHash even for confirmed tx.
+  // If getTransactionByHash is null but we have receipt, reconstruct tx via block/index
   if (!txObj && receipt?.blockHash && typeof receipt?.transactionIndex === 'string') {
     const byIdx = await getTxByBlockAndIndex(String(receipt.blockHash), String(receipt.transactionIndex));
-    if (byIdx.ok) txObj = byIdx.result;
+    if (byIdx.ok) txObj = (byIdx as any).result;
   }
 
-  // need block time regardless
+  // need block time
   const br = await getBlock(String(receipt.blockNumber));
   if (!br.ok) return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
   const tsSec = br.result?.timestamp ? hexToNumber(String(br.result.timestamp)) : null;
