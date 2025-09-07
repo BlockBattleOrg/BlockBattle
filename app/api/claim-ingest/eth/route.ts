@@ -1,208 +1,287 @@
 // app/api/claim-ingest/eth/route.ts
-// ETH claim-ingest aligned to repo schema:
-// - contributions: wallet_id, tx_hash, amount, amount_usd, block_time, priced_at
-// - wallets: id, address, chain
-// Mapping rule: wallet = wallets.address == tx.to (case-insensitive) AND chain == 'eth'
-// USD pricing: best-effort via lib/fx (if available)
-// Idempotent: skip if tx_hash already exists
+// Claim-first ETH ingest route.
+// Reads a user-submitted transaction hash, verifies it's a donation to one of our project wallets (chain='eth'),
+// and records it into `contributions` according to the Supabase schema.
+//
+// Table: contributions
+//   - wallet_id (uuid, FK wallets.id)
+//   - tx_hash (text, unique)
+//   - amount (text or numeric stored as string – store full native precision in ETH as string)
+//   - amount_usd (numeric, nullable)  // Option B: leave NULL for now
+//   - block_time (timestamptz)
+//   - priced_at (timestamptz, nullable) // Option B: set to now()
+//   - note (text, nullable)
+// Table: wallets
+//   - id (uuid)
+//   - address (text, ideally stored lowercase, with or without 0x)
+//   - chain (text) e.g. 'eth'
+//
+// Response contract (always HTTP 200):
+//   { ok: boolean, code: string, message: string, data?: any }
+//
+// Codes:
+//   - inserted            -> ok: true
+//   - duplicate           -> ok: true
+//   - not_project_wallet  -> ok: false
+//   - tx_not_found        -> ok: false
+//   - invalid_payload     -> ok: false
+//   - db_error            -> ok: false
+//   - rpc_error           -> ok: false
+//
+// Notes:
+// - We do **not** price on the fly (amount_usd = null); `priced_at` is set to now for future fill.
+// - We do **not** treat 'not_project_wallet' or 'tx_not_found' as HTTP errors; UX shows a neutral message.
+//
+// Env requirements:
+//   - ETH_RPC_URL
+//   - SUPABASE_SERVICE_ROLE_KEY, NEXT_PUBLIC_SUPABASE_URL
+//   - Optional: NOWNODES_API_KEY (sent as `api-key` / `x-api-key` if present)
 
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-type J = Record<string, unknown>;
+// ---------- Env ----------
+const ETH_RPC_URL = process.env.ETH_RPC_URL as string | undefined
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL as string | undefined
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string | undefined
+const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY as string | undefined
 
-const CRON_SECRET = process.env.CRON_SECRET || '';
-const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
-const ETH_RPC_URL =
-  process.env.ETH_RPC_URL ||
-  process.env.EVM_RPC_URL ||
-  'https://eth.nownodes.io';
+// ---------- Types ----------
+type RpcOk<T> = { ok: true; result: T }
+type RpcErr = { ok: false; error: string; status?: number }
+type RpcResp<T> = RpcOk<T> | RpcErr
 
-function json(status: number, payload: J) {
-  return NextResponse.json(payload, { status });
+type Tx = {
+  blockNumber: string | null
+  hash: string
+  to: string | null
+  value: string // hex
 }
+
+type Block = {
+  timestamp: string // hex seconds since epoch
+}
+
+// ---------- Helpers ----------
+const json = (body: any) =>
+  NextResponse.json(body, { status: 200, headers: { 'cache-control': 'no-store' } })
+
+const isEvmHash = (s: unknown): s is string =>
+  typeof s === 'string' && /^0x[0-9a-fA-F]{64}$/.test(s)
+
+const strip0x = (s: string) => (s?.startsWith('0x') ? s.slice(2) : s)
+const lowerNo0x = (s: string) => strip0x(String(s || '')).toLowerCase()
+
+const hexToBigInt = (hex: string): bigint => {
+  const clean = hex?.startsWith('0x') ? hex.slice(2) : hex
+  return BigInt('0x' + (clean || '0'))
+}
+
+const hexToNumber = (hex: string): number => Number(hexToBigInt(hex))
+
+const weiToEthString = (weiHexOrDec: string): string => {
+  const wei = weiHexOrDec.startsWith('0x') ? hexToBigInt(weiHexOrDec) : BigInt(weiHexOrDec)
+  const ether = wei / 10n ** 18n
+  const remainder = wei % 10n ** 18n
+  const fraction = remainder.toString().padStart(18, '0').replace(/0+$/, '')
+  return fraction ? `${ether.toString()}.${fraction}` : ether.toString()
+}
+
+const nowIso = () => new Date().toISOString()
+
+// ---------- Supabase ----------
 function supa() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  return createClient(url, key, { auth: { persistSession: false } });
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Missing Supabase env (URL/Service Role Key)')
+  }
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
 }
 
-// ---------- utils ----------
-const normalizeTxHash = (tx: string) => {
-  const t = tx.trim();
-  if (/^0x[0-9a-fA-F]{64}$/.test(t)) return t.toLowerCase();
-  if (/^[0-9a-fA-F]{64}$/.test(t)) return ('0x' + t).toLowerCase();
-  return t;
-};
-const isEvmHash = (tx: string) => /^0x[0-9a-fA-F]{64}$/.test(tx);
-const strip0x = (s: string) => (s?.startsWith('0x') ? s.slice(2) : s);
-const lowerNo0x = (s: string) => strip0x(String(s || '')).toLowerCase();
+async function findEthWalletIdByToAddress(addr: string): Promise<string | null> {
+  const addressLower = addr.toLowerCase()
+  const addressNo0x = lowerNo0x(addr)
+  const sel = 'id,address,chain'
 
-function hexToBigInt(hex: string): bigint {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-  return BigInt('0x' + (clean || '0'));
+  // Try exact lowercased match with chain filter
+  let q = supa().from('wallets').select(sel).eq('chain', 'eth').eq('address', addressLower).limit(1)
+  let { data: w1, error: e1 } = await q
+  if (!e1 && w1 && w1.length) return w1[0].id as string
+
+  // Try address without 0x variants
+  let { data: w2 } = await supa()
+    .from('wallets')
+    .select(sel)
+    .eq('chain', 'eth')
+    .or(`address.eq.${addressNo0x},address.eq.0x${addressNo0x}`)
+    .limit(1)
+  if (w2 && w2.length) return w2[0].id as string
+
+  // Fallback: case-insensitive like match
+  let { data: w3 } = await supa()
+    .from('wallets')
+    .select(sel)
+    .eq('chain', 'eth')
+    .ilike('address', `%${addressNo0x}%`)
+    .limit(1)
+  if (w3 && w3.length) return w3[0].id as string
+
+  return null
 }
-function hexToNumber(hex: string): number {
-  return Number(hexToBigInt(hex));
-}
-function weiToEthString(weiHexOrDec: string): string {
-  const wei = weiHexOrDec.startsWith('0x') ? hexToBigInt(weiHexOrDec) : BigInt(weiHexOrDec);
-  const ether = wei / 10n ** 18n;
-  const remainder = wei % 10n ** 18n;
-  const rest = remainder.toString().padStart(18, '0').replace(/0+$/, '');
-  return rest ? `${ether.toString()}.${rest}` : ether.toString();
+
+async function isDuplicateTx(txHash: string): Promise<boolean> {
+  const { data, error } = await supa()
+    .from('contributions')
+    .select('id')
+    .eq('tx_hash', txHash)
+    .limit(1)
+  if (error) {
+    // On DB error, assume not duplicate (let insert handle unique error)
+    return false
+  }
+  return !!(data && data.length)
 }
 
 // ---------- RPC ----------
-async function rpc(method: string, params: any[]) {
-  if (!ETH_RPC_URL) return { ok: false as const, error: 'missing_eth_rpc_url' };
-  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
+async function rpc<T = any>(method: string, params: any[]): Promise<RpcResp<T>> {
+  if (!ETH_RPC_URL) return { ok: false, error: 'missing_eth_rpc_url' }
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
   try {
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (NOWNODES_API_KEY) {
-      headers['api-key'] = NOWNODES_API_KEY;
-      headers['x-api-key'] = NOWNODES_API_KEY;
+      headers['api-key'] = NOWNODES_API_KEY
+      headers['x-api-key'] = NOWNODES_API_KEY
     }
-    const res = await fetch(ETH_RPC_URL, { method: 'POST', headers, body });
-    const txt = await res.text();
-    let j: any = null;
-    try { j = txt ? JSON.parse(txt) : null; } catch {}
-    if (!res.ok) return { ok: false as const, error: `rpc_http_${res.status}:${txt || 'no_body'}` };
-    if (j?.error) return { ok: false as const, error: `rpc_${j.error?.code}:${j.error?.message}` };
-    return { ok: true as const, result: j?.result };
+    const res = await fetch(ETH_RPC_URL, { method: 'POST', headers, body, cache: 'no-store' })
+    if (!res.ok) return { ok: false, error: `rpc_http_${res.status}`, status: res.status }
+    const j = (await res.json()) as { result?: any; error?: any }
+    if (j?.error) return { ok: false, error: String(j.error?.message || 'rpc_error') }
+    return { ok: true, result: j.result as T }
   } catch (e: any) {
-    return { ok: false as const, error: `rpc_network:${e?.message || 'unknown'}` };
+    return { ok: false, error: e?.message || 'rpc_error' }
   }
 }
-const getReceipt = (h: string) => rpc('eth_getTransactionReceipt', [h]);
-const getTx      = (h: string) => rpc('eth_getTransactionByHash', [h]);
-const getBlock   = (n: string) => rpc('eth_getBlockByNumber', [n, false]);
 
-// ---------- USD pricing (best-effort) ----------
-async function priceEthToUsdOrNull(amountEthStr: string): Promise<{ usd: number; pricedAt: string } | null> {
-  try {
-    const fx: any = await import('@/lib/fx');
-    const names = ['getUsdPrices','fetchUsdPrices','getPrices','pricesForSymbols'].filter((k) => typeof fx[k] === 'function');
-    if (!names.length) return null;
-    const getPrices = fx[names[0]].bind(fx);
-    const prices: Record<string, number> = await getPrices(['ETH']);
-    const usd = prices?.ETH ?? prices?.eth;
-    if (typeof usd !== 'number') return null;
-    const eth = parseFloat(amountEthStr || '0');
-    if (!Number.isFinite(eth)) return null;
-    return { usd: +(eth * usd).toFixed(2), pricedAt: new Date().toISOString() };
-  } catch { return null; }
-}
+const getTx = (hash: string) => rpc<Tx>('eth_getTransactionByHash', [hash])
+const getBlockByNumber = (blockNumberHex: string) => rpc<Block>('eth_getBlockByNumber', [blockNumberHex, false])
 
-// ---------- DB helpers ----------
-async function findEthWalletIdByToAddress(addr: string): Promise<string | null> {
-  // tražimo wallet gdje address matcha i chain=='eth'
-  // pokrivamo i varijantu bez '0x'
-  const addrLower = addr.toLowerCase();
-  const addrNo0x = lowerNo0x(addr);
-  const sel = 'id,address,chain';
-
-  // 1) eq + chain
-  let q: any = supa().from('wallets').select(sel).eq('chain', 'eth').eq('address', addrLower).limit(1);
-  let { data, error } = await q;
-  if (!error && data && data.length) return String(data[0].id);
-
-  // 2) ilike + chain
-  q = supa().from('wallets').select(sel).eq('chain', 'eth').ilike('address', addrLower).limit(1);
-  ({ data, error } = await q);
-  if (!error && data && data.length) return String(data[0].id);
-
-  // 3) bez 0x + chain
-  q = supa().from('wallets').select(sel).eq('chain', 'eth')
-        .or(`address.eq.${addrNo0x},address.ilike.${addrNo0x}`).limit(1);
-  ({ data, error } = await q);
-  if (!error && data && data.length) return String(data[0].id);
-
-  return null;
-}
-
-// ---------- handler ----------
+// ---------- Route ----------
 export async function POST(req: NextRequest) {
-  // auth
-  const sec = req.headers.get('x-cron-secret') || '';
-  if (!CRON_SECRET || sec !== CRON_SECRET) {
-    return json(401, { ok: false, error: 'unauthorized' });
-  }
+  try {
+    const payload = await req.json().catch(() => ({}))
+    const txHash = (payload?.txHash ?? payload?.hash ?? payload?.tx_hash ?? '').trim()
+    const noteRaw = (payload?.note ?? payload?.message ?? '').toString().trim()
 
-  // input
-  const url = new URL(req.url);
-  let tx = (url.searchParams.get('tx') || '').trim();
-  if (!tx) return json(400, { ok: false, error: 'missing_tx' });
-  tx = normalizeTxHash(tx);
-  if (!isEvmHash(tx)) return json(400, { ok: false, error: 'invalid_tx_format' });
-
-  // on-chain
-  const r = await getReceipt(tx);
-  if (!r.ok) return json(502, { ok: false, error: r.error });
-  const receipt = r.result;
-  if (!receipt?.blockNumber) return json(409, { ok: false, error: 'tx_pending' });
-
-  const [tr, br] = await Promise.all([ getTx(tx), getBlock(receipt.blockNumber) ]);
-  if (!tr.ok) return json(502, { ok: false, error: tr.error });
-  if (!br.ok) return json(502, { ok: false, error: br.error });
-
-  const txObj = tr.result;
-  if (!txObj) return json(404, { ok: false, error: 'tx_not_found' });
-
-  const tsSec = br.result?.timestamp ? hexToNumber(String(br.result.timestamp)) : null;
-  if (!tsSec) return json(502, { ok: false, error: 'block_timestamp_unavailable' });
-  const blockTimeISO = new Date(tsSec * 1000).toISOString();
-
-  const amountEthStr = weiToEthString(String(txObj.value ?? '0x0'));
-  const toAddress = String(txObj.to || '').toLowerCase();
-
-  // idempotent pre-check
-  const { data: found, error: qErr } = await supa()
-    .from('contributions')
-    .select('id')
-    .eq('tx_hash', tx)
-    .limit(1);
-  if (!qErr && found && found.length) {
-    return json(200, { ok: true, inserted: null, alreadyRecorded: true });
-  }
-
-  // map wallet_id by address + chain='eth'
-  let wallet_id: string | null = null;
-  if (toAddress) wallet_id = await findEthWalletIdByToAddress(toAddress);
-
-  // best-effort USD pricing
-  const priced = await priceEthToUsdOrNull(amountEthStr);
-
-  // payload strictly per schema
-  const payload: Record<string, any> = {
-    tx_hash: tx,
-    amount: amountEthStr,
-    block_time: blockTimeISO,
-  };
-  if (wallet_id) payload.wallet_id = wallet_id;
-  if (priced) {
-    payload.amount_usd = priced.usd;
-    payload.priced_at = priced.pricedAt;
-  }
-
-  const { data: ins, error: insErr } = await supa()
-    .from('contributions')
-    .insert(payload)
-    .select('id')
-    .maybeSingle();
-
-  if (insErr) {
-    const msg = String(insErr.message || '');
-    const code = (insErr as any).code || '';
-    if (code === '23505' || /duplicate key|unique/i.test(msg)) {
-      return json(200, { ok: true, inserted: null, alreadyRecorded: true });
+    if (!isEvmHash(txHash)) {
+      return json({ ok: false, code: 'invalid_payload', message: 'Invalid transaction hash format.' })
     }
-    return json(400, { ok: false, error: msg || 'db_error' });
-  }
 
-  return json(200, { ok: true, inserted: ins ?? null, alreadyRecorded: false });
+    // Check duplicate early (idempotency)
+    if (await isDuplicateTx(txHash)) {
+      return json({
+        ok: true,
+        code: 'duplicate',
+        message: 'The transaction has already been recorded in our project before.',
+        data: { txHash },
+      })
+    }
+
+    // Fetch tx
+    const txResp = await getTx(txHash)
+    if (!txResp.ok) {
+      // RPC hard error
+      return json({ ok: false, code: 'rpc_error', message: 'An error occurred while fetching the transaction.' })
+    }
+    const tx = txResp.result
+    if (!tx) {
+      // Not found on chain
+      return json({
+        ok: false,
+        code: 'tx_not_found',
+        message: 'The hash of this transaction does not exist on the blockchain.',
+        data: { txHash },
+      })
+    }
+
+    // Must have 'to' and 'blockNumber'
+    if (!tx.to) {
+      return json({
+        ok: false,
+        code: 'not_project_wallet',
+        message: 'The transaction is not directed to our project. The wallet address does not belong to this project.',
+      })
+    }
+
+    const walletId = await findEthWalletIdByToAddress(tx.to)
+    if (!walletId) {
+      return json({
+        ok: false,
+        code: 'not_project_wallet',
+        message: 'The transaction is not directed to our project. The wallet address does not belong to this project.',
+      })
+    }
+
+    // Block time
+    if (!tx.blockNumber) {
+      // no block yet (pending?) — treat as not recorded
+      return json({ ok: false, code: 'rpc_error', message: 'Transaction is not yet confirmed on-chain.' })
+    }
+    const blockResp = await getBlockByNumber(tx.blockNumber)
+    if (!blockResp.ok || !blockResp.result?.timestamp) {
+      return json({ ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' })
+    }
+    const seconds = hexToNumber(blockResp.result.timestamp || '0x0')
+    const blockTimeIso = new Date(seconds * 1000).toISOString()
+
+    // Amount
+    const amountEth = weiToEthString(tx.value || '0x0')
+
+    // Insert into contributions
+    const { error: insErr } = await supa()
+      .from('contributions')
+      .insert({
+        wallet_id: walletId,
+        tx_hash: txHash,
+        amount: amountEth,
+        amount_usd: null,                // Option B
+        block_time: blockTimeIso,
+        priced_at: nowIso(),             // Option B: mark pricing timestamp for later backfill
+        note: noteRaw || null,
+      })
+      .select('*')
+      .maybeSingle()
+
+    if (insErr) {
+      // If unique violation -> duplicate (idempotent)
+      const msg = String(insErr.message || '')
+      const code = (insErr as any).code || ''
+      if (code === '23505' || /duplicate key|unique/i.test(msg)) {
+        return json({
+          ok: true,
+          code: 'duplicate',
+          message: 'The transaction has already been recorded in our project before.',
+          data: { txHash },
+        })
+      }
+      return json({ ok: false, code: 'db_error', message: 'Database write error.' })
+    }
+
+    return json({
+      ok: true,
+      code: 'inserted',
+      message: 'The transaction was successfully recorded on our project.',
+      data: {
+        txHash,
+        walletId,
+        amount: amountEth,
+        // block_time is already persisted; include for convenience if needed by the client:
+        // block_time: blockTimeIso,
+      },
+    })
+  } catch (e: any) {
+    return json({ ok: false, code: 'invalid_payload', message: 'Invalid request payload.' })
+  }
 }
 
