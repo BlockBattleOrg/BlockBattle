@@ -23,7 +23,7 @@ type ClaimResponseNew = {
 type AnyClaimResponse = ClaimResponseOld | ClaimResponseNew;
 type UiMsg = { kind: 'success' | 'info' | 'error'; text: string };
 
-// Full chain list (as requested)
+// Full chain list
 const CHAINS = [
   { value: 'eth',  label: 'Ethereum (ETH)' },
   { value: 'arb',  label: 'Arbitrum (ARB)' },
@@ -143,26 +143,14 @@ function classify(resp: ClaimResponseNew): UiMsg {
   return { kind: 'info', text: resp.message || 'Processed.' };
 }
 
-function renderUserMessage(resp: ClaimResponseNew | null, chain: string, tx: string) {
-  if (!resp) return null;
-  const link = tx ? txExplorerUrl(chain, tx) : null;
-  const ui = classify(resp);
-  return (
-    <div className="space-y-1">
-      <div>{ui.text}</div>
-      {link && <a href={link} target="_blank" rel="noreferrer" className="inline-block text-blue-600 underline">View on explorer</a>}
-    </div>
-  );
-}
-
 export default function ClaimPage() {
   const [chain, setChain] = useState('eth');
   const [tx, setTx] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // Single source of truth for feedback
   const [resp, setResp] = useState<ClaimResponseNew | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const hcaptchaEnabled = useMemo(() => !!HCAPTCHA_SITE_KEY, []);
   const [hcaptchaToken, setHcaptchaToken] = useState<string | undefined>(undefined);
@@ -223,22 +211,20 @@ export default function ClaimPage() {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
     setResp(null);
     setLoading(true);
 
+    // Client-side validation (one unified message path)
     const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
     if (isEvm(chain) && !isValidEvmHash(normalizedTx)) {
-      const norm: ClaimResponseNew = { ok: false, code: 'invalid_payload', message: 'Hash format is not correct.' };
-      setResp(norm);
-      setError(norm.message || 'Invalid payload');
+      setResp({ ok: false, code: 'invalid_payload', message: 'Hash format is not correct.' });
       setLoading(false);
       return;
     }
 
     const msg = message.trim();
     if (msg.length > 280) {
-      setError('Message is too long (max 280 characters).');
+      setResp({ ok: false, code: 'invalid_payload', message: 'Message is too long (max 280 characters).' });
       setLoading(false);
       return;
     }
@@ -258,13 +244,11 @@ export default function ClaimPage() {
 
       let raw: AnyClaimResponse;
       try { raw = await r.json(); } catch { raw = { ok: false, error: 'invalid_response' } as ClaimResponseOld; }
-
       const norm = normalizeResponse(raw);
       setResp(norm);
-      if (!norm.ok) setError(norm.message || 'Request failed.');
       resetCaptcha();
     } catch {
-      setError('Network error');
+      setResp({ ok: false, code: 'rpc_error', message: 'Network error. Please try again.' });
       resetCaptcha();
     } finally {
       setLoading(false);
@@ -273,6 +257,30 @@ export default function ClaimPage() {
 
   const submitDisabled = loading || !tx.trim() || (hcaptchaEnabled && !hcaptchaToken);
   const msgLen = message.trim().length;
+
+  // Single message renderer (no duplicate banners)
+  const renderAlert = () => {
+    if (!resp) return null;
+    const ui = classify(resp);
+    const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
+    const explorer = isValidEvmHash(normalizedTx) ? txExplorerUrl(chain, normalizedTx) : null;
+
+    const border =
+      ui.kind === 'success' ? 'border-green-400 bg-green-50 text-green-800' :
+      ui.kind === 'info'    ? 'border-amber-400 bg-amber-50 text-amber-800' :
+                              'border-red-400 bg-red-50 text-red-800';
+
+    return (
+      <div className={`mt-4 rounded-xl border p-3 text-sm ${border}`} role="status" aria-live="polite">
+        <div>{ui.text}</div>
+        {explorer && (
+          <a href={explorer} target="_blank" rel="noreferrer" className="mt-1 inline-block underline">
+            View on explorer
+          </a>
+        )}
+      </div>
+    );
+  };
 
   return (
     <main className="mx-auto max-w-xl px-4 py-10">
@@ -338,17 +346,7 @@ export default function ClaimPage() {
         </button>
       </form>
 
-      {error && (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-          Error: {error}
-        </div>
-      )}
-
-      {resp && (
-        <div className="mt-4 rounded-xl border bg-gray-50 p-3 text-sm">
-          {renderUserMessage(resp, chain, isEvm(chain) ? normalizeEvmTx(tx) : tx.trim())}
-        </div>
-      )}
+      {renderAlert()}
     </main>
   );
 }
