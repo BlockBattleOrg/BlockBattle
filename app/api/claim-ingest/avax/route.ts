@@ -1,5 +1,5 @@
 // app/api/claim-ingest/avax/route.ts
-// Avalanche C-Chain claim-ingest, chain='avax' with robust tx/receipt handling
+// Avalanche C-Chain claim-ingest, chain='avax' with soft RPC fallback (like BSC)
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
@@ -9,8 +9,9 @@ export const dynamic = 'force-dynamic';
 type J = Record<string, unknown>;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
-const AVAX_RPC_URL = process.env.AVAX_RPC_URL || '';
-const EXPECTED_CHAIN_ID_HEX = '0xa86a'; // 43114
+const PRIMARY_RPC = process.env.AVAX_RPC_URL || '';
+const FALLBACK_RPC = process.env.AVAX_RPC_URL_FALLBACK || ''; // optional, e.g. https://api.avax.network/ext/bc/C/rpc
+const EXPECTED_CHAIN_ID_HEX = '0xa86a'; // 43114 (Avalanche C-Chain)
 
 const json = (status: number, payload: J) =>
   NextResponse.json(payload, { status, headers: { 'cache-control': 'no-store' } });
@@ -47,13 +48,16 @@ const weiToEthString = (weiHexOrDec: string) => {
 };
 
 // ---------- RPC ----------
-async function rpc(method: string, params: any[]) {
-  if (!AVAX_RPC_URL) return { ok: false as const, error: 'missing_rpc_url' };
+type RpcRes<T=any> = { ok: true; result: T } | { ok: false; error: string };
+
+async function rpcOnce(url: string, method: string, params: any[]): Promise<RpcRes> {
+  if (!url) return { ok: false as const, error: 'missing_rpc_url' };
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
+    // harmless na public endpointima, potrebni na NowNodes
     if (NOWNODES_API_KEY) { headers['api-key'] = NOWNODES_API_KEY; headers['x-api-key'] = NOWNODES_API_KEY; }
-    const res = await fetch(AVAX_RPC_URL, { method: 'POST', headers, body, cache: 'no-store' });
+    const res = await fetch(url, { method: 'POST', headers, body, cache: 'no-store' });
     const txt = await res.text();
     let j: any = null; try { j = txt ? JSON.parse(txt) : null; } catch {}
     if (!res.ok) return { ok: false as const, error: `rpc_http_${res.status}:${txt || 'no_body'}` };
@@ -63,6 +67,17 @@ async function rpc(method: string, params: any[]) {
     return { ok: false as const, error: `rpc_network:${e?.message || 'unknown'}` };
   }
 }
+
+async function rpc(method: string, params: any[]) {
+  const first = await rpcOnce(PRIMARY_RPC, method, params);
+  if (first.ok) return first;
+  if (FALLBACK_RPC) {
+    const second = await rpcOnce(FALLBACK_RPC, method, params);
+    if (second.ok) return second;
+  }
+  return first;
+}
+
 const chainId   = () => rpc('eth_chainId', []);
 const getTx     = (h: string) => rpc('eth_getTransactionByHash', [h]);
 const getReceipt= (h: string) => rpc('eth_getTransactionReceipt', [h]);
@@ -105,6 +120,7 @@ async function findAvaxWalletIdByToAddress(addr: string): Promise<string | null>
 
 // ---------- handler ----------
 export async function POST(req: NextRequest) {
+  // auth
   const sec = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || sec !== CRON_SECRET) return json(401, { ok: false, error: 'unauthorized' });
 
@@ -114,6 +130,7 @@ export async function POST(req: NextRequest) {
     return json(500, { ok: false, code: 'rpc_chain_mismatch', message: 'RPC endpoint is not an Avalanche C-Chain node.' });
   }
 
+  // input
   const url = new URL(req.url);
   const body = await req.json().catch(() => ({} as any));
   let tx = (url.searchParams.get('tx') || body?.txHash || body?.tx_hash || body?.hash || '').trim();
@@ -124,23 +141,21 @@ export async function POST(req: NextRequest) {
   tx = normalizeTxHash(tx);
   if (!isEvmHash(tx)) return json(400, { ok: false, code: 'invalid_payload', message: 'Invalid transaction hash format.' });
 
+  // fetch tx & receipt (primary, possibly fallback)
   const [tr, rr] = await Promise.all([ getTx(tx), getReceipt(tx) ]);
   if (!tr.ok || !rr.ok) return json(502, { ok: false, code: 'rpc_error', message: 'An error occurred while fetching the transaction.' });
 
   let txObj: any = tr.result;
-  let receipt: any = rr.result; // <-- let
+  let receipt: any = rr.result; // mora biti let
 
-  if (!txObj && !receipt) {
-    // neki provideri kasne: pokušaj rekonstruirati preko receipt-a iz block/index ako kasnije stigne
-    // (ovdje nemamo dodatni fallback URL; oslanjamo se na postojeći)
-    // probaj još jedan receipt fetch
-    const rr2 = await getReceipt(tx);
-    if (rr2.ok && rr2.result) receipt = rr2.result;
-  }
-
-  if (!txObj && receipt?.blockHash && typeof receipt?.transactionIndex === 'string') {
-    const byIdx = await getTxByBlockAndIndex(String(receipt.blockHash), String(receipt.transactionIndex));
-    if (byIdx.ok) txObj = (byIdx as any).result;
+  // Ako su oba null i imamo fallback URL, probaj direktno fallback endpoint (hard fallback)
+  if (!txObj && !receipt && FALLBACK_RPC) {
+    const [tr2, rr2] = await Promise.all([
+      rpcOnce(FALLBACK_RPC, 'eth_getTransactionByHash', [tx]),
+      rpcOnce(FALLBACK_RPC, 'eth_getTransactionReceipt', [tx]),
+    ]);
+    txObj = tr2.ok ? tr2.result : null;
+    receipt = rr2.ok ? rr2.result : null;
   }
 
   if (!txObj && !receipt) {
@@ -150,6 +165,17 @@ export async function POST(req: NextRequest) {
     return json200({ ok: false, code: 'rpc_error', message: 'Transaction is not yet confirmed on-chain.', data: { txHash: tx } });
   }
 
+  // Ako i dalje nemamo txObj, ali imamo receipt, pokušaj iz bloka+indeksa
+  if (!txObj && receipt?.blockHash && typeof receipt?.transactionIndex === 'string') {
+    const byIdx = await getTxByBlockAndIndex(String(receipt.blockHash), String(receipt.transactionIndex));
+    if (byIdx.ok) txObj = (byIdx as any).result;
+  }
+
+  if (!receipt?.blockNumber) {
+    return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
+  }
+
+  // block time
   const br = await getBlock(String(receipt.blockNumber));
   if (!br.ok) return json(502, { ok: false, code: 'rpc_error', message: 'Unable to fetch block information.' });
   const tsSec = br.result?.timestamp ? hexToNumber(String(br.result.timestamp)) : null;
