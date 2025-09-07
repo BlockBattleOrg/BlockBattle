@@ -56,11 +56,9 @@ type CaptchaState = 'idle' | 'ready' | 'solved' | 'expired' | 'error';
 
 // ---- helpers for chain-specific behavior ----
 const EVM_CHAINS = ['eth', 'op', 'arb', 'pol', 'avax', 'bsc'] as const;
-const isEvm = (c: string) => EVM_CHAINS.includes(c as any);
+const isEvm = (c: string) => (EVM_CHAINS as unknown as string[]).includes(c);
 
-// Normalize EVM tx hashes:
-// - allow 64 hex without 0x
-// - enforce 0x prefix + lowercase for consistent DB lookups
+// Normalize EVM tx hashes: allow 64-hex without 0x; emit 0x + lowercase
 function normalizeEvmTx(input: string) {
   const raw = input.trim();
   if (/^0x[0-9a-fA-F]{64}$/.test(raw)) return raw.toLowerCase();
@@ -68,11 +66,95 @@ function normalizeEvmTx(input: string) {
   return raw;
 }
 
+// Expected format hint per chain
 function expectedFormatHint(chain: string) {
   if (isEvm(chain)) return 'Expected format: 0x + 64 hex (EVM).';
   if (chain === 'sol') return 'Expected format: base58 signature (Solana).';
-  // generic note for UTXO & others
   return 'Expected format: chain-native transaction id/hash.';
+}
+
+// Explorer URL per chain
+function txExplorerUrl(chain: string, tx: string): string | null {
+  switch (chain) {
+    case 'eth': return `https://etherscan.io/tx/${tx}`;
+    case 'op': return `https://optimistic.etherscan.io/tx/${tx}`;
+    case 'arb': return `https://arbiscan.io/tx/${tx}`;
+    case 'pol': return `https://polygonscan.com/tx/${tx}`;
+    case 'avax': return `https://snowtrace.io/tx/${tx}`;
+    case 'bsc': return `https://bscscan.com/tx/${tx}`;
+    case 'sol': return `https://solscan.io/tx/${tx}`;
+    case 'btc': return `https://blockchair.com/bitcoin/transaction/${tx}`;
+    case 'ltc': return `https://blockchair.com/litecoin/transaction/${tx}`;
+    case 'doge': return `https://blockchair.com/dogecoin/transaction/${tx}`;
+    case 'dot': return `https://polkadot.subscan.io/extrinsic/${tx}`;
+    case 'atom': return `https://www.mintscan.io/cosmos/txs/${tx}`;
+    case 'xrp': return `https://xrpscan.com/tx/${tx}`;
+    case 'xlm': return `https://steexp.com/tx/${tx}`;
+    case 'trx': return `https://tronscan.org/#/transaction/${tx}`;
+    default: return null;
+  }
+}
+
+// Friendly message renderer (success + common errors)
+function renderUserMessage(resp: ClaimResponse | null) {
+  if (!resp) return null;
+
+  const link = resp.chain && resp.tx ? txExplorerUrl(resp.chain, resp.tx) : null;
+
+  if (resp.ok && resp.alreadyRecorded) {
+    return (
+      <div className="space-y-1">
+        <div>Your transaction is already recorded in our database ✅</div>
+        {link && (
+          <a
+            href={link}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-block text-blue-600 underline"
+          >
+            View on explorer
+          </a>
+        )}
+      </div>
+    );
+  }
+  if (resp.ok && !resp.alreadyRecorded) {
+    return (
+      <div className="space-y-1">
+        <div>Your transaction has been successfully recorded ✅</div>
+        {link && (
+          <a
+            href={link}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-block text-blue-600 underline"
+          >
+            View on explorer
+          </a>
+        )}
+      </div>
+    );
+  }
+
+  // Friendly error messages
+  const e = (resp.error || '').toString();
+  if (e === 'tx_not_found') {
+    return (
+      <div>
+        We could not find this transaction on the selected chain yet. If it was
+        just submitted, please try again in a few minutes.
+      </div>
+    );
+  }
+  if (e === 'tx_pending') {
+    return (
+      <div>
+        This transaction is not confirmed on the selected chain yet. Please try
+        again later once it has enough confirmations.
+      </div>
+    );
+  }
+  return <div>Error: {resp.error}</div>;
 }
 
 export default function ClaimPage() {
@@ -275,15 +357,7 @@ export default function ClaimPage() {
 
       {resp && (
         <div className="mt-4 rounded-xl border bg-gray-50 p-3 text-sm">
-          {resp.ok && resp.alreadyRecorded && (
-            <div>Your transaction is already recorded in our database ✅</div>
-          )}
-          {resp.ok && !resp.alreadyRecorded && (
-            <div>Your transaction has been successfully recorded ✅</div>
-          )}
-          {!resp.ok && (
-            <div>Error: {resp.error}</div>
-          )}
+          {renderUserMessage(resp)}
         </div>
       )}
     </main>
