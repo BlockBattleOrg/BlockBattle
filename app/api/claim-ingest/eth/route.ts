@@ -1,12 +1,12 @@
 // app/api/claim-ingest/eth/route.ts
-// Claim-first ETH ingest route.
+// Claim-first ETH ingest route using UPSERT (ignoreDuplicates) to avoid false duplicate positives.
 // Verifies a user-submitted tx hash against Ethereum RPC, ensures it's directed to one of our project wallets,
 // and records it into `contributions` per the Supabase schema. Pricing is deferred (Option B).
 //
 // Table: contributions
 //   - wallet_id (uuid, FK wallets.id)
-//   - tx_hash (text, unique)
-//   - amount (string Full-precision ETH as string)
+//   - tx_hash (text, unique)  // stored lowercase for consistency
+//   - amount (string)         // full-precision ETH as string
 //   - amount_usd (numeric, nullable)  // Option B: leave NULL
 //   - block_time (timestamptz)
 //   - priced_at (timestamptz, nullable) // Option B: set NOW()
@@ -159,12 +159,15 @@ const getBlockByNumber = (blockNumberHex: string) => rpc<Block>('eth_getBlockByN
 export async function POST(req: NextRequest) {
   try {
     const payload = await req.json().catch(() => ({}))
-    const txHash = (payload?.txHash ?? payload?.hash ?? payload?.tx_hash ?? '').trim()
+    const txHashInput = (payload?.txHash ?? payload?.hash ?? payload?.tx_hash ?? '').trim()
     const noteRaw = (payload?.note ?? payload?.message ?? '').toString().trim()
 
-    if (!isEvmHash(txHash)) {
+    if (!isEvmHash(txHashInput)) {
       return json({ ok: false, code: 'invalid_payload', message: 'Invalid transaction hash format.' })
     }
+
+    // Normalize tx hash to lowercase for storage/uniqueness consistency
+    const txHash = txHashInput.toLowerCase()
 
     // Fetch tx from RPC
     const txResp = await getTx(txHash)
@@ -214,33 +217,37 @@ export async function POST(req: NextRequest) {
 
     const amountEth = weiToEthString(tx.value || '0x0')
 
-    // Insert — single source of truth for duplicates (unique constraint on tx_hash)
-    const { error: insErr } = await supa()
+    // UPSERT with ignoreDuplicates ensures deterministic duplicate detection.
+    // If row already exists (same tx_hash), data will be [] with no error.
+    const { data, error: upErr } = await supa()
       .from('contributions')
-      .insert({
-        wallet_id: walletId,
-        tx_hash: txHash,
-        amount: amountEth,
-        amount_usd: null,   // Option B
-        block_time: blockTimeIso,
-        priced_at: nowIso(),// Option B
-        note: noteRaw || null,
-      })
-      .select('id')
+      .upsert(
+        {
+          wallet_id: walletId,
+          tx_hash: txHash,     // stored lowercase
+          amount: amountEth,
+          amount_usd: null,    // Option B
+          block_time: blockTimeIso,
+          priced_at: nowIso(), // Option B
+          note: noteRaw || null,
+        },
+        { onConflict: 'tx_hash', ignoreDuplicates: true }
+      )
+      .select('id') // will return [] if ignored due to duplicate
       .maybeSingle()
 
-    if (insErr) {
-      const msg = String(insErr.message || '')
-      const code = (insErr as any).code || ''
-      if (code === '23505' || /duplicate key|unique/i.test(msg)) {
-        return json({
-          ok: true,
-          code: 'duplicate',
-          message: 'The transaction has already been recorded in our project before.',
-          data: { txHash },
-        })
-      }
+    if (upErr) {
       return json({ ok: false, code: 'db_error', message: 'Database write error.' })
+    }
+
+    if (!data) {
+      // Upsert was ignored -> duplicate
+      return json({
+        ok: true,
+        code: 'duplicate',
+        message: 'The transaction has already been recorded in our project before.',
+        data: { txHash },
+      })
     }
 
     return json({
