@@ -33,8 +33,9 @@ function supa() {
 const normalizeTxId = (tx: string) => String(tx || '').trim().toLowerCase();
 const isTxId64Hex = (tx: string) => /^[0-9a-fA-F]{64}$/.test(tx);
 
-function satsToBtcString(sats: number | string): string {
-  const s = BigInt(String(sats));
+// Accept bigint too (fixes TS error when summing satoshis as BigInt)
+function satsToBtcString(sats: bigint | number | string): string {
+  const s = typeof sats === 'bigint' ? sats : BigInt(String(sats));
   const whole = s / 100_000_000n;
   const frac = s % 100_000_000n;
   const rest = frac.toString().padStart(8, '0').replace(/0+$/, '');
