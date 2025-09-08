@@ -1,10 +1,5 @@
 // app/api/claim-ingest/xlm/route.ts
 // Stellar (XLM) claim-ingest via Horizon
-// - GET {HORIZON}/transactions/{hash}
-// - GET {HORIZON}/transactions/{hash}/operations?limit=200
-// Match any "payment" op where "to" equals a wallet (chain='xlm')
-
-// Response: same stable contract
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -16,6 +11,7 @@ type J = Record<string, unknown>;
 
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const XLM_HORIZON_URL = process.env.XLM_HORIZON_URL || '';
+const NOWNODES_API_KEY = process.env.NOWNODES_API_KEY || '';
 
 const json = (status: number, payload: J) =>
   NextResponse.json(payload, { status, headers: { 'cache-control': 'no-store' } });
@@ -74,8 +70,12 @@ export async function POST(req: NextRequest) {
     return json(502, { ok:false, code:'rpc_error', message:'XLM Horizon URL is not configured.' });
   }
 
+  // Prepare headers (NowNodes requires API key on Horizon too)
+  const headers: Record<string, string> = { 'accept': 'application/json' };
+  if (NOWNODES_API_KEY) { headers['api-key'] = NOWNODES_API_KEY; headers['x-api-key'] = NOWNODES_API_KEY; }
+
   // Fetch transaction
-  const txRes = await fetch(`${XLM_HORIZON_URL}/transactions/${tx}`, { cache: 'no-store' });
+  const txRes = await fetch(`${XLM_HORIZON_URL}/transactions/${tx}`, { cache: 'no-store', headers });
   if (txRes.status === 404) {
     return json(200, { ok:false, code:'tx_not_found', message:'The hash of this transaction does not exist on the blockchain.', data:{ txHash: tx } });
   }
@@ -91,7 +91,7 @@ export async function POST(req: NextRequest) {
   const blockTimeISO = String(txJson?.closed_at || txJson?.created_at || new Date().toISOString());
 
   // Fetch operations to find payments to our wallets
-  const opsRes = await fetch(`${XLM_HORIZON_URL}/transactions/${tx}/operations?limit=200`, { cache: 'no-store' });
+  const opsRes = await fetch(`${XLM_HORIZON_URL}/transactions/${tx}/operations?limit=200`, { cache: 'no-store', headers });
   if (!opsRes.ok) {
     return json(502, { ok:false, code:'rpc_error', message:'Unable to fetch transaction operations.' });
   }
@@ -102,7 +102,6 @@ export async function POST(req: NextRequest) {
   let wallet_id: string | null = null;
 
   for (const op of records) {
-    // consider only native XLM payment ops
     if (op?.type === 'payment' && op?.asset_type === 'native' && typeof op?.to === 'string' && typeof op?.amount === 'string') {
       const wid = await findXlmWalletId(op.to);
       if (wid) {

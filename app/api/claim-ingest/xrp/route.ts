@@ -1,9 +1,5 @@
 // app/api/claim-ingest/xrp/route.ts
 // XRPL claim-ingest (Payment) aligned to stable model
-// Response: { ok, code, message, data? }
-// Tables:
-//  - wallets(chain='xrp', address = classic XRP address, e.g. "r...")
-//  - contributions(wallet_id, tx_hash, amount, amount_usd, block_time, priced_at, note)
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -32,14 +28,12 @@ function supa() {
 const normalizeTxHash64hex = (s: string) => String(s || '').trim();
 const is64hex = (s: string) => /^[0-9A-Fa-f]{64}$/.test(s);
 
-// XRPL "date" is Ripple epoch (seconds since 2000-01-01T00:00:00Z). Convert to ISO.
 function rippleEpochToISO(rippleSec: number): string {
-  const UNIX_EPOCH_DIFF = 946684800; // seconds between 1970 and 2000
+  const UNIX_EPOCH_DIFF = 946684800;
   const unixSec = rippleSec + UNIX_EPOCH_DIFF;
   return new Date(unixSec * 1000).toISOString();
 }
 
-// best-effort pricing via fx (XRP)
 async function priceToUsdOrNullXRP(amountStr: string): Promise<{ usd: number; pricedAt: string } | null> {
   try {
     const fx: any = await import('@/lib/fx');
@@ -57,7 +51,11 @@ async function priceToUsdOrNullXRP(amountStr: string): Promise<{ usd: number; pr
 // ---------- rpc ----------
 async function rpc(method: string, params: any): Promise<RpcOk | RpcErr> {
   if (!XRP_RPC_URL) return { ok: false, error: 'missing_xrp_rpc_url' };
-  const body = JSON.stringify({ method, params });
+
+  // rippled JSON-RPC expects params as an ARRAY of objects
+  const payload = { method, params: Array.isArray(params) ? params : [params] };
+  const body = JSON.stringify(payload);
+
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (NOWNODES_API_KEY) { headers['api-key'] = NOWNODES_API_KEY; headers['x-api-key'] = NOWNODES_API_KEY; }
@@ -85,11 +83,9 @@ async function findXrpWalletId(addr: string): Promise<string | null> {
 
 // ---------- handler ----------
 export async function POST(req: NextRequest) {
-  // auth
   const sec = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || sec !== CRON_SECRET) return json(401, { ok:false, code:'unauthorized', message:'Unauthorized.' });
 
-  // input
   const url = new URL(req.url);
   const body = await req.json().catch(() => ({} as any));
   let tx = (url.searchParams.get('tx') || body?.txHash || body?.tx_hash || body?.hash || '').trim();
@@ -108,27 +104,23 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // fetch tx
+  // fetch tx (params MUST be an array)
   const r = await rpc('tx', { transaction: tx, binary: false });
   if (!r.ok) {
-    // XRPL returns specific error if not found (e.g., "txnNotFound")
     if (/txnNotFound/i.test(r.error || '')) {
       return json(200, { ok:false, code:'tx_not_found', message:'The hash of this transaction does not exist on the blockchain.', data:{ txHash: tx } });
     }
     return json(502, { ok:false, code:'rpc_error', message:'An error occurred while fetching the transaction.' });
   }
   const res: any = r.result || {};
-  // Validated?
   const validated: boolean = !!res.validated;
   if (!validated) {
     return json(200, { ok:false, code:'rpc_error', message:'Transaction is not yet confirmed on-chain.', data:{ txHash: tx } });
   }
 
-  // Extract destination + amount (drops -> XRP)
-  const txObj = res.tx || res; // some nodes place fields at top-level
+  const txObj = res.tx || res;
   const dest = String(txObj?.Destination || '').trim();
   const amountDrops = txObj?.Amount;
-  // Amount can be string (drops) or object (issued currency). We only accept native XRP.
   const isNative = typeof amountDrops === 'string';
   const amountXrpStr = isNative ? (() => {
     const drops = BigInt(amountDrops);
@@ -147,13 +139,9 @@ export async function POST(req: NextRequest) {
     return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash: tx } });
   }
 
-  // block time (Ripple epoch seconds at res.date)
   const blockTimeISO = typeof res.date === 'number' ? rippleEpochToISO(res.date) : new Date().toISOString();
-
-  // pricing
   const priced = await priceToUsdOrNullXRP(amountXrpStr);
 
-  // insert
   const payload: Record<string, any> = {
     wallet_id,
     tx_hash: tx,
