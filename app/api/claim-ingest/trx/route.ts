@@ -9,6 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { createHash } from 'crypto';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,26 +44,24 @@ function sunToTrxString(sun: bigint | number | string): string {
 
 // ---- Base58Check (Tron) hex (starts with 0x41...) -> base58 'T...' ----
 const B58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-function sha256(bytes: Uint8Array): Uint8Array {
-  // minimal sync SHA-256 via subtle is async; implement tiny JS sha256 is too big.
-  // Use crypto.subtle (available in edge runtime). Wrap as sync-like with Atomics not allowed -> do async below.
-  throw new Error('sha256_sync_unavailable');
+
+function sha256Node(bytes: Uint8Array): Uint8Array {
+  const buf = createHash('sha256').update(bytes).digest(); // Node Buffer
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
-async function sha256Async(bytes: Uint8Array): Promise<Uint8Array> {
-  const buf = await crypto.subtle.digest('SHA-256', bytes);
-  return new Uint8Array(buf);
-}
+
 function hexToBytes(hex: string): Uint8Array {
   const h = hex.startsWith('0x') ? hex.slice(2) : hex;
   const arr = new Uint8Array(h.length / 2);
   for (let i = 0; i < arr.length; i++) arr[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
   return arr;
 }
+
 function base58Encode(bytes: Uint8Array): string {
   let x = BigInt(0);
   for (const b of bytes) { x = (x << 8n) + BigInt(b); }
   let out = '';
-  while (x > 0) {
+  while (x > 0n) {
     const mod = Number(x % 58n);
     out = B58_ALPHABET[mod] + out;
     x = x / 58n;
@@ -72,13 +71,14 @@ function base58Encode(bytes: Uint8Array): string {
   for (const b of bytes) { if (b === 0) leading++; else break; }
   return '1'.repeat(leading) + out;
 }
+
 async function tronHexToBase58(hex: string): Promise<string | null> {
   // Tron addresses in node JSON are hex with leading 0x41 (mainnet). Need Base58Check.
   const h = hex.startsWith('0x') ? hex.slice(2) : hex;
   if (!/^41[0-9a-fA-F]{40}$/.test(h)) return null;
   const payload = hexToBytes(h);
-  const h1 = await sha256Async(payload);
-  const h2 = await sha256Async(h1);
+  const h1 = sha256Node(payload);
+  const h2 = sha256Node(h1);
   const checksum = h2.slice(0, 4);
   const full = new Uint8Array(payload.length + 4);
   full.set(payload, 0);
@@ -184,7 +184,7 @@ export async function POST(req: NextRequest) {
   const contracts: any[] = Array.isArray(tx?.raw_data?.contract) ? tx.raw_data.contract : [];
   const first = contracts.find(c => String(c?.type || '').includes('TransferContract'));
   if (!first) {
-    // Not a native TRX transfer -> for baseline tretiramo kao "not our wallet"
+    // Not a native TRX transfer -> baseline treat as not our wallet
     return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash: txid } });
   }
   const val = first?.parameter?.value || {};
