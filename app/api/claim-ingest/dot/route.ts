@@ -1,9 +1,10 @@
 // app/api/claim-ingest/dot/route.ts
-// DOT claim-ingest using Redis cache filled by /api/indexers/dot.
-// Contract aligned with other chains: inserted | duplicate | not_project_wallet | tx_not_found | invalid_payload | rpc_error
+// DOT claim-ingest using Redis cache (from /api/indexers/dot) + on-demand micro-scan fallback.
+// Returns: inserted | duplicate | not_project_wallet | tx_not_found | invalid_payload | rpc_error
 //
 // ENV: CRON_SECRET, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN,
-//      NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+//      NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+//      DOT_RPC_URL (for on-demand fallback scan), DOT_CLAIM_LOOKBACK (optional, default 300)
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -18,6 +19,8 @@ const json = (status: number, payload: J) =>
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || '';
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const DOT_RPC_URL = process.env.DOT_RPC_URL || process.env.DOT_RPC_HTTP || '';
+const DOT_CLAIM_LOOKBACK = Math.max(1, Math.min(5000, Number(process.env.DOT_CLAIM_LOOKBACK || 300))); // safety cap
 
 // planck -> DOT (1 DOT = 10^10 planck)
 function planckToDotString(p: string | number | bigint): string {
@@ -28,7 +31,22 @@ function planckToDotString(p: string | number | bigint): string {
   return rest ? `${whole.toString()}.${rest}` : whole.toString();
 }
 
-// Redis GET
+// Validation + normalization: accept "0x<64hex>" or "<64hex>", return "<64hex>" lowercase (no 0x)
+function normalizeHash64(input: string): string | null {
+  const raw = String(input || '').trim();
+  const no0x = raw.startsWith('0x') || raw.startsWith('0X') ? raw.slice(2) : raw;
+  if (/^[0-9A-Fa-f]{64}$/.test(no0x)) return no0x.toLowerCase();
+  return null;
+}
+
+// ---------- Supabase ----------
+function supa() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  return createClient(url, key, { auth: { persistSession: false } });
+}
+
+// ---------- Redis (Upstash REST) ----------
 async function redisGet(key: string) {
   if (!REDIS_URL || !REDIS_TOKEN) return null;
   const r = await fetch(`${REDIS_URL}/get/${encodeURIComponent(key)}`, {
@@ -39,18 +57,24 @@ async function redisGet(key: string) {
   const j = await r.json().catch(() => null);
   return j?.result ?? null;
 }
-
-function supa() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  return createClient(url, key, { auth: { persistSession: false } });
+async function redisSetEx(key: string, ttlSeconds: number, value: any) {
+  if (!REDIS_URL || !REDIS_TOKEN) return false;
+  const r = await fetch(`${REDIS_URL}/set/${encodeURIComponent(key)}/${encodeURIComponent(
+    typeof value === 'string' ? value : JSON.stringify(value),
+  )}?EX=${ttlSeconds}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}` },
+  });
+  return r.ok;
 }
 
-// Pricing helper (best-effort via lib/fx if present)
+// ---------- Pricing (best-effort) ----------
 async function priceDotToUsdOrNull(amountStr: string): Promise<{ usd: number; pricedAt: string } | null> {
   try {
     const fx: any = await import('@/lib/fx');
-    const fns = ['getUsdPrices','fetchUsdPrices','getPrices','pricesForSymbols'].filter(k => typeof (fx as any)[k] === 'function');
+    const fns = ['getUsdPrices', 'fetchUsdPrices', 'getPrices', 'pricesForSymbols'].filter(
+      (k) => typeof (fx as any)[k] === 'function'
+    );
     if (!fns.length) return null;
     const getPrices = (fx as any)[fns[0]].bind(fx);
     const prices: Record<string, number> = await getPrices(['DOT']);
@@ -58,15 +82,114 @@ async function priceDotToUsdOrNull(amountStr: string): Promise<{ usd: number; pr
     const amt = parseFloat(amountStr || '0');
     if (typeof usd !== 'number' || !Number.isFinite(amt)) return null;
     return { usd: +(amt * usd).toFixed(2), pricedAt: new Date().toISOString() };
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-// Validation + normalization: accept "0x<64-hex>" or "<64-hex>", return normalized "<64-hex>" (lowercase, no 0x)
-function normalizeHash64(input: string): string | null {
-  const raw = String(input || '').trim();
-  const no0x = raw.startsWith('0x') || raw.startsWith('0X') ? raw.slice(2) : raw;
-  if (/^[0-9A-Fa-f]{64}$/.test(no0x)) return no0x.toLowerCase();
-  return null;
+// ---------- On-demand micro-scan (fallback) ----------
+async function findDotTxOnChain(txHash64: string): Promise<{ to: string; amount_planck: string; block_time: string } | null> {
+  if (!DOT_RPC_URL) return null;
+
+  // Lazy import
+  let ApiPromise: any, HttpProvider: any;
+  try {
+    const mod = await import('@polkadot/api');
+    ApiPromise = mod.ApiPromise;
+    HttpProvider = mod.HttpProvider;
+  } catch {
+    return null;
+  }
+
+  let api: any;
+  try {
+    const provider = new HttpProvider(DOT_RPC_URL);
+    api = await ApiPromise.create({ provider });
+  } catch {
+    return null;
+  }
+
+  try {
+    // finalized head
+    const finalizedHash = await api.rpc.chain.getFinalizedHead();
+    const finalizedHeader = await api.rpc.chain.getHeader(finalizedHash);
+    const finalizedNumber = finalizedHeader.number.toNumber();
+    const start = Math.max(0, finalizedNumber - DOT_CLAIM_LOOKBACK);
+
+    // helper: timestamp at given block
+    async function getBlockTimeISO(hash: any): Promise<string> {
+      try {
+        const ts = await (api.query.timestamp.now as any).at(hash);
+        const ms = ts?.toNumber?.() ?? ts?.toBn?.()?.toNumber?.() ?? null;
+        return ms ? new Date(ms).toISOString() : new Date().toISOString();
+      } catch {
+        return new Date().toISOString();
+      }
+    }
+
+    // shallow decoder for balances.transfer / transferKeepAlive and utility.batch/batchAll
+    const decodeOne = (c: any) => {
+      const s = c.section?.toString?.() || '';
+      const m = c.method?.toString?.() || '';
+      if (s === 'balances' && (m === 'transfer' || m === 'transferKeepAlive')) {
+        const dest = c.args[0]; // AccountId
+        const value = c.args[1]; // Balance
+        const to = dest.toString(); // SS58
+        const amt = BigInt(value?.toString?.() || '0');
+        return { to, amountPlanck: amt };
+      }
+      return null;
+    };
+
+    for (let n = finalizedNumber; n >= start; n--) {
+      const blockHash = await api.rpc.chain.getBlockHash(n);
+      const block = await api.rpc.chain.getBlock(blockHash);
+      const blockTimeISO = await getBlockTimeISO(blockHash);
+
+      for (const ext of block.block.extrinsics) {
+        const extHash = ext.hash.toHex().replace(/^0x/, '').toLowerCase();
+        if (extHash !== txHash64) continue;
+
+        // exact extrinsic matched — extract transfer(s)
+        const call = ext.method;
+        const section = call.section?.toString?.() || '';
+        const method = call.method?.toString?.() || '';
+
+        const direct = decodeOne(call);
+        if (direct) {
+          return {
+            to: direct.to,
+            amount_planck: direct.amountPlanck.toString(),
+            block_time: blockTimeISO,
+          };
+        }
+
+        if (section === 'utility' && (method === 'batch' || method === 'batchAll')) {
+          const calls = call.args?.[0];
+          if (calls && typeof (calls as any)[Symbol.iterator] === 'function') {
+            for (const c of calls as any[]) {
+              const x = decodeOne(c);
+              if (x) {
+                return {
+                  to: x.to,
+                  amount_planck: x.amountPlanck.toString(),
+                  block_time: blockTimeISO,
+                };
+              }
+            }
+          }
+        }
+
+        // If matched extrinsic but not balances transfer → treat as not ours / uninterpretable here
+        return null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    try { await api?.disconnect?.(); } catch {}
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -85,27 +208,38 @@ export async function POST(req: NextRequest) {
   const noteRaw = (typeof body?.note === 'string' ? body.note : (typeof body?.message === 'string' ? body.message : '')) || '';
   const note = noteRaw.toString().trim() || null;
 
-  const txHashNorm = normalizeHash64(rawTx);
-  if (!txHashNorm) {
+  const txHash = normalizeHash64(rawTx);
+  if (!txHash) {
     return json(400, { ok:false, code:'invalid_payload', message:'Invalid transaction hash format.' });
   }
 
   // idempotent pre-check
   {
-    const { data: found, error } = await supa().from('contributions').select('id').eq('tx_hash', txHashNorm).limit(1);
+    const { data: found, error } = await supa().from('contributions').select('id').eq('tx_hash', txHash).limit(1);
     if (!error && found && found.length) {
-      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash: txHashNorm } });
+      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash } });
     }
   }
 
-  // Lookup in Redis cache prepared by indexer
-  const cacheKey = `dot:tx:${txHashNorm}`;
-  const cacheRaw = await redisGet(cacheKey);
+  // 1) Try Redis cache
+  const cacheKey = `dot:tx:${txHash}`;
+  let cacheRaw = await redisGet(cacheKey);
+
+  // 2) Fallback: on-demand micro-scan (last N finalized blocks)
   if (!cacheRaw) {
-    return json(200, { ok:false, code:'tx_not_found', message:'The hash of this transaction does not exist on the blockchain.', data:{ txHash: txHashNorm } });
+    const found = await findDotTxOnChain(txHash);
+    if (found) {
+      // Cache it for 14 dana
+      await redisSetEx(cacheKey, 60 * 60 * 24 * 14, found);
+      cacheRaw = JSON.stringify(found);
+    }
   }
 
-  // cache value is JSON: { to, amount_planck, block_time }
+  if (!cacheRaw) {
+    return json(200, { ok:false, code:'tx_not_found', message:'The hash of this transaction does not exist on the blockchain.', data:{ txHash } });
+  }
+
+  // Parse cache
   let cached: any = null;
   try {
     cached = typeof cacheRaw === 'string' ? JSON.parse(cacheRaw) : cacheRaw;
@@ -118,7 +252,7 @@ export async function POST(req: NextRequest) {
   const blockTimeISO: string = typeof cached?.block_time === 'string' ? cached.block_time : new Date().toISOString();
 
   if (!toAddr || !/^[1-9A-HJ-NP-Za-km-z]+$/.test(toAddr)) {
-    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash: txHashNorm } });
+    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash } });
   }
 
   // Map to wallet_id
@@ -129,7 +263,7 @@ export async function POST(req: NextRequest) {
     .eq('address', toAddr)
     .limit(1);
   if (!wallet || !wallet.length) {
-    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash: txHashNorm } });
+    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash } });
   }
   const wallet_id = String(wallet[0].id);
 
@@ -142,7 +276,7 @@ export async function POST(req: NextRequest) {
   // Insert
   const payload: Record<string, any> = {
     wallet_id,
-    tx_hash: txHashNorm,
+    tx_hash: txHash,
     amount: amountDotStr,
     block_time: blockTimeISO,
   };
@@ -153,7 +287,7 @@ export async function POST(req: NextRequest) {
   if (insErr) {
     const msg = String(insErr.message || ''); const code = (insErr as any).code || '';
     if (code === '23505' || /duplicate key|unique/i.test(msg)) {
-      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash: txHashNorm } });
+      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash } });
     }
     return json(400, { ok:false, code:'db_error', message:'Database write error.' });
   }
@@ -162,7 +296,7 @@ export async function POST(req: NextRequest) {
     ok: true,
     code: 'inserted',
     message: 'The transaction was successfully recorded on our project.',
-    data: { txHash: txHashNorm, inserted: ins ?? null },
+    data: { txHash, inserted: ins ?? null },
   });
 }
 
