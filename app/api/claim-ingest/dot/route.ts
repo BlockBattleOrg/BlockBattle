@@ -46,7 +46,7 @@ function supa() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-// Cosmos-like pricing helper reused: best-effort via lib/fx if present
+// Pricing helper (best-effort via lib/fx if present)
 async function priceDotToUsdOrNull(amountStr: string): Promise<{ usd: number; pricedAt: string } | null> {
   try {
     const fx: any = await import('@/lib/fx');
@@ -61,8 +61,13 @@ async function priceDotToUsdOrNull(amountStr: string): Promise<{ usd: number; pr
   } catch { return null; }
 }
 
-// Validation: Substrate extrinsic hash is 64-hex (no 0x)
-const is64hex = (s: string) => /^[0-9A-Fa-f]{64}$/.test(String(s || '').trim());
+// Validation + normalization: accept "0x<64-hex>" or "<64-hex>", return normalized "<64-hex>" (lowercase, no 0x)
+function normalizeHash64(input: string): string | null {
+  const raw = String(input || '').trim();
+  const no0x = raw.startsWith('0x') || raw.startsWith('0X') ? raw.slice(2) : raw;
+  if (/^[0-9A-Fa-f]{64}$/.test(no0x)) return no0x.toLowerCase();
+  return null;
+}
 
 export async function POST(req: NextRequest) {
   // auth
@@ -76,31 +81,28 @@ export async function POST(req: NextRequest) {
 
   const url = new URL(req.url);
   const body = await req.json().catch(() => ({} as any));
-  let txHash = (url.searchParams.get('tx') || body?.txHash || body?.tx_hash || body?.hash || '').trim();
+  const rawTx = (url.searchParams.get('tx') || body?.txHash || body?.tx_hash || body?.hash || '').trim();
   const noteRaw = (typeof body?.note === 'string' ? body.note : (typeof body?.message === 'string' ? body.message : '')) || '';
   const note = noteRaw.toString().trim() || null;
 
-  if (!txHash || !is64hex(txHash)) {
+  const txHashNorm = normalizeHash64(rawTx);
+  if (!txHashNorm) {
     return json(400, { ok:false, code:'invalid_payload', message:'Invalid transaction hash format.' });
   }
 
   // idempotent pre-check
   {
-    const { data: found, error } = await supa().from('contributions').select('id').eq('tx_hash', txHash).limit(1);
+    const { data: found, error } = await supa().from('contributions').select('id').eq('tx_hash', txHashNorm).limit(1);
     if (!error && found && found.length) {
-      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash } });
+      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash: txHashNorm } });
     }
   }
 
   // Lookup in Redis cache prepared by indexer
-  const cacheKey = `dot:tx:${txHash.toLowerCase()}`;
-  let cacheRaw = await redisGet(cacheKey);
+  const cacheKey = `dot:tx:${txHashNorm}`;
+  const cacheRaw = await redisGet(cacheKey);
   if (!cacheRaw) {
-    // tolerant: some writers might store without lowercasing
-    cacheRaw = await redisGet(`dot:tx:${txHash}`);
-  }
-  if (!cacheRaw) {
-    return json(200, { ok:false, code:'tx_not_found', message:'The hash of this transaction does not exist on the blockchain.', data:{ txHash } });
+    return json(200, { ok:false, code:'tx_not_found', message:'The hash of this transaction does not exist on the blockchain.', data:{ txHash: txHashNorm } });
   }
 
   // cache value is JSON: { to, amount_planck, block_time }
@@ -116,8 +118,7 @@ export async function POST(req: NextRequest) {
   const blockTimeISO: string = typeof cached?.block_time === 'string' ? cached.block_time : new Date().toISOString();
 
   if (!toAddr || !/^[1-9A-HJ-NP-Za-km-z]+$/.test(toAddr)) {
-    // if "to" not present or not a plausible SS58 string, treat as not ours
-    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash } });
+    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash: txHashNorm } });
   }
 
   // Map to wallet_id
@@ -128,7 +129,7 @@ export async function POST(req: NextRequest) {
     .eq('address', toAddr)
     .limit(1);
   if (!wallet || !wallet.length) {
-    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash } });
+    return json(200, { ok:false, code:'not_project_wallet', message:'The transaction is not directed to our project. The wallet address does not belong to this project.', data:{ txHash: txHashNorm } });
   }
   const wallet_id = String(wallet[0].id);
 
@@ -141,7 +142,7 @@ export async function POST(req: NextRequest) {
   // Insert
   const payload: Record<string, any> = {
     wallet_id,
-    tx_hash: txHash,
+    tx_hash: txHashNorm,
     amount: amountDotStr,
     block_time: blockTimeISO,
   };
@@ -152,7 +153,7 @@ export async function POST(req: NextRequest) {
   if (insErr) {
     const msg = String(insErr.message || ''); const code = (insErr as any).code || '';
     if (code === '23505' || /duplicate key|unique/i.test(msg)) {
-      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash } });
+      return json(200, { ok:true, code:'duplicate', message:'The transaction has already been recorded in our project before.', data:{ txHash: txHashNorm } });
     }
     return json(400, { ok:false, code:'db_error', message:'Database write error.' });
   }
@@ -161,7 +162,7 @@ export async function POST(req: NextRequest) {
     ok: true,
     code: 'inserted',
     message: 'The transaction was successfully recorded on our project.',
-    data: { txHash, inserted: ins ?? null },
+    data: { txHash: txHashNorm, inserted: ins ?? null },
   });
 }
 
