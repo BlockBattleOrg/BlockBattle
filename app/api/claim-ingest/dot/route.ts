@@ -4,7 +4,7 @@
 //
 // ENV: CRON_SECRET, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN,
 //      NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-//      DOT_RPC_URL (for on-demand fallback scan), DOT_CLAIM_LOOKBACK (optional, default 300)
+//      DOT_RPC_URL (for on-demand fallback scan), DOT_CLAIM_LOOKBACK (optional, default 120)
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -20,7 +20,12 @@ const CRON_SECRET = process.env.CRON_SECRET || '';
 const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || '';
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const DOT_RPC_URL = process.env.DOT_RPC_URL || process.env.DOT_RPC_HTTP || '';
-const DOT_CLAIM_LOOKBACK = Math.max(1, Math.min(5000, Number(process.env.DOT_CLAIM_LOOKBACK || 300))); // safety cap
+
+function supa() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  return createClient(url, key, { auth: { persistSession: false } });
+}
 
 // planck -> DOT (1 DOT = 10^10 planck)
 function planckToDotString(p: string | number | bigint): string {
@@ -37,13 +42,6 @@ function normalizeHash64(input: string): string | null {
   const no0x = raw.startsWith('0x') || raw.startsWith('0X') ? raw.slice(2) : raw;
   if (/^[0-9A-Fa-f]{64}$/.test(no0x)) return no0x.toLowerCase();
   return null;
-}
-
-// ---------- Supabase ----------
-function supa() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 // ---------- Redis (Upstash REST) ----------
@@ -88,10 +86,10 @@ async function priceDotToUsdOrNull(amountStr: string): Promise<{ usd: number; pr
 }
 
 // ---------- On-demand micro-scan (fallback) ----------
-async function findDotTxOnChain(txHash64: string): Promise<{ to: string; amount_planck: string; block_time: string } | null> {
+// Skener je **strogo limitiran** na kratko trajanje (time budget) i manji lookback kako ne bi visio.
+async function findDotTxOnChain(txHash64: string, lookback: number, timeBudgetMs: number): Promise<{ to: string; amount_planck: string; block_time: string } | null | 'timeout'> {
   if (!DOT_RPC_URL) return null;
 
-  // Lazy import
   let ApiPromise: any, HttpProvider: any;
   try {
     const mod = await import('@polkadot/api');
@@ -100,6 +98,8 @@ async function findDotTxOnChain(txHash64: string): Promise<{ to: string; amount_
   } catch {
     return null;
   }
+
+  const deadline = Date.now() + timeBudgetMs;
 
   let api: any;
   try {
@@ -110,13 +110,12 @@ async function findDotTxOnChain(txHash64: string): Promise<{ to: string; amount_
   }
 
   try {
-    // finalized head
     const finalizedHash = await api.rpc.chain.getFinalizedHead();
     const finalizedHeader = await api.rpc.chain.getHeader(finalizedHash);
     const finalizedNumber = finalizedHeader.number.toNumber();
-    const start = Math.max(0, finalizedNumber - DOT_CLAIM_LOOKBACK);
+    const start = Math.max(0, finalizedNumber - lookback);
 
-    // helper: timestamp at given block
+    // helper: timestamp only when needed
     async function getBlockTimeISO(hash: any): Promise<string> {
       try {
         const ts = await (api.query.timestamp.now as any).at(hash);
@@ -127,14 +126,13 @@ async function findDotTxOnChain(txHash64: string): Promise<{ to: string; amount_
       }
     }
 
-    // shallow decoder for balances.transfer / transferKeepAlive and utility.batch/batchAll
     const decodeOne = (c: any) => {
       const s = c.section?.toString?.() || '';
       const m = c.method?.toString?.() || '';
       if (s === 'balances' && (m === 'transfer' || m === 'transferKeepAlive')) {
-        const dest = c.args[0]; // AccountId
-        const value = c.args[1]; // Balance
-        const to = dest.toString(); // SS58
+        const dest = c.args[0];
+        const value = c.args[1];
+        const to = dest.toString();
         const amt = BigInt(value?.toString?.() || '0');
         return { to, amountPlanck: amt };
       }
@@ -142,48 +140,47 @@ async function findDotTxOnChain(txHash64: string): Promise<{ to: string; amount_
     };
 
     for (let n = finalizedNumber; n >= start; n--) {
+      if (Date.now() > deadline) return 'timeout';
+
       const blockHash = await api.rpc.chain.getBlockHash(n);
       const block = await api.rpc.chain.getBlock(blockHash);
-      const blockTimeISO = await getBlockTimeISO(blockHash);
 
+      // pre-scan extrinsics by hash
+      let matchedCall: any | null = null;
       for (const ext of block.block.extrinsics) {
         const extHash = ext.hash.toHex().replace(/^0x/, '').toLowerCase();
         if (extHash !== txHash64) continue;
+        matchedCall = ext.method;
+        break;
+      }
+      if (!matchedCall) continue;
 
-        // exact extrinsic matched — extract transfer(s)
-        const call = ext.method;
-        const section = call.section?.toString?.() || '';
-        const method = call.method?.toString?.() || '';
+      // we have a match → decode transfer or batch
+      const section = matchedCall.section?.toString?.() || '';
+      const method = matchedCall.method?.toString?.() || '';
+      const blockTimeISO = await getBlockTimeISO(blockHash);
 
-        const direct = decodeOne(call);
-        if (direct) {
-          return {
-            to: direct.to,
-            amount_planck: direct.amountPlanck.toString(),
-            block_time: blockTimeISO,
-          };
-        }
+      const direct = decodeOne(matchedCall);
+      if (direct) {
+        return { to: direct.to, amount_planck: direct.amountPlanck.toString(), block_time: blockTimeISO };
+      }
 
-        if (section === 'utility' && (method === 'batch' || method === 'batchAll')) {
-          const calls = call.args?.[0];
-          if (calls && typeof (calls as any)[Symbol.iterator] === 'function') {
-            for (const c of calls as any[]) {
-              const x = decodeOne(c);
-              if (x) {
-                return {
-                  to: x.to,
-                  amount_planck: x.amountPlanck.toString(),
-                  block_time: blockTimeISO,
-                };
-              }
+      if (section === 'utility' && (method === 'batch' || method === 'batchAll')) {
+        const calls = matchedCall.args?.[0];
+        if (calls && typeof (calls as any)[Symbol.iterator] === 'function') {
+          for (const c of calls as any[]) {
+            const x = decodeOne(c);
+            if (x) {
+              return { to: x.to, amount_planck: x.amountPlanck.toString(), block_time: blockTimeISO };
             }
           }
         }
-
-        // If matched extrinsic but not balances transfer → treat as not ours / uninterpretable here
-        return null;
       }
+
+      // extrinsic found ali nije transfer → za naš use-case nije primjenjivo
+      return null;
     }
+
     return null;
   } catch {
     return null;
@@ -225,11 +222,18 @@ export async function POST(req: NextRequest) {
   const cacheKey = `dot:tx:${txHash}`;
   let cacheRaw = await redisGet(cacheKey);
 
-  // 2) Fallback: on-demand micro-scan (last N finalized blocks)
+  // 2) Fallback: on-demand micro-scan with tight limits
   if (!cacheRaw) {
-    const found = await findDotTxOnChain(txHash);
+    const defaultLookback = Math.max(1, Math.min(2000, Number(process.env.DOT_CLAIM_LOOKBACK || 120)));
+    const lookbackParam = Number(url.searchParams.get('lookback') || defaultLookback);
+    const lookback = Math.max(1, Math.min(2000, lookbackParam));
+    const timeBudgetMs = Math.max(2000, Math.min(12000, Number(url.searchParams.get('timeMs') || 8000)));
+
+    const found = await findDotTxOnChain(txHash, lookback, timeBudgetMs);
+    if (found === 'timeout') {
+      return json(200, { ok:false, code:'rpc_error', message:'Lookup timed out. Please try again with a smaller lookback.', data:{ txHash } });
+    }
     if (found) {
-      // Cache it for 14 dana
       await redisSetEx(cacheKey, 60 * 60 * 24 * 14, found);
       cacheRaw = JSON.stringify(found);
     }
