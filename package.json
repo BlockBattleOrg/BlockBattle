@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@polkadot/api": "^16.4.6",
     "@supabase/supabase-js": "^2.55.0",
     "@upstash/ratelimit": "^2.0.6",
     "@upstash/redis": "^1.35.3",
