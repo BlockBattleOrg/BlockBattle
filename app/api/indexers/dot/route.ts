@@ -2,10 +2,10 @@
 // DOT light indexer (finalized blocks) -> Redis cache for claim-first.
 // - Scans up to ?maxBlocks (default 25) from cursor to finalized
 // - Decodes balances.transfer/transferKeepAlive (+ shallow utility.batch/batchAll)
-// - If "to" is our wallet (wallets.chain='dot'), cache in Redis: dot:tx:<hash> = {to, amount, block_time}
+// - If "to" is our wallet (wallets.chain='dot'), cache in Redis: dot:tx:<hash> = {to, amount_planck, block_time}
 // - DOES NOT write to Supabase contributions (claim-ingest will do that)
-// ENV needed: DOT_RPC_URL, CRON_SECRET, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN,
-//             NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+// ENV: DOT_RPC_URL, CRON_SECRET, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN,
+//      NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -90,7 +90,7 @@ export async function POST(req: NextRequest) {
 
   const ourAddrs = new Set<string>((wallets || []).map((w: any) => String(w.address)));
 
-  // Lazy-load @polkadot/api to avoid bundling overhead in other routes
+  // Lazy-load @polkadot/api
   let ApiPromise: any, HttpProvider: any;
   try {
     const mod = await import('@polkadot/api');
@@ -127,7 +127,6 @@ export async function POST(req: NextRequest) {
     if (cur) cursorNum = Number(cur) || 0;
   } catch {}
   if (!cursorNum || cursorNum > finalizedNumber) {
-    // bootstrap a bit behind finalized to avoid gaps
     cursorNum = Math.max(0, finalizedNumber - 100);
     await redisSet(CURSOR_KEY, String(cursorNum));
   }
@@ -135,6 +134,7 @@ export async function POST(req: NextRequest) {
   const from = cursorNum + 1;
   const to = Math.min(finalizedNumber, cursorNum + maxBlocks);
   if (to < from) {
+    try { await api?.disconnect?.(); } catch {}
     return json(200, { ok: true, scanned: 0, from: cursorNum, to: cursorNum, finalized: finalizedNumber });
   }
 
@@ -144,19 +144,16 @@ export async function POST(req: NextRequest) {
   // Helper to extract timestamp from block
   async function getBlockTimeISO(hash: any): Promise<string> {
     try {
-      const tsNow = new Date().toISOString();
-      // Query timestamp pallet storage at block
       const ts = await (api.query.timestamp.now as any).at(hash);
       const ms = ts?.toNumber?.() ?? ts?.toBn?.()?.toNumber?.() ?? null;
-      if (!ms) return tsNow;
-      return new Date(ms).toISOString();
+      return ms ? new Date(ms).toISOString() : new Date().toISOString();
     } catch {
       return new Date().toISOString();
     }
   }
 
-  // Extract interesting transfers from extrinsic (and shallow batch calls)
-  function* extractTransfersFromExtrinsic(api: any, ext: any): Generator<{ section: string; method: string; to: string; amountPlanck: bigint }> {
+  // Extract transfers from extrinsic (plus shallow batch calls)
+  function* extractTransfersFromExtrinsic(ext: any): Generator<{ to: string; amountPlanck: bigint }> {
     const call = ext.method;
     const section = call.section?.toString?.() || '';
     const method = call.method?.toString?.() || '';
@@ -167,32 +164,27 @@ export async function POST(req: NextRequest) {
       if (s === 'balances' && (m === 'transfer' || m === 'transferKeepAlive')) {
         const dest = c.args[0]; // AccountId
         const value = c.args[1]; // Balance
-        const to = dest.toString(); // ss58 string (network default)
+        const to = dest.toString(); // ss58
         const amt = BigInt(value?.toString?.() || '0');
-        return { section: s, method: m, to, amountPlanck: amt };
+        return { to, amountPlanck: amt };
       }
       return null;
     };
 
     // direct balances.transfer
     const direct = decodeOne(call);
-    if (direct) {
-      yield direct;
-      return;
-    }
+    if (direct) { yield direct; return; }
+
     // shallow utility.batch / batchAll
     if (section === 'utility' && (method === 'batch' || method === 'batchAll')) {
       const calls = call.args?.[0];
-      if (Array.isArray(calls)) {
-        for (const c of calls) {
+
+      // Use for...of to allow yielding from this generator (no forEach!)
+      if (calls && typeof (calls as any)[Symbol.iterator] === 'function') {
+        for (const c of calls as any[]) {
           const x = decodeOne(c);
           if (x) yield x;
         }
-      } else if (calls && typeof calls.forEach === 'function') {
-        calls.forEach((c: any) => {
-          const x = decodeOne(c);
-          if (x) yield x;
-        });
       }
     }
   }
@@ -203,38 +195,38 @@ export async function POST(req: NextRequest) {
       const block = await api.rpc.chain.getBlock(blockHash);
       const blockTimeISO = await getBlockTimeISO(blockHash);
 
-      // extrinsics loop
       for (const ext of block.block.extrinsics) {
-        // Only success extrinsics? For baseline, accept all; claim route cares about our destination.
-        const transfers = Array.from(extractTransfersFromExtrinsic(api, ext));
+        const transfers = Array.from(extractTransfersFromExtrinsic(ext));
         if (!transfers.length) continue;
 
         const extHash = ext.hash.toHex().replace(/^0x/, '').toLowerCase();
 
+        // Ako želiš cache-irati samo “naše” transfere, ovdje se može filtrirati prema ourAddrs.
+        // Trenutno cache-iramo sve, a claim ruta odlučuje je li to naš wallet.
         for (const t of transfers) {
-          // Cache every transfer we see; claim route will decide if it's "our project"
           const cacheKey = `dot:tx:${extHash}`;
           const value = {
-            to: t.to,                                      // ss58
-            amount_planck: t.amountPlanck.toString(),      // string
-            block_time: blockTimeISO,                      // ISO
+            to: t.to,                                // ss58
+            amount_planck: t.amountPlanck.toString(),// string
+            block_time: blockTimeISO,                // ISO
           };
-          // Save/refresh TTL
           await redisSetEx(cacheKey, ttl, value);
         }
       }
 
       scanned++;
       lastScanned = n;
-      // update cursor progressively to avoid redo on long runs
       if (n % 5 === 0 || n === to) {
         await redisSet(CURSOR_KEY, String(n));
       }
     }
   } catch (e: any) {
-    // still advance cursor to last scanned block to avoid tight loops
     if (lastScanned > cursorNum) await redisSet(CURSOR_KEY, String(lastScanned));
-    return json(502, { ok: false, code: 'rpc_error', message: `Indexer error: ${e?.message || 'unknown'}`, scanned, toCursor: lastScanned, finalized: finalizedNumber });
+    return json(502, {
+      ok: false, code: 'rpc_error',
+      message: `Indexer error: ${e?.message || 'unknown'}`,
+      scanned, toCursor: lastScanned, finalized: finalizedNumber
+    });
   } finally {
     try { await api?.disconnect?.(); } catch {}
   }
