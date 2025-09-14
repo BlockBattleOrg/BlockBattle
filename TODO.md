@@ -8,24 +8,24 @@
 ## Phase 0 — OPSEC and Standards
 - ✅ `[x]` GitHub noreply identity; hidden real email
 - ✅ `[x]` `.gitignore`, `README.md`, `SECURITY.md`, `LICENSE`
-- ✅ `[x]` `.env.example` (no secrets)
+- ✅ `[x]` `.env.example` (no secrets) :contentReference[oaicite:0]{index=0}
 
 ## Phase 1 — Application Skeleton
 - ✅ `[x]` Next.js (App Router, TS, ESLint, Tailwind)
 - ✅ `[x]` Basic pages and layout
-- ✅ `[x]` GitHub → Vercel pipeline (production domain wired)
+- ✅ `[x]` GitHub → Vercel pipeline (production domain wired) :contentReference[oaicite:1]{index=1}
 
 ## Phase 2 — Database (Supabase) & Security
 - ✅ `[x]` Tables: `currencies`, `wallets`, `contributions`, `aggregates_daily`, `settings`, `heights_daily`
 - ✅ `[x]` RLS enabled (read-only where needed)
 - ✅ `[x]` Security Advisor clean (RLS on `heights_daily`)
-- ✅ `[x]` Seeded base currencies & wallets (API tolerant to missing `currency_id`)
+- ✅ `[x]` Seeded base currencies & wallets (API tolerant to missing `currency_id`) :contentReference[oaicite:2]{index=2}
 
 ## Phase 3 — Ingestion (Chain Heights & Contributions)
 - ✅ `[x]` Heights ingest routes (protected by `x-cron-secret`) using **NowNodes**:
-  **BTC, LTC, DOGE, ETH, OP, ARB, POL (alias `/ingest/matic`), AVAX, DOT, ATOM, XRP, SOL, XLM, TRX, BSC**
-- ✅ `[x]` Standardized height markers in `settings` as `<CHAIN>_last_height`
-- ✅ `[x]` GitHub Actions schedules for height ingests (optimized: hourly, staggered)
+  **BTC, LTC, DOGE, ETH, OP, ARB, POL (alias `/ingest/matic`), AVAX, DOT, ATOM, XRP, SOL, XLM, TRX, BSC**:contentReference[oaicite:3]{index=3}
+- ✅ `[x]` Standardized height markers in `settings` as `<CHAIN>_last_height`:contentReference[oaicite:4]{index=4}
+- ✅ `[x]` GitHub Actions schedules for height ingests (optimized: hourly, staggered):contentReference[oaicite:5]{index=5}
 - ✅ `[x]` Native **contribution ingest**:
   - ✅ `[x]` POL (EVM native)
   - ✅ `[x]` ETH (EVM native)
@@ -35,11 +35,11 @@
   - ✅ `[x]` OP (EVM native)
   - ✅ `[x]` ARB (EVM native)
   - ✅ `[x]` All chains maintain `<chain>_contrib_last_scanned` markers in `settings`
-  - ✅ `[x]` GitHub Actions contrib ingests (optimized: every 3h, staggered)
-- ✅ `[x]` Normalize `amount_usd` (FX integration) and write to `contributions.amount_usd`
+  - ✅ `[x]` GitHub Actions contrib ingests (optimized: every 3h, staggered):contentReference[oaicite:6]{index=6}
+- ✅ `[x]` Normalize `amount_usd` (FX integration) and write to `contributions.amount_usd`:contentReference[oaicite:7]{index=7}
 - ☐ `[ ]` Telemetry (structured logs) & basic alerts on failure
 
-**Phase 3 acceptance:** All ingest routes return `{ ok: true, ... }`, and `settings` markers advance per run.
+**Notes (Phase 3):** Ingestion routes remain; **DOT & ATOM nisu u Community Blocks (UI)**.
 
 ---
 
@@ -53,9 +53,9 @@
 - ✅ `[x]` Daily rollups (`/api/admin/snapshot-heights` + cron at 00:05 UTC) for contributions & heights
 - ✅ `[x]` Contributions rollup job adjusted to 2-hourly schedule
 - 🟡 `[~]` Stale/latency metadata in `/api/public/overview` (endpoint works, metadata not yet added)
-- ✅ `[x]` CORS allow-list + lightweight rate limiting on public routes
+- ✅ `[x]` CORS allow-list + lightweight rate limiting on public routes :contentReference[oaicite:8]{index=8}
 
-**Phase 4 acceptance:** UI reads real data via public API; responses are fresh and fast.
+**Phase 4 acceptance:** UI reads real data via public API; responses are fresh and fast. :contentReference[oaicite:9]{index=9}
 
 ---
 
@@ -63,16 +63,19 @@
 - ✅ `[x]` Heights table uses live values
 - ✅ `[x]` “Participate” modal with QR (dynamic import of `qrcode`)
 - ✅ `[x]` Contributions panel (Leaderboard + Recent)
-- ✅ `[x]` Explorer links (Etherscan/Polygonscan) for recent tx
-- ✅ `[x]` Amount rendering with full native precision per chain (no confusing “0”)
+- ✅ `[x]` Explorer links across chains (EVM, **BTC, LTC, DOGE, XRP, SOL, XLM** …) on Recent contributions
+- ✅ `[x]` Amount rendering with full native precision per chain (no confusing “0”):contentReference[oaicite:10]{index=10}
 - ✅ `[x]` `/claim` page (form for claiming contributions)
-- ☐ `[ ]` Status badges per chain (OK/STALE/ERR) sourced from API metadata
+- ✅ `[x]` **Note rendering**: shows `note` from Supabase `contributions` in Recent list
+- ✅ `[x]` **Claim button** in main table opens `/claim` page
+- ✅ `[x]` **Removed per-chain status badges (OK/STALE/ERR)** — background processing flow changed; badges are no longer meaningful for contribution/claim
 - ☐ `[ ]` Empty/loading/error states polish across the app
 
 ---
 
-## Phase 6 — Community Blocks (Top 15) — optional
-- ☐ `[ ]` Treemap (“battle” view) using Recharts; fed by overview/rollups
+## Phase 6 — Community Blocks (Top 15)
+- ✅ `[x]` **Removed DOT & ATOM from Community Blocks** (UI only; ingestion remains available)
+- ✅ `[x]` Treemap (“battle” view) using Recharts; fed by overview/rollups
 
 ---
 
@@ -82,19 +85,18 @@
 - ✅ `[x]` CORS allow-list → production origin only
 - ✅ `[x]` Token-bucket rate limit on public API
 - ✅ `[x]` `/api/health` implemented
-- ☐ `[ ]` Centralized structured logging
+- ☐ `[ ]` Centralized structured logging :contentReference[oaicite:11]{index=11}
 
 ---
 
 ## Phase 8 — Post-MVP
-- ☐ `[ ]` FX aggregator (CoinGecko/proxy) → fill `amount_usd` at insert time
-- ☐ `[ ]` Token donations (ERC-20 `Transfer` logs to project wallets)
+- ✅ `[x]` FX aggregator (CoinGecko/proxy) → fill `amount_usd` at insert time
 
 ---
 
 ## Phase 9 — Exploratory Visualizations
-- ☐ `[ ]` Tetris grid view
-- ☐ `[ ]` Three.js 3D prototype
+- ✅ `[x]` Tetris grid view
+- ☐ `[ ]` Three.js 3D prototype :contentReference[oaicite:12]{index=12}
 
 ---
 
@@ -106,14 +108,14 @@
   - 🟡 `[~]` Remove legacy groups (`*_RPC_URLS`, old DOGE/LTC tunables) once unused
   - 🟡 `[~]` Keep `/ingest/matic` alias temporarily; remove when all schedulers call `/ingest/pol`
 - ☐ `[ ]` Uniform error payload across ingest routes
-- ☐ `[ ]` Unit tests for helpers; smoke tests for APIs
+- ☐ `[ ]` Unit tests for helpers; smoke tests for APIs :contentReference[oaicite:13]{index=13}
 
 ---
 
 ## Immediate Next Steps
 1. ✅ **Cron optimization across all chains** (hourly heights, 3h contrib, staggered).  
 2. ✅ **Rollups**: heights daily @00:05, contributions every 2h @:05.  
-3. **UI polish**: status badges (OK/STALE/ERR), loading/empty states.
+3. **UI polish**: loading/empty/error states. :contentReference[oaicite:14]{index=14}
 
 ---
 
@@ -123,23 +125,13 @@
 - Per-chain RPCs: `ETH_RPC_URL`, `OP_RPC_URL`, `ARB_RPC_URL`, `POL_RPC_URL`, `AVAX_RPC_URL`,  
   `DOT_RPC_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`, `BSC_RPC_URL`
 - BTC: `BTC_API_BASE` (Blockstream/Mempool)
-- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (for rate limiting)
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (for rate limiting) :contentReference[oaicite:15]{index=15}
 
 ---
 
 ## Changelog (today)
-- All ingest workflows reduced to hourly (heights) and 3-hourly (contrib), staggered.  
-- Rollup contributions job changed to 2-hourly.  
-- Snapshot-heights confirmed daily at 00:05 UTC.  
-- DOT, OP, ARB contrib routes + cron workflows added.  
-- ATOM/AVAX contrib routes aligned to proxy pattern (core ingest).  
-- All 16 chain ingest routes confirmed green (including BSC).  
-- Public contributions API: dynamic `no-store` + correct FK joins.  
-- UI: explorer links + full-precision amounts.  
-- Security: RLS enabled on `heights_daily` (advisor clean).  
-- ✅ CORS allow-list + rate limiting on public routes implemented.  
-- ✅ Normalize `amount_usd` implemented.  
-- ✅ Production-only CORS allow-list + token-bucket RL enabled.  
-- ✅ New `/api/claim` endpoint with Supabase pre-check for existing tx.  
-- ✅ New `/claim` UI form for public contribution claiming.  
+- **UI:** Removed per-chain status badges (OK/STALE/ERR) — no longer aligned with the final flow.  
+- **Data:** FX aggregator at insert time for `amount_usd`.  
+- **UI:** Tetris grid (treemap) shipped.  
+- **Prev:** Claim button in main table; explorer links across chains; `note` rendering; workflows cleaned of DOT/ATOM.  
 
