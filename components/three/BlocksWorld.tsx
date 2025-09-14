@@ -1,11 +1,11 @@
 // components/three/BlocksWorld.tsx
 // Auto-fit grid, white background, exact count, per-chain colors.
-// Exposes onHover(SceneDatum|null) to parent for tooltip UI.
+// Tooltip is 3D-anchored to the hovered block via <Html />, clickable link to explorer.
 
 "use client";
 
 import { Canvas, useFrame } from "@react-three/fiber";
-import { OrbitControls, StatsGl } from "@react-three/drei";
+import { Html, OrbitControls, StatsGl } from "@react-three/drei";
 import * as THREE from "three";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -18,7 +18,6 @@ export type SceneDatum = {
 type Props = {
   data: SceneDatum[];
   colorMap?: Record<string, string>;
-  onHover?: (d: SceneDatum | null) => void;
 };
 
 const CELL = 1.15;
@@ -40,14 +39,33 @@ function colorForChain(chain: string, colorMap?: Record<string, string>): THREE.
   return DEFAULT_COLOR.clone();
 }
 
+// Minimal explorer mapping for clickable link in tooltip
+function explorerUrl(chain: string, tx: string): string | null {
+  const c = chain.toLowerCase();
+  const map: Record<string, string> = {
+    eth: "https://etherscan.io/tx/",
+    pol: "https://polygonscan.com/tx/",
+    op: "https://optimistic.etherscan.io/tx/",
+    arb: "https://arbiscan.io/tx/",
+    avax: "https://snowtrace.io/tx/",
+    bsc: "https://bscscan.com/tx/",
+    btc: "https://mempool.space/tx/",
+    ltc: "https://blockchair.com/litecoin/transaction/",
+    doge: "https://blockchair.com/dogecoin/transaction/",
+    xrp: "https://xrpscan.com/tx/",
+    sol: "https://solscan.io/tx/",
+    xlm: "https://stellar.expert/explorer/public/tx/",
+    trx: "https://tronscan.org/#/transaction/",
+  };
+  return map[c] ? `${map[c]}${tx}` : null;
+}
+
 function InstancedBlocks({
   data,
   colorMap,
-  onHover,
 }: {
   data: SceneDatum[];
   colorMap?: Record<string, string>;
-  onHover?: (d: SceneDatum | null) => void;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null!);
   const tempObj = useMemo(() => new THREE.Object3D(), []);
@@ -112,7 +130,7 @@ function InstancedBlocks({
     m.instanceMatrix.needsUpdate = true;
   });
 
-  // Hover highlight + notify parent
+  // Hover highlight + index
   const applyHover = (instanceId: number | null) => {
     const m = meshRef.current;
     for (let i = 0; i < positions.length; i++) {
@@ -124,10 +142,6 @@ function InstancedBlocks({
       m.setColorAt(i, tempColor);
     }
     if (m.instanceColor) m.instanceColor.needsUpdate = true;
-
-    if (onHover) {
-      onHover(instanceId !== null ? data[instanceId] : null);
-    }
   };
 
   const onPointerMove = (e: any) => {
@@ -143,22 +157,70 @@ function InstancedBlocks({
     applyHover(null);
   };
 
+  // Tooltip content for hovered instance
+  const hoveredDatum = hovered !== null ? data[hovered] : null;
+  const tooltipPos =
+    hovered !== null
+      ? new THREE.Vector3(positions[hovered].x, scales[hovered] + 0.6, positions[hovered].z)
+      : null;
+
   return (
-    <instancedMesh
-      ref={meshRef}
-      args={[undefined as any, undefined as any, data.length]}
-      onPointerMove={onPointerMove}
-      onPointerOut={onPointerOut}
-      castShadow={false}
-      receiveShadow={false}
-    >
-      <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial toneMapped />
-    </instancedMesh>
+    <>
+      <instancedMesh
+        ref={meshRef}
+        args={[undefined as any, undefined as any, data.length]}
+        onPointerMove={onPointerMove}
+        onPointerOut={onPointerOut}
+        castShadow={false}
+        receiveShadow={false}
+      >
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial toneMapped />
+      </instancedMesh>
+
+      {/* 3D-anchored tooltip. `occlude` hides it when blocked by other geometry; pointer events enabled. */}
+      {hoveredDatum && tooltipPos && (
+        <Html
+          position={tooltipPos}
+          transform
+          occlude
+          distanceFactor={8}   // scales with camera distance for readability
+          pointerEvents="auto" // allow clicking the link
+          style={{ willChange: "transform" }}
+        >
+          <div className="rounded-lg border border-gray-300 bg-white/95 p-2 text-xs shadow-md">
+            <div className="mb-1 flex items-center gap-2">
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full border border-black/10"
+                style={{ backgroundColor: colorForChain(hoveredDatum.chain, colorMap).getStyle() }}
+              />
+              <strong className="uppercase tracking-wide">{hoveredDatum.chain}</strong>
+            </div>
+            <div className="mb-1">USD: {hoveredDatum.amountUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+            <div className="break-all">
+              TX:&nbsp;
+              {(() => {
+                const url = explorerUrl(hoveredDatum.chain, hoveredDatum.id);
+                const short = hoveredDatum.id.length > 16
+                  ? `${hoveredDatum.id.slice(0, 10)}…${hoveredDatum.id.slice(-6)}`
+                  : hoveredDatum.id;
+                return url ? (
+                  <a className="text-blue-600 underline" href={url} target="_blank" rel="noreferrer">
+                    {short}
+                  </a>
+                ) : (
+                  short
+                );
+              })()}
+            </div>
+          </div>
+        </Html>
+      )}
+    </>
   );
 }
 
-export default function BlocksWorld({ data, colorMap, onHover }: Props) {
+export default function BlocksWorld({ data, colorMap }: Props) {
   // Camera distance scales with N
   const camZ = useMemo(() => {
     const n = Math.max(1, data.length);
@@ -181,7 +243,7 @@ export default function BlocksWorld({ data, colorMap, onHover }: Props) {
         <meshStandardMaterial color={"#f8fafc"} metalness={0} roughness={1} />
       </mesh>
 
-      <InstancedBlocks data={data} colorMap={colorMap} onHover={onHover} />
+      <InstancedBlocks data={data} colorMap={colorMap} />
 
       <OrbitControls enablePan enableZoom enableRotate />
       <StatsGl className="hidden md:block" />

@@ -1,5 +1,5 @@
 // app/(public)/viz/3d/page.tsx
-// Live 3D viz with client-side fetch, color legend, and hover tooltip card.
+// Live 3D viz with client-side fetch + color legend (tooltip is anchored in 3D inside BlocksWorld).
 
 "use client";
 
@@ -55,31 +55,9 @@ function toAmountUsd(row: ApiRow): number {
   return Math.max(0.01, Number(v) || 0.01);
 }
 
-// Very small explorer map for tooltip links (matches what we already use elsewhere)
-function explorerUrl(chain: string, tx: string): string | null {
-  const c = chain.toLowerCase();
-  const map: Record<string, string> = {
-    eth: "https://etherscan.io/tx/",
-    pol: "https://polygonscan.com/tx/",
-    op: "https://optimistic.etherscan.io/tx/",
-    arb: "https://arbiscan.io/tx/",
-    avax: "https://snowtrace.io/tx/",
-    bsc: "https://bscscan.com/tx/",
-    btc: "https://mempool.space/tx/",
-    ltc: "https://blockchair.com/litecoin/transaction/",
-    doge: "https://blockchair.com/dogecoin/transaction/",
-    xrp: "https://xrpscan.com/tx/",
-    sol: "https://solscan.io/tx/",
-    xlm: "https://stellar.expert/explorer/public/tx/",
-    trx: "https://tronscan.org/#/transaction/",
-  };
-  return map[c] ? `${map[c]}${tx}` : null;
-}
-
 export default function Page3D() {
   const [data, setData] = useState<SceneDatum[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [hovered, setHovered] = useState<SceneDatum | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,7 +84,7 @@ export default function Page3D() {
     };
   }, []);
 
-  // legend shows only chains present in current dataset (stable order)
+  // Legend shows only chains present in current dataset (stable order)
   const legend = useMemo(() => {
     if (!data || data.length === 0) return [];
     const seen = new Set<string>();
@@ -127,7 +105,7 @@ export default function Page3D() {
         <header className="mb-4 flex items-baseline justify-between">
           <h1 className="text-2xl font-semibold tracking-tight">BlockBattle — 3D Viz (Live)</h1>
           <p className="text-sm text-gray-600">
-            Orbit with mouse/trackpad. Hover a block to highlight.
+            Orbit with mouse/trackpad. Hover a block to see details.
           </p>
         </header>
 
@@ -141,42 +119,7 @@ export default function Page3D() {
           )}
 
           {!error && data && data.length > 0 && (
-            <>
-              {/* Canvas */}
-              <BlocksWorld
-                data={data}
-                colorMap={CHAIN_COLORS}
-                onHover={setHovered}
-              />
-
-              {/* Tooltip card (fixed in the corner for clarity) */}
-              {hovered && (
-                <div className="pointer-events-none absolute right-3 top-3 rounded-xl border border-gray-200 bg-white/95 p-3 text-xs shadow-md">
-                  <div className="mb-1 flex items-center gap-2">
-                    <span
-                      className="inline-block h-2.5 w-2.5 rounded-full"
-                      style={{ backgroundColor: CHAIN_COLORS[hovered.chain] ?? "#4b5563" }}
-                    />
-                    <strong className="uppercase tracking-wide">{hovered.chain}</strong>
-                  </div>
-                  <div className="mb-1">USD: {hovered.amountUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
-                  <div className="break-all">
-                    TX:&nbsp;
-                    {(() => {
-                      const url = explorerUrl(hovered.chain, hovered.id);
-                      const short = hovered.id.length > 16 ? `${hovered.id.slice(0, 10)}…${hovered.id.slice(-6)}` : hovered.id;
-                      return url ? (
-                        <a className="pointer-events-auto text-blue-600 underline" href={url} target="_blank" rel="noreferrer">
-                          {short}
-                        </a>
-                      ) : (
-                        short
-                      );
-                    })()}
-                  </div>
-                </div>
-              )}
-            </>
+            <BlocksWorld data={data} colorMap={CHAIN_COLORS} />
           )}
         </div>
 
