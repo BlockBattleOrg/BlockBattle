@@ -1,6 +1,6 @@
 // components/three/BlocksWorld.tsx
-// Auto-fit grid (square-ish) based on data length, white page background.
-// No cloning; shows exactly as many blocks as contributions.
+// Auto-fit grid, white background, exact count, per-chain colors.
+// Exposes onHover(SceneDatum|null) to parent for tooltip UI.
 
 "use client";
 
@@ -9,15 +9,16 @@ import { OrbitControls, StatsGl } from "@react-three/drei";
 import * as THREE from "three";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type Datum = {
-  id: string;
+export type SceneDatum = {
+  id: string;         // tx hash
   amountUsd: number;
   chain: string;
 };
 
 type Props = {
-  data: Datum[];
+  data: SceneDatum[];
   colorMap?: Record<string, string>;
+  onHover?: (d: SceneDatum | null) => void;
 };
 
 const CELL = 1.15;
@@ -39,21 +40,29 @@ function colorForChain(chain: string, colorMap?: Record<string, string>): THREE.
   return DEFAULT_COLOR.clone();
 }
 
-function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<string, string> }) {
+function InstancedBlocks({
+  data,
+  colorMap,
+  onHover,
+}: {
+  data: SceneDatum[];
+  colorMap?: Record<string, string>;
+  onHover?: (d: SceneDatum | null) => void;
+}) {
   const meshRef = useRef<THREE.InstancedMesh>(null!);
   const tempObj = useMemo(() => new THREE.Object3D(), []);
   const tempColor = useMemo(() => new THREE.Color(), []);
   const [hovered, setHovered] = useState<number | null>(null);
 
+  // Grid size based on N (square-ish)
+  const GRID_COLS = useMemo(() => Math.max(3, Math.ceil(Math.sqrt(data.length))), [data.length]);
   const maxUsd = useMemo(() => Math.max(...data.map((d) => d.amountUsd), 1), [data]);
 
-  // Compute grid size dynamically (square-ish), with a small lower bound for aesthetics
-  const GRID_COLS = useMemo(() => Math.max(3, Math.ceil(Math.sqrt(data.length))), [data.length]);
-
   // Precompute colors
-  const baseColors = useMemo(() => {
-    return data.map((d) => colorForChain(d.chain, colorMap));
-  }, [data, colorMap]);
+  const baseColors = useMemo(
+    () => data.map((d) => colorForChain(d.chain, colorMap)),
+    [data, colorMap]
+  );
 
   // Positions & scales
   const { positions, scales } = useMemo(() => {
@@ -87,7 +96,7 @@ function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<
     if (m.instanceColor) m.instanceColor.needsUpdate = true;
   }, [positions, scales, baseColors, tempObj]);
 
-  // Subtle idle animation
+  // Idle animation
   useFrame(({ clock }) => {
     const t = clock.getElapsedTime();
     const m = meshRef.current;
@@ -103,29 +112,35 @@ function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<
     m.instanceMatrix.needsUpdate = true;
   });
 
-  // Hover highlight
-  const onPointerMove = (e: any) => {
-    e.stopPropagation();
-    const instanceId = e.instanceId as number | undefined;
-    if (instanceId === undefined || instanceId === hovered) return;
-
-    setHovered(instanceId);
+  // Hover highlight + notify parent
+  const applyHover = (instanceId: number | null) => {
     const m = meshRef.current;
     for (let i = 0; i < positions.length; i++) {
-      const c = i === instanceId ? baseColors[i].clone().lerp(new THREE.Color("#000000"), -0.35) : baseColors[i];
+      const c =
+        instanceId !== null && i === instanceId
+          ? baseColors[i].clone().lerp(new THREE.Color("#000000"), -0.35)
+          : baseColors[i];
       tempColor.copy(c);
       m.setColorAt(i, tempColor);
     }
     if (m.instanceColor) m.instanceColor.needsUpdate = true;
+
+    if (onHover) {
+      onHover(instanceId !== null ? data[instanceId] : null);
+    }
+  };
+
+  const onPointerMove = (e: any) => {
+    e.stopPropagation();
+    const instanceId = e.instanceId as number | undefined;
+    if (instanceId === undefined || instanceId === hovered) return;
+    setHovered(instanceId);
+    applyHover(instanceId);
   };
 
   const onPointerOut = () => {
     setHovered(null);
-    const m = meshRef.current;
-    for (let i = 0; i < positions.length; i++) {
-      m.setColorAt(i, baseColors[i]);
-    }
-    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    applyHover(null);
   };
 
   return (
@@ -143,8 +158,8 @@ function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<
   );
 }
 
-export default function BlocksWorld({ data, colorMap }: Props) {
-  // Camera distance scales lightly with dataset size (so 7 elemenata i dalje izgleda ok)
+export default function BlocksWorld({ data, colorMap, onHover }: Props) {
+  // Camera distance scales with N
   const camZ = useMemo(() => {
     const n = Math.max(1, data.length);
     return Math.min(36, 14 + Math.sqrt(n) * 1.2);
@@ -156,17 +171,17 @@ export default function BlocksWorld({ data, colorMap }: Props) {
       camera={{ position: [0, 18, camZ], fov: 55, near: 0.1, far: 1000 }}
       gl={{ antialias: true, powerPreference: "high-performance" }}
     >
-      {/* Lighting tuned for white background */}
+      {/* Lighting for white bg */}
       <hemisphereLight intensity={0.6} color={"#ffffff"} groundColor={"#e5e7eb"} />
       <directionalLight position={[8, 12, 5]} intensity={0.9} />
 
-      {/* Soft light ground */}
+      {/* Ground */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
         <planeGeometry args={[200, 200]} />
         <meshStandardMaterial color={"#f8fafc"} metalness={0} roughness={1} />
       </mesh>
 
-      <InstancedBlocks data={data} colorMap={colorMap} />
+      <InstancedBlocks data={data} colorMap={colorMap} onHover={onHover} />
 
       <OrbitControls enablePan enableZoom enableRotate />
       <StatsGl className="hidden md:block" />

@@ -1,5 +1,5 @@
 // app/(public)/viz/3d/page.tsx
-// Client-side fetch of real data (no cloning). White background to match site.
+// Live 3D viz with client-side fetch, color legend, and hover tooltip card.
 
 "use client";
 
@@ -21,7 +21,7 @@ type ApiRow = {
 };
 
 type SceneDatum = {
-  id: string;
+  id: string;         // tx hash
   amountUsd: number;
   chain: string;
 };
@@ -55,9 +55,31 @@ function toAmountUsd(row: ApiRow): number {
   return Math.max(0.01, Number(v) || 0.01);
 }
 
+// Very small explorer map for tooltip links (matches what we already use elsewhere)
+function explorerUrl(chain: string, tx: string): string | null {
+  const c = chain.toLowerCase();
+  const map: Record<string, string> = {
+    eth: "https://etherscan.io/tx/",
+    pol: "https://polygonscan.com/tx/",
+    op: "https://optimistic.etherscan.io/tx/",
+    arb: "https://arbiscan.io/tx/",
+    avax: "https://snowtrace.io/tx/",
+    bsc: "https://bscscan.com/tx/",
+    btc: "https://mempool.space/tx/",
+    ltc: "https://blockchair.com/litecoin/transaction/",
+    doge: "https://blockchair.com/dogecoin/transaction/",
+    xrp: "https://xrpscan.com/tx/",
+    sol: "https://solscan.io/tx/",
+    xlm: "https://stellar.expert/explorer/public/tx/",
+    trx: "https://tronscan.org/#/transaction/",
+  };
+  return map[c] ? `${map[c]}${tx}` : null;
+}
+
 export default function Page3D() {
   const [data, setData] = useState<SceneDatum[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [hovered, setHovered] = useState<SceneDatum | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,20 +106,20 @@ export default function Page3D() {
     };
   }, []);
 
-  const content = useMemo(() => {
-    if (error) {
-      return (
-        <div className="p-6 text-sm text-red-600">
-          Failed to load data: {error}. Try refreshing the page.
-        </div>
-      );
+  // legend shows only chains present in current dataset (stable order)
+  const legend = useMemo(() => {
+    if (!data || data.length === 0) return [];
+    const seen = new Set<string>();
+    const ordered: { chain: string; color: string }[] = [];
+    for (const d of data) {
+      const key = d.chain.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        ordered.push({ chain: key, color: CHAIN_COLORS[key] ?? "#4b5563" });
+      }
     }
-    if (!data) return <div className="p-4 text-sm">Loading 3D scene…</div>;
-    if (data.length === 0)
-      return <div className="p-6 text-sm text-gray-600">No contributions yet.</div>;
-
-    return <BlocksWorld data={data} colorMap={CHAIN_COLORS} />;
-  }, [data, error]);
+    return ordered;
+  }, [data]);
 
   return (
     <main className="min-h-screen w-full bg-white text-black">
@@ -110,8 +132,69 @@ export default function Page3D() {
         </header>
 
         <div className="relative h-[70vh] w-full overflow-hidden rounded-2xl border border-gray-200 bg-white">
-          {content}
+          {error && (
+            <div className="p-6 text-sm text-red-600">Failed to load data: {error}</div>
+          )}
+          {!error && !data && <div className="p-4 text-sm">Loading 3D scene…</div>}
+          {!error && data && data.length === 0 && (
+            <div className="p-6 text-sm text-gray-600">No contributions yet.</div>
+          )}
+
+          {!error && data && data.length > 0 && (
+            <>
+              {/* Canvas */}
+              <BlocksWorld
+                data={data}
+                colorMap={CHAIN_COLORS}
+                onHover={setHovered}
+              />
+
+              {/* Tooltip card (fixed in the corner for clarity) */}
+              {hovered && (
+                <div className="pointer-events-none absolute right-3 top-3 rounded-xl border border-gray-200 bg-white/95 p-3 text-xs shadow-md">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span
+                      className="inline-block h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: CHAIN_COLORS[hovered.chain] ?? "#4b5563" }}
+                    />
+                    <strong className="uppercase tracking-wide">{hovered.chain}</strong>
+                  </div>
+                  <div className="mb-1">USD: {hovered.amountUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                  <div className="break-all">
+                    TX:&nbsp;
+                    {(() => {
+                      const url = explorerUrl(hovered.chain, hovered.id);
+                      const short = hovered.id.length > 16 ? `${hovered.id.slice(0, 10)}…${hovered.id.slice(-6)}` : hovered.id;
+                      return url ? (
+                        <a className="pointer-events-auto text-blue-600 underline" href={url} target="_blank" rel="noreferrer">
+                          {short}
+                        </a>
+                      ) : (
+                        short
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
+
+        {/* Color legend */}
+        {legend.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-3 text-xs text-gray-700">
+            {legend.map((l) => (
+              <div key={l.chain} className="flex items-center gap-2">
+                <span
+                  className="inline-block h-3 w-3 rounded-full border border-black/10"
+                  style={{ backgroundColor: l.color }}
+                  title={l.chain.toUpperCase()}
+                />
+                <span className="uppercase">{l.chain}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         <footer className="mt-4 text-xs text-gray-600">
           <p>Data source: /api/public/contributions/recent · Colors aligned with Community Blocks.</p>
