@@ -23,14 +23,13 @@ type ClaimResponseNew = {
 type AnyClaimResponse = ClaimResponseOld | ClaimResponseNew;
 type UiMsg = { kind: 'success' | 'info' | 'error'; text: string };
 
-// Full chain list
+// Full chain list (DOT i ATOM privremeno uklonjeni)
 const CHAINS = [
   { value: 'eth',  label: 'Ethereum (ETH)' },
   { value: 'arb',  label: 'Arbitrum (ARB)' },
   { value: 'avax', label: 'Avalanche (AVAX)' },
   { value: 'op',   label: 'Optimism (OP)' },
   { value: 'pol',  label: 'Polygon (POL)' },
-  { value: 'dot',  label: 'Polkadot (DOT)' },
   { value: 'btc',  label: 'Bitcoin (BTC)' },
   { value: 'ltc',  label: 'Litecoin (LTC)' },
   { value: 'doge', label: 'Dogecoin (DOGE)' },
@@ -39,7 +38,6 @@ const CHAINS = [
   { value: 'sol',  label: 'Solana (SOL)' },
   { value: 'trx',  label: 'Tron (TRX)' },
   { value: 'bsc',  label: 'BNB Smart Chain (BSC)' },
-  { value: 'atom', label: 'Cosmos (ATOM)' },
 ];
 
 const HCAPTCHA_SITE_KEY = process.env.NEXT_PUBLIC_HCAPTCHA_SITE_KEY || '';
@@ -100,8 +98,6 @@ function txExplorerUrl(chain: string, tx: string): string | null {
     case 'btc': return `https://blockchair.com/bitcoin/transaction/${tx}`;
     case 'ltc': return `https://blockchair.com/litecoin/transaction/${tx}`;
     case 'doge':return `https://blockchair.com/dogecoin/transaction/${tx}`;
-    case 'dot': return `https://polkadot.subscan.io/extrinsic/${tx}`;
-    case 'atom':return `https://www.mintscan.io/cosmos/txs/${tx}`;
     case 'xrp': return `https://xrpscan.com/tx/${tx}`;
     case 'xlm': return `https://steexp.com/tx/${tx}`;
     case 'trx': return `https://tronscan.org/#/transaction/${tx}`;
