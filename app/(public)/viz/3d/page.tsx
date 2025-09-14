@@ -4,11 +4,11 @@
 // - Provides a minimal layout and passes mock data (can be replaced with real API data).
 // - Keep page-level code minimal; most logic lives in BlocksWorld component.
 
-import dynamic from "next/dynamic";
+import NextDynamic from "next/dynamic";
 import { Suspense } from "react";
 
 // IMPORTANT: Dynamic import with `ssr: false` ensures WebGL runs only on client.
-const BlocksWorld = dynamic(() => import("@/components/three/BlocksWorld"), {
+const BlocksWorld = NextDynamic(() => import("@/components/three/BlocksWorld"), {
   ssr: false,
   // Optionally, you can provide a loading component here.
 });
