@@ -1,17 +1,15 @@
 // app/(public)/viz/3d/page.tsx
-// Public 3D visualization page (Live) wired to real data.
-// - Fetches /api/public/contributions/recent (no-store).
-// - Passes normalized data (id, amountUsd, chain) to client Three.js scene.
-// - Per-chain color mapping aligned with Community Blocks.
+// Client-side data fetch to avoid Server Components rendering issues (SES).
+// Renders the 3D scene with live data from /api/public/contributions/recent.
 
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 import NextDynamic from "next/dynamic";
-import { Suspense } from "react";
 
 const BlocksWorld = NextDynamic(() => import("@/components/three/BlocksWorld"), {
   ssr: false,
 });
-
-export const dynamic = "force-dynamic";
 
 type ApiRow = {
   chain: string;
@@ -29,8 +27,7 @@ type SceneDatum = {
   chain: string;
 };
 
-// Community Blocks color mapping (provided)
-// Note: keys are lowercase; aliases handled in normChain()
+// Community Blocks colors (lowercase keys)
 const CHAIN_COLORS: Record<string, string> = {
   eth: "#3b82f6",
   btc: "#f59e0b",
@@ -54,40 +51,58 @@ function normChain(x: string | null | undefined): string {
   if (s === "bnb") return "bsc";
   return s;
 }
-
 function toAmountUsd(row: ApiRow): number {
   const v = row.amount_usd ?? row.amount ?? 0;
   return Math.max(0.01, Number(v) || 0.01);
 }
 
-async function getRecent(): Promise<SceneDatum[]> {
-  const res = await fetch("/api/public/contributions/recent", { cache: "no-store" });
-  if (!res.ok) {
-    // Fallback mini dataset if API is down
-    return Array.from({ length: 60 }).map((_, i) => ({
-      id: `fallback-${i}`,
-      amountUsd: 1 + (i % 100),
-      chain: ["btc", "eth", "pol", "op", "arb", "avax", "xrp", "sol", "xlm", "doge", "ltc", "bsc"][i % 12],
-    }));
-  }
-  const json = (await res.json()) as { rows: ApiRow[] };
-  const rows = Array.isArray(json?.rows) ? json.rows : [];
+export default function Page3D() {
+  const [data, setData] = useState<SceneDatum[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const out: SceneDatum[] = rows.map((r, idx) => ({
-    id: r.tx || `row-${idx}`,
-    amountUsd: toAmountUsd(r),
-    chain: normChain(r.chain),
-  }));
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/public/contributions/recent", { cache: "no-store" });
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        const json = (await res.json()) as { rows: ApiRow[] };
+        const rows = Array.isArray(json?.rows) ? json.rows : [];
 
-  // Optional: upsample to make the scene visually dense (cap at 1200)
-  const target = Math.min(1200, Math.max(out.length, 400));
-  const cloned: SceneDatum[] = [];
-  for (let i = 0; i < target; i++) cloned.push(out[i % out.length]);
-  return cloned;
-}
+        const mapped: SceneDatum[] = rows.map((r, idx) => ({
+          id: r.tx || `row-${idx}`,
+          amountUsd: toAmountUsd(r),
+          chain: normChain(r.chain),
+        }));
 
-export default async function Page3D() {
-  const data = await getRecent();
+        // Optional: densify scene up to 1200 blocks (repeat data if small)
+        const target = Math.min(1200, Math.max(mapped.length, 400));
+        const cloned: SceneDatum[] = [];
+        for (let i = 0; i < target; i++) cloned.push(mapped[i % Math.max(mapped.length, 1)]);
+
+        if (!cancelled) setData(cloned);
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? "Failed to load data");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const content = useMemo(() => {
+    if (error) {
+      return (
+        <div className="p-6 text-sm text-red-400">
+          Failed to load data: {error}. Try refreshing the page.
+        </div>
+      );
+    }
+    if (!data) {
+      return <div className="p-4 text-sm">Loading 3D scene…</div>;
+    }
+    return <BlocksWorld data={data} colorMap={CHAIN_COLORS} />;
+  }, [data, error]);
 
   return (
     <main className="min-h-screen w-full bg-black text-white">
@@ -98,9 +113,7 @@ export default async function Page3D() {
         </header>
 
         <div className="relative h-[70vh] w-full overflow-hidden rounded-2xl border border-white/10">
-          <Suspense fallback={<div className="p-4 text-sm">Loading 3D scene…</div>}>
-            <BlocksWorld data={data} colorMap={CHAIN_COLORS} />
-          </Suspense>
+          {content}
         </div>
 
         <footer className="mt-4 text-xs opacity-60">
