@@ -3,6 +3,7 @@ import OverviewTable from '@/components/OverviewTable';
 import ContributionsPanel from '@/components/ContributionsPanel';
 import Countdown from '@/components/Countdown';
 import BlocksContainer from '@/components/BlocksContainer';
+import Viz3DInline from '@/components/three/Viz3DInline'; // ⬅ NEW
 
 export default function HomePage() {
   const campaignEnd = process.env.NEXT_PUBLIC_CAMPAIGN_END ?? '';
@@ -21,6 +22,9 @@ export default function HomePage() {
           <Countdown endIso={campaignEnd} label="Time remaining in this year-long challenge" />
         </div>
       </header>
+
+      {/* NEW: Inline 3D viz iznad Community Blocks */}
+      <Viz3DInline />
 
       {/* Live Community Blocks (auto-refresh + chain filter) */}
       <section className="mb-10 space-y-3">
