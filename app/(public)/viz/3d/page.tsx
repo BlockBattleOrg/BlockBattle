@@ -1,6 +1,5 @@
 // app/(public)/viz/3d/page.tsx
-// Client-side data fetch to avoid Server Components rendering issues (SES).
-// Renders the 3D scene with live data from /api/public/contributions/recent.
+// Client-side fetch of real data (no cloning). White background to match site.
 
 "use client";
 
@@ -75,12 +74,7 @@ export default function Page3D() {
           chain: normChain(r.chain),
         }));
 
-        // Optional: densify scene up to 1200 blocks (repeat data if small)
-        const target = Math.min(1200, Math.max(mapped.length, 400));
-        const cloned: SceneDatum[] = [];
-        for (let i = 0; i < target; i++) cloned.push(mapped[i % Math.max(mapped.length, 1)]);
-
-        if (!cancelled) setData(cloned);
+        if (!cancelled) setData(mapped);
       } catch (e: any) {
         if (!cancelled) setError(e?.message ?? "Failed to load data");
       }
@@ -93,30 +87,33 @@ export default function Page3D() {
   const content = useMemo(() => {
     if (error) {
       return (
-        <div className="p-6 text-sm text-red-400">
+        <div className="p-6 text-sm text-red-600">
           Failed to load data: {error}. Try refreshing the page.
         </div>
       );
     }
-    if (!data) {
-      return <div className="p-4 text-sm">Loading 3D scene…</div>;
-    }
+    if (!data) return <div className="p-4 text-sm">Loading 3D scene…</div>;
+    if (data.length === 0)
+      return <div className="p-6 text-sm text-gray-600">No contributions yet.</div>;
+
     return <BlocksWorld data={data} colorMap={CHAIN_COLORS} />;
   }, [data, error]);
 
   return (
-    <main className="min-h-screen w-full bg-black text-white">
+    <main className="min-h-screen w-full bg-white text-black">
       <section className="mx-auto max-w-7xl px-4 py-6">
         <header className="mb-4 flex items-baseline justify-between">
           <h1 className="text-2xl font-semibold tracking-tight">BlockBattle — 3D Viz (Live)</h1>
-          <p className="text-sm opacity-75">Orbit with mouse/trackpad. Hover a block to highlight.</p>
+          <p className="text-sm text-gray-600">
+            Orbit with mouse/trackpad. Hover a block to highlight.
+          </p>
         </header>
 
-        <div className="relative h-[70vh] w-full overflow-hidden rounded-2xl border border-white/10">
+        <div className="relative h-[70vh] w-full overflow-hidden rounded-2xl border border-gray-200 bg-white">
           {content}
         </div>
 
-        <footer className="mt-4 text-xs opacity-60">
+        <footer className="mt-4 text-xs text-gray-600">
           <p>Data source: /api/public/contributions/recent · Colors aligned with Community Blocks.</p>
         </footer>
       </section>
