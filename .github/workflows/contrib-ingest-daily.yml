@@ -1,8 +1,8 @@
-name: "Contrib Ingest (daily, tiny windows)"
+# name: "Contrib Ingest (daily, tiny windows)"
 
 on:
   schedule:
-    - cron: "15 2 * * *"   # once per day at 02:15 UTC
+    - cron: "15 2 * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -72,40 +72,15 @@ jobs:
             sleep 0.2
           done
 
-      - name: "Run tiny-window ingests (Ripple/Stellar: XRP, XLM)"
-        shell: bash
-        run: |
-          set -euo pipefail
-          declare -A QS=(
-            [xrp]="sinceHours=0.25&maxLedgers=800&minConf=4"
-            [xlm]="sinceHours=0.25&maxLedgers=800&minConf=4"
-          )
-          for c in xrp xlm; do
-            echo ">>> $c"
-            if ! out=$(
-              curl -sS --fail-with-body \
-                   --max-time 90 --retry 2 --retry-delay 2 --retry-all-errors \
-                   -X POST "$BASE_URL/api/ingest/contrib/$c?${QS[$c]}&debug=0" \
-                   -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
-            ); then
-              echo "::warning:: $c ingest failed (HTTP; continuing)"
-              continue
-            fi
-            echo "$out" | jq -r '"ok=\(.ok) matched=\(.matched // 0) inserted=\(.inserted // 0) reason=\(.reason // "n/a") error=\(.error // "n/a")"'
-            sleep 0.2
-          done
-
-      - name: "Run tiny-window ingests (Solana/Tron/Substrate/Cosmos: SOL, TRX, DOT, ATOM)"
+      - name: "Run tiny-window ingests (Solana/Tron: SOL, TRX)"
         shell: bash
         run: |
           set -euo pipefail
           declare -A QS=(
             [sol]="sinceHours=0.05&maxSlots=300&minConf=64"
             [trx]="sinceHours=0.25&maxBlocks=300&minConf=19"
-            [dot]="sinceHours=0.25&maxBlocks=300&minConf=3"
-            [atom]="sinceHours=0.25&maxBlocks=300&minConf=3"
           )
-          for c in sol trx dot atom; do
+          for c in sol trx; do
             echo ">>> $c"
             if ! out=$(
               curl -sS --fail-with-body \

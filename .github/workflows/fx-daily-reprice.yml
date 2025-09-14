@@ -1,4 +1,4 @@
-name: FX Daily Reprice (2x/day)
+# name: FX Daily Reprice (2x/day, CoinGecko, all active chains)
 
 on:
   schedule:
@@ -11,15 +11,59 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      BASE: ${{ vars.PROD_BASE_URL || 'https://www.blockbattle.org' }}
+      CG:   ${{ vars.COINGECKO_API_BASE || 'https://api.coingecko.com/api/v3' }}
+      # Mapiranje SYMBOL -> CoinGecko ID (DOT/ATOM izostavljeni)
+      MAP: >
+        BTC:bitcoin
+        LTC:litecoin
+        DOGE:dogecoin
+        ETH:ethereum
+        OP:optimism
+        ARB:arbitrum
+        POL:matic-network
+        AVAX:avalanche-2
+        BSC:binancecoin
+        XRP:ripple
+        SOL:solana
+        XLM:stellar
+        TRX:tron
     steps:
-      - name: Reprice last 30 days (POL + ETH shown as example)
+      - name: Build FX_MAP from CoinGecko and reprice last 30 days
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        shell: bash
         run: |
           set -euo pipefail
-          BASE="${{ vars.PROD_BASE_URL || 'https://www.blockbattle.org' }}"
-          # FX map: pass what you want to reprice; možeš dodati i ostale lance
-          FX_MAP="POL:0.48,ETH:2400"
+
+          # 1) pripremi ID-eve
+          SYMS=(); IDS=()
+          for pair in $MAP; do
+            sym="${pair%%:*}"; id="${pair#*:}"
+            SYMS+=("$sym"); IDS+=("$id")
+          done
+          IFS=, read -r -a IDCSV <<< "$(printf "%s," "${IDS[@]}" | sed 's/,$//')"
+          IDCSV_JOINED="$(IFS=,; echo "${IDS[*]}")"
+
+          # 2) povuci USD cijene
+          JSON="$(curl -sS --fail "$CG/simple/price?ids=${IDCSV_JOINED}&vs_currencies=usd")"
+
+          # 3) složi FX_MAP=SYM:price,...
+          FX_MAP=""
+          for pair in $MAP; do
+            sym="${pair%%:*}"; id="${pair#*:}"
+            price="$(echo "$JSON" | jq -r --arg id "$id" '.[$id].usd // empty')"
+            test -n "$price" || continue
+            FX_MAP+="${sym}:$price,"
+          done
+          FX_MAP="${FX_MAP%,}"
+
+          if [ -z "$FX_MAP" ]; then
+            echo "::error:: No prices resolved from CoinGecko"; exit 1
+          fi
+
+          # 4) pozovi tvoju admin rutu
           curl -sS -X POST "$BASE/api/admin/fx-sync?mode=reprice&days=30&fx=${FX_MAP}" \
             -H "x-cron-secret: $CRON_SECRET" | jq .
 
