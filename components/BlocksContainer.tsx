@@ -9,9 +9,9 @@ type Props = {
   defaultChain?: string | null; // e.g. "eth" or null = All
 };
 
-// Supported chains (All + subset without DOT/ATOM)
+// Supported chains (All; DOT/ATOM removed)
 const CHAIN_OPTIONS = [
-  { value: "",    label: "All chains" },
+  { value: "", label: "All chains" },
   { value: "eth", label: "ETH" },
   { value: "bsc", label: "BSC" },
   { value: "pol", label: "POL" },
@@ -33,7 +33,7 @@ const CHAIN_COLORS: Record<string, string> = {
   BTC: "#f59e0b",
   DOGE: "#b45309",
   LTC: "#2563eb",
-  MATIC: "#7c3aed", // if shown as POL, keep purple swatch in legend
+  MATIC: "#7c3aed",
   POL: "#7c3aed",
   BSC: "#f59e0b",
   AVAX: "#ef4444",
@@ -110,7 +110,7 @@ export default function BlocksContainer({
         onRefresh={() => fetchOnce()}
       />
 
-      {/* Legend: shows supported chains (DOT/ATOM removed) */}
+      {/* Legend: show supported chains (DOT/ATOM removed) */}
       <Legend />
 
       <TetrisBlocks rows={rows} columns={10} />
@@ -157,7 +157,9 @@ function Toolbar(props: {
         <span className="text-sm text-red-600">Error: {error}</span>
       ) : (
         <span className="text-sm text-gray-500">
-          {loading ? "Loading…" : "View (auto-refreshed from hourly ingestions)"}
+          {loading
+            ? "Loading…"
+            : "View (auto-refreshed from hourly ingestions)"}
         </span>
       )}
     </div>

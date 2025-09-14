@@ -3,25 +3,25 @@ import Image from "next/image";
 type ChainRow = {
   chain: string;        // e.g. 'ARB'
   height: number | null;
-  status?: "OK" | "STALE" | "ISSUE" | string;
+  status: "OK" | "STALE" | "ISSUE" | string;
   logoUrl?: string | null;
   participateUrl?: string | null; // optional CTA
 };
 
 type OverviewPayload = {
   ok: boolean;
-  totals?: { ok: number; stale: number; issue: number };
   rows?: ChainRow[];
-  // can extend with latency, updatedAt, etc. when API adds it
 };
 
 // Server component: fetch on the server (no client JS needed)
+// NOTE: Removed totals and status column; excluded DOT/ATOM rows from display.
 export default async function OverviewSection() {
   const base = process.env.NEXT_PUBLIC_BASE_URL ?? "";
   const res = await fetch(`${base}/api/public/overview`, { cache: "no-store" });
   const data = (await res.json()) as OverviewPayload;
 
-  const rows: ChainRow[] = data.rows ?? [];
+  let rows: ChainRow[] = data.rows ?? [];
+  rows = rows.filter((r) => r.chain !== "DOT" && r.chain !== "ATOM");
 
   return (
     <section className="mt-10 space-y-6">
@@ -32,7 +32,7 @@ export default async function OverviewSection() {
         </p>
       </header>
 
-      {/* Table without status counters and status column */}
+      {/* Table without Status column */}
       <div className="overflow-hidden rounded-xl border">
         <table className="min-w-full divide-y">
           <thead className="bg-gray-50">
@@ -61,7 +61,9 @@ export default async function OverviewSection() {
                     <span className="font-medium">{r.chain}</span>
                   </div>
                 </td>
-                <td className="px-4 py-3 tabular-nums">{r.height ?? "—"}</td>
+                <td className="px-4 py-3 tabular-nums">
+                  {r.height ?? "—"}
+                </td>
                 <td className="px-4 py-3">
                   {r.participateUrl ? (
                     <a

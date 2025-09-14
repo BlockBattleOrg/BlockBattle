@@ -1,20 +1,29 @@
-// This component is now aligned with OverviewSection: no status counters/column.
-// If you keep using this table elsewhere, it renders only Chain, Height, Action.
+// Server component version with no props,
+// to match usage: <OverviewTable /> in app/page.tsx
 
-type Status = "ok" | "stale" | "issue" | string;
+import Image from "next/image";
 
-type Row = {
+type ChainRow = {
   chain: string;
   height: number | null;
-  status?: Status;              // kept optional for future use
+  logoUrl?: string | null;
   participateUrl?: string | null;
 };
 
-type Props = {
-  rows: Row[];
+type OverviewPayload = {
+  ok: boolean;
+  rows?: ChainRow[];
 };
 
-export default function OverviewTable({ rows }: Props) {
+export default async function OverviewTable() {
+  const base = process.env.NEXT_PUBLIC_BASE_URL ?? "";
+  const res = await fetch(`${base}/api/public/overview`, { cache: "no-store" });
+  const data = (await res.json()) as OverviewPayload;
+
+  let rows: ChainRow[] = data.rows ?? [];
+  // Hide DOT & ATOM from this table
+  rows = rows.filter((r) => r.chain !== "DOT" && r.chain !== "ATOM");
+
   return (
     <div className="overflow-hidden rounded-xl border">
       <table className="min-w-full divide-y">
@@ -29,7 +38,20 @@ export default function OverviewTable({ rows }: Props) {
           {rows.map((r) => (
             <tr key={r.chain} className="text-sm">
               <td className="px-4 py-3">
-                <span className="font-medium">{r.chain}</span>
+                <div className="flex items-center gap-2">
+                  {r.logoUrl ? (
+                    <Image
+                      src={r.logoUrl}
+                      alt={r.chain}
+                      width={18}
+                      height={18}
+                      className="rounded-sm"
+                    />
+                  ) : (
+                    <span className="inline-block h-4 w-4 rounded-sm bg-gray-300" />
+                  )}
+                  <span className="font-medium">{r.chain}</span>
+                </div>
               </td>
               <td className="px-4 py-3 tabular-nums">{r.height ?? "—"}</td>
               <td className="px-4 py-3">
