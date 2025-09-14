@@ -1,8 +1,7 @@
 // components/three/BlocksWorld.tsx
-// Level 1 MVP bound to real data with per-chain colors.
-// - InstancedMesh cubes arranged on a grid; height scales with amountUsd.
-// - Chain color mapping applied per instance (passed as prop).
-// - Hover highlight brightens the color of the hovered instance.
+// Live scene with per-chain colors from props.
+// - InstancedMesh cubes; height ~ amountUsd, color ~ chain.
+// - Hover highlight brightens the hovered block.
 
 "use client";
 
@@ -22,22 +21,22 @@ type Props = {
   colorMap?: Record<string, string>;
 };
 
-const GRID_COLS = 40;     // columns in the grid
-const CELL = 1.15;        // spacing between cubes
-const BASE_HEIGHT = 0.2;  // minimal cube height
-const MAX_SCALE = 2.2;    // max cube height scale multiplier
+const GRID_COLS = 40;
+const CELL = 1.15;
+const BASE_HEIGHT = 0.2;
+const MAX_SCALE = 2.2;
 
-const DEFAULT_COLOR = new THREE.Color("#4ad6ff"); // fallback
+const DEFAULT_COLOR = new THREE.Color("#4ad6ff"); // fallback when chain not mapped
 
 function normalizeAmount(value: number, maxValue: number) {
   if (!maxValue) return 1;
-  const n = value / maxValue; // 0..1
-  // Ease so small values remain visible
+  const n = value / maxValue;
   return BASE_HEIGHT + Math.pow(n, 0.5) * (MAX_SCALE - BASE_HEIGHT);
 }
 
 function colorForChain(chain: string, colorMap?: Record<string, string>): THREE.Color {
-  const hex = colorMap?.[chain] ?? colorMap?.[chain.toLowerCase()];
+  const key = (chain || "").toLowerCase();
+  const hex = colorMap?.[key];
   if (hex) return new THREE.Color(hex);
   return DEFAULT_COLOR.clone();
 }
@@ -50,11 +49,10 @@ function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<
 
   const maxUsd = useMemo(() => Math.max(...data.map((d) => d.amountUsd), 1), [data]);
 
-  // Precompute per-instance base colors once (chain → color)
+  // Precompute per-instance base colors
   const baseColors = useMemo(() => {
     return data.map((d, i) => {
       const base = colorForChain(d.chain, colorMap);
-      // Subtle variation per column for depth
       const mod = 0.9 + 0.1 * ((i % GRID_COLS) / GRID_COLS);
       return base.multiplyScalar(mod);
     });
@@ -82,11 +80,10 @@ function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<
     const m = meshRef.current;
     for (let i = 0; i < positions.length; i++) {
       const s = scales[i];
-      tempObj.position.set(positions[i].x, s / 2, positions[i].z); // lift by half height
+      tempObj.position.set(positions[i].x, s / 2, positions[i].z);
       tempObj.scale.set(1, s, 1);
       tempObj.updateMatrix();
       m.setMatrixAt(i, tempObj.matrix);
-
       m.setColorAt(i, baseColors[i]);
     }
     m.instanceMatrix.needsUpdate = true;
@@ -113,13 +110,11 @@ function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<
   const onPointerMove = (e: any) => {
     e.stopPropagation();
     const instanceId = e.instanceId as number | undefined;
-    if (instanceId === undefined) return;
-    if (instanceId === hovered) return;
+    if (instanceId === undefined || instanceId === hovered) return;
 
     setHovered(instanceId);
     const m = meshRef.current;
     for (let i = 0; i < positions.length; i++) {
-      // brighten hovered, revert others to base
       const c = i === instanceId ? baseColors[i].clone().multiplyScalar(1.35) : baseColors[i];
       tempColor.copy(c);
       m.setColorAt(i, tempColor);
@@ -146,7 +141,7 @@ function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<
       receiveShadow={false}
     >
       <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial toneMapped={true} />
+      <meshStandardMaterial toneMapped />
     </instancedMesh>
   );
 }
