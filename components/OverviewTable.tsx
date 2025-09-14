@@ -3,21 +3,17 @@
 import React from 'react';
 import ParticipateModal from './ParticipateModal';
 
-type Status = 'ok' | 'stale' | 'issue';
+// ↓ Maknuli smo Status i sve vezano uz njega
 
 type Row = {
   symbol: string;           // BTC, MATIC, BNB…
   height: number | null;
-  status: Status;
   logoUrl: string | null;   // /logos/crypto/BTC.svg
 };
 
 type Resp = {
   ok: boolean;
   total: number;
-  okCount: number;
-  staleCount: number;
-  issueCount: number;
   rows: Row[];
   error?: string;
 };
@@ -45,13 +41,28 @@ const SYMBOL_TO_CHAIN: Record<string, string> = {
   ARB: 'arb',
   AVAX: 'avax',
   BNB: 'bsc',
-  // DOT/ATOM uklonjeni iz UI-a
+  // DOT/ATOM uklonjeni
 };
 
-// Pokušaj izvući wallet iz različitih oblika odgovora
+// mapiranje za /claim (očekuje npr. eth, arb, pol, avax, op, bsc, btc, itd.)
+const SYMBOL_TO_CLAIM: Record<string, string> = {
+  BTC: 'btc',
+  ETH: 'eth',
+  SOL: 'sol',
+  XRP: 'xrp',
+  DOGE: 'doge',
+  MATIC: 'pol',
+  TRX: 'trx',
+  LTC: 'ltc',
+  XLM: 'xlm',
+  OP: 'op',
+  ARB: 'arb',
+  AVAX: 'avax',
+  BNB: 'bsc',
+};
+
 function coerceWallet(json: any, fallbackChain: string): Wallet | null {
   if (!json) return null;
-
   const normalize = (w: any): Wallet | null => {
     if (!w) return null;
     const address = w.address ?? w.addr ?? null;
@@ -65,7 +76,6 @@ function coerceWallet(json: any, fallbackChain: string): Wallet | null {
       uri_scheme: w.uri_scheme ?? w.scheme ?? null,
     };
   };
-
   if (json.wallet) {
     const w = normalize(json.wallet);
     if (w) return w;
@@ -108,15 +118,11 @@ export default function OverviewTable() {
   const [loading, setLoading] = React.useState(true);
   const [err, setErr] = React.useState<string | null>(null);
 
-  // Participate modal
+  // Modal state – ono što ParticipateModal očekuje
   const [modalOpen, setModalOpen] = React.useState(false);
   const [wallet, setWallet] = React.useState<Wallet | null>(null);
   const [walletError, setWalletError] = React.useState<string | null>(null);
   const [walletLoading, setWalletLoading] = React.useState(false);
-
-  // Claim modal
-  const [claimOpen, setClaimOpen] = React.useState(false);
-  const [claimUrl, setClaimUrl] = React.useState<string>('/claim');
 
   React.useEffect(() => {
     let cancelled = false;
@@ -138,7 +144,7 @@ export default function OverviewTable() {
     return () => { cancelled = true; };
   }, []);
 
-  // Klik na Participate -> fetch walleta i predaj modalu
+  // Participate (CTA)
   const openParticipate = async (symbol: string) => {
     const chainParam = SYMBOL_TO_CHAIN[symbol] ?? symbol.toLowerCase();
 
@@ -173,26 +179,23 @@ export default function OverviewTable() {
     }
   };
 
-  // Klik na Claim -> otvori modal sa /claim
+  // Claim (popup s /claim i preselektiranim chain paramom)
   const openClaim = (symbol: string) => {
-    // Ne diramo postojeći /claim — samo mu šaljemo hint kroz query param.
-    const q = new URLSearchParams();
-    q.set('chain', symbol.toLowerCase());
-    const base = process.env.NEXT_PUBLIC_BASE_URL || '';
-    const url = `${base}/claim?${q.toString()}`;
-    setClaimUrl(url);
-    setClaimOpen(true);
+    const claimChain = SYMBOL_TO_CLAIM[symbol];
+    const url = claimChain ? `/claim?chain=${encodeURIComponent(claimChain)}` : '/claim';
+    window.open(
+      url,
+      'claim',
+      'width=860,height=900,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes'
+    );
   };
 
-  const badge = (s: Status) =>
-    s === 'ok'
-      ? 'rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700'
-      : s === 'stale'
-      ? 'rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700'
-      : 'rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700';
-
   if (loading) {
-    return <div className="w-full rounded-2xl border border-gray-200 p-6"><div className="text-sm text-gray-500">Loading overview…</div></div>;
+    return (
+      <div className="w-full rounded-2xl border border-gray-200 p-6">
+        <div className="text-sm text-gray-500">Loading overview…</div>
+      </div>
+    );
   }
   if (err) {
     return (
@@ -208,14 +211,14 @@ export default function OverviewTable() {
   return (
     <>
       <div className="w-full space-y-4">
-        {/* Brojače i status smo uklonili po tvojoj uputi – ostaje samo tablica */}
+        {/* Maknuli smo OK/STALE/ISSUE brojače iznad tablice */}
+
         <div className="overflow-x-auto rounded-2xl border">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-left">
               <tr>
                 <th className="px-4 py-2 font-medium text-gray-600">Chain</th>
                 <th className="px-4 py-2 font-medium text-gray-600">Height</th>
-                <th className="px-4 py-2 font-medium text-gray-600">Status</th>
                 <th className="px-4 py-2 font-medium text-gray-600">Participate</th>
                 <th className="px-4 py-2 font-medium text-gray-600">Claim</th>
               </tr>
@@ -233,9 +236,6 @@ export default function OverviewTable() {
                     </div>
                   </td>
                   <td className="px-4 py-2 tabular-nums">{r.height ?? '—'}</td>
-                  <td className="px-4 py-2">
-                    <span className={badge(r.status)}>{r.status.toUpperCase()}</span>
-                  </td>
                   <td className="px-4 py-2">
                     <button
                       onClick={() => openParticipate(r.symbol)}
@@ -256,7 +256,7 @@ export default function OverviewTable() {
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={4} className="px-4 py-8 text-center text-gray-500">
                     No rows.
                   </td>
                 </tr>
@@ -266,7 +266,7 @@ export default function OverviewTable() {
         </div>
       </div>
 
-      {/* Participate modal (postojeći flow) */}
+      {/* Modal za Participate */}
       <ParticipateModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
@@ -274,40 +274,6 @@ export default function OverviewTable() {
         loading={walletLoading}
         error={walletError}
       />
-
-      {/* Claim modal (iframe koji učitava /claim) */}
-      {claimOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center"
-        >
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => setClaimOpen(false)}
-            aria-hidden
-          />
-          <div className="relative z-10 w-[95vw] max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b px-4 py-3">
-              <div className="text-sm font-medium">Claim your contribution</div>
-              <button
-                onClick={() => setClaimOpen(false)}
-                className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
-              >
-                Close
-              </button>
-            </div>
-            <div className="h-[80vh] w-full">
-              <iframe
-                title="Claim"
-                src={claimUrl}
-                className="h-full w-full"
-                loading="eager"
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }
