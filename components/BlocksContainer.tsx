@@ -9,9 +9,9 @@ type Props = {
   defaultChain?: string | null; // e.g. "eth" or null = All
 };
 
-// Supported chains (All + 15 chains)
+// Supported chains (All + subset without DOT/ATOM)
 const CHAIN_OPTIONS = [
-  { value: "", label: "All chains" },
+  { value: "",    label: "All chains" },
   { value: "eth", label: "ETH" },
   { value: "bsc", label: "BSC" },
   { value: "pol", label: "POL" },
@@ -21,8 +21,6 @@ const CHAIN_OPTIONS = [
   { value: "xrp", label: "XRP" },
   { value: "xlm", label: "XLM" },
   { value: "trx", label: "TRX" },
-  { value: "dot", label: "DOT" },
-  { value: "atom",label: "ATOM"},
   { value: "btc", label: "BTC" },
   { value: "ltc", label: "LTC" },
   { value: "doge",label: "DOGE"},
@@ -43,8 +41,6 @@ const CHAIN_COLORS: Record<string, string> = {
   TRX: "#ef4444",
   XLM: "#10b981",
   XRP: "#0ea5e9",
-  DOT: "#111827",
-  ATOM: "#111827",
   ARB: "#1d4ed8",
   OP: "#ef4444",
 };
@@ -114,7 +110,7 @@ export default function BlocksContainer({
         onRefresh={() => fetchOnce()}
       />
 
-      {/* Legend: always show ALL supported chains, wraps to next line */}
+      {/* Legend: shows supported chains (DOT/ATOM removed) */}
       <Legend />
 
       <TetrisBlocks rows={rows} columns={10} />
@@ -161,9 +157,7 @@ function Toolbar(props: {
         <span className="text-sm text-red-600">Error: {error}</span>
       ) : (
         <span className="text-sm text-gray-500">
-          {loading
-            ? "Loading…"
-            : "View (auto-refreshed from hourly ingestions)"}
+          {loading ? "Loading…" : "View (auto-refreshed from hourly ingestions)"}
         </span>
       )}
     </div>

@@ -1,10 +1,9 @@
-// components/OverviewSection.tsx
 import Image from "next/image";
 
 type ChainRow = {
   chain: string;        // e.g. 'ARB'
   height: number | null;
-  status: "OK" | "STALE" | "ISSUE" | string;
+  status?: "OK" | "STALE" | "ISSUE" | string;
   logoUrl?: string | null;
   participateUrl?: string | null; // optional CTA
 };
@@ -13,16 +12,8 @@ type OverviewPayload = {
   ok: boolean;
   totals?: { ok: number; stale: number; issue: number };
   rows?: ChainRow[];
-  // you can extend with latency, updatedAt, etc. when API adds it
+  // can extend with latency, updatedAt, etc. when API adds it
 };
-
-function badgeClass(s: string) {
-  const v = s.toUpperCase();
-  if (v === "OK") return "bg-green-100 text-green-700";
-  if (v === "STALE") return "bg-yellow-100 text-yellow-700";
-  if (v === "ISSUE") return "bg-red-100 text-red-700";
-  return "bg-gray-100 text-gray-700";
-}
 
 // Server component: fetch on the server (no client JS needed)
 export default async function OverviewSection() {
@@ -30,7 +21,6 @@ export default async function OverviewSection() {
   const res = await fetch(`${base}/api/public/overview`, { cache: "no-store" });
   const data = (await res.json()) as OverviewPayload;
 
-  const totals = data.totals ?? { ok: 0, stale: 0, issue: 0 };
   const rows: ChainRow[] = data.rows ?? [];
 
   return (
@@ -42,21 +32,13 @@ export default async function OverviewSection() {
         </p>
       </header>
 
-      {/* Totals */}
-      <div className="grid gap-4 sm:grid-cols-3">
-        <CardStat label="OK" value={totals.ok} />
-        <CardStat label="STALE" value={totals.stale} />
-        <CardStat label="ISSUE" value={totals.issue} />
-      </div>
-
-      {/* Table */}
+      {/* Table without status counters and status column */}
       <div className="overflow-hidden rounded-xl border">
         <table className="min-w-full divide-y">
           <thead className="bg-gray-50">
             <tr className="text-left text-sm text-gray-600">
               <th className="px-4 py-3">Chain</th>
               <th className="px-4 py-3">Height</th>
-              <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Action</th>
             </tr>
           </thead>
@@ -79,14 +61,7 @@ export default async function OverviewSection() {
                     <span className="font-medium">{r.chain}</span>
                   </div>
                 </td>
-                <td className="px-4 py-3 tabular-nums">
-                  {r.height ?? "—"}
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs ${badgeClass(r.status)}`}>
-                    {r.status.toUpperCase()}
-                  </span>
-                </td>
+                <td className="px-4 py-3 tabular-nums">{r.height ?? "—"}</td>
                 <td className="px-4 py-3">
                   {r.participateUrl ? (
                     <a
@@ -103,7 +78,7 @@ export default async function OverviewSection() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td className="px-4 py-6 text-sm text-gray-500" colSpan={4}>
+                <td className="px-4 py-6 text-sm text-gray-500" colSpan={3}>
                   No data yet.
                 </td>
               </tr>
@@ -112,17 +87,6 @@ export default async function OverviewSection() {
         </table>
       </div>
     </section>
-  );
-}
-
-function CardStat({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="rounded-xl border p-4">
-      <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
-        {label}
-      </div>
-      <div className="mt-1 text-3xl font-bold tabular-nums">{value}</div>
-    </div>
   );
 }
 
