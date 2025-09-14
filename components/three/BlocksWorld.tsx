@@ -1,8 +1,8 @@
 // components/three/BlocksWorld.tsx
-// Level 1 MVP: instanced cubes arranged in a grid, animated scale by amountUsd.
-// - Uses InstancedMesh for performance (hundreds to thousands of items).
-// - Basic hover highlight via raycasting.
-// - OrbitControls enabled; no heavy postprocessing to keep mobile perf healthy.
+// Level 1 MVP bound to real data with per-chain colors.
+// - InstancedMesh cubes arranged on a grid; height scales with amountUsd.
+// - Chain color mapping applied per instance (passed as prop).
+// - Hover highlight brightens the color of the hovered instance.
 
 "use client";
 
@@ -19,34 +19,48 @@ type Datum = {
 
 type Props = {
   data: Datum[];
+  colorMap?: Record<string, string>;
 };
 
-const GRID_COLS = 40; // number of columns in the grid
-const CELL = 1.15;    // spacing between cubes
-const BASE_HEIGHT = 0.2; // minimal cube height
-const MAX_SCALE = 2.2;   // max cube height scale multiplier
+const GRID_COLS = 40;     // columns in the grid
+const CELL = 1.15;        // spacing between cubes
+const BASE_HEIGHT = 0.2;  // minimal cube height
+const MAX_SCALE = 2.2;    // max cube height scale multiplier
 
-// Simple color palette; we can later switch to chain-based mapping.
-const BASE_COLOR = new THREE.Color("#4ad6ff");
-const HOVER_COLOR = new THREE.Color("#ffd54a");
+const DEFAULT_COLOR = new THREE.Color("#4ad6ff"); // fallback
 
 function normalizeAmount(value: number, maxValue: number) {
   if (!maxValue) return 1;
   const n = value / maxValue; // 0..1
-  // Ease slightly so small values are still visible
+  // Ease so small values remain visible
   return BASE_HEIGHT + Math.pow(n, 0.5) * (MAX_SCALE - BASE_HEIGHT);
 }
 
-function InstancedBlocks({ data }: { data: Datum[] }) {
+function colorForChain(chain: string, colorMap?: Record<string, string>): THREE.Color {
+  const hex = colorMap?.[chain] ?? colorMap?.[chain.toLowerCase()];
+  if (hex) return new THREE.Color(hex);
+  return DEFAULT_COLOR.clone();
+}
+
+function InstancedBlocks({ data, colorMap }: { data: Datum[]; colorMap?: Record<string, string> }) {
   const meshRef = useRef<THREE.InstancedMesh>(null!);
   const tempObj = useMemo(() => new THREE.Object3D(), []);
-  const color = useMemo(() => new THREE.Color(), []);
+  const tempColor = useMemo(() => new THREE.Color(), []);
   const [hovered, setHovered] = useState<number | null>(null);
 
-  // Precompute max for normalization
   const maxUsd = useMemo(() => Math.max(...data.map((d) => d.amountUsd), 1), [data]);
 
-  // Build grid positions
+  // Precompute per-instance base colors once (chain → color)
+  const baseColors = useMemo(() => {
+    return data.map((d, i) => {
+      const base = colorForChain(d.chain, colorMap);
+      // Subtle variation per column for depth
+      const mod = 0.9 + 0.1 * ((i % GRID_COLS) / GRID_COLS);
+      return base.multiplyScalar(mod);
+    });
+  }, [data, colorMap]);
+
+  // Grid positions & base scales
   const { positions, scales } = useMemo(() => {
     const pos: THREE.Vector3[] = [];
     const sc: number[] = [];
@@ -73,14 +87,11 @@ function InstancedBlocks({ data }: { data: Datum[] }) {
       tempObj.updateMatrix();
       m.setMatrixAt(i, tempObj.matrix);
 
-      // base color (slightly modulate by row for subtle variation)
-      const mod = 0.9 + 0.1 * ((i % GRID_COLS) / GRID_COLS);
-      color.copy(BASE_COLOR).multiplyScalar(mod);
-      m.setColorAt(i, color);
+      m.setColorAt(i, baseColors[i]);
     }
     m.instanceMatrix.needsUpdate = true;
     if (m.instanceColor) m.instanceColor.needsUpdate = true;
-  }, [positions, scales, color, tempObj]);
+  }, [positions, scales, baseColors, tempObj]);
 
   // Subtle idle animation (breathe)
   useFrame(({ clock }) => {
@@ -98,30 +109,29 @@ function InstancedBlocks({ data }: { data: Datum[] }) {
     m.instanceMatrix.needsUpdate = true;
   });
 
-  // Raycast handling for hover highlight
+  // Hover highlight
   const onPointerMove = (e: any) => {
     e.stopPropagation();
     const instanceId = e.instanceId as number | undefined;
     if (instanceId === undefined) return;
-    if (hovered !== instanceId) {
-      setHovered(instanceId);
-      const m = meshRef.current;
-      for (let i = 0; i < positions.length; i++) {
-        const mod = 0.9 + 0.1 * ((i % GRID_COLS) / GRID_COLS);
-        color.copy(i === instanceId ? HOVER_COLOR : BASE_COLOR).multiplyScalar(mod);
-        m.setColorAt(i, color);
-      }
-      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    if (instanceId === hovered) return;
+
+    setHovered(instanceId);
+    const m = meshRef.current;
+    for (let i = 0; i < positions.length; i++) {
+      // brighten hovered, revert others to base
+      const c = i === instanceId ? baseColors[i].clone().multiplyScalar(1.35) : baseColors[i];
+      tempColor.copy(c);
+      m.setColorAt(i, tempColor);
     }
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
   };
 
   const onPointerOut = () => {
     setHovered(null);
     const m = meshRef.current;
     for (let i = 0; i < positions.length; i++) {
-      const mod = 0.9 + 0.1 * ((i % GRID_COLS) / GRID_COLS);
-      color.copy(BASE_COLOR).multiplyScalar(mod);
-      m.setColorAt(i, color);
+      m.setColorAt(i, baseColors[i]);
     }
     if (m.instanceColor) m.instanceColor.needsUpdate = true;
   };
@@ -135,15 +145,13 @@ function InstancedBlocks({ data }: { data: Datum[] }) {
       castShadow={false}
       receiveShadow={false}
     >
-      <boxGeometry args={[1, 1, 1]}>
-        {/* nothing extra here */}
-      </boxGeometry>
+      <boxGeometry args={[1, 1, 1]} />
       <meshStandardMaterial toneMapped={true} />
     </instancedMesh>
   );
 }
 
-export default function BlocksWorld({ data }: Props) {
+export default function BlocksWorld({ data, colorMap }: Props) {
   return (
     <Canvas
       dpr={[1, 2]}
@@ -154,17 +162,17 @@ export default function BlocksWorld({ data }: Props) {
       <hemisphereLight intensity={0.7} color={"#ffffff"} groundColor={"#0a0a0a"} />
       <directionalLight position={[8, 12, 5]} intensity={1.2} />
 
-      {/* Ground plane (very subtle) */}
+      {/* Ground plane */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
         <planeGeometry args={[200, 200]} />
         <meshStandardMaterial color={"#0b0b0b"} metalness={0} roughness={1} />
       </mesh>
 
-      {/* Instanced grid of blocks */}
-      <InstancedBlocks data={data} />
+      {/* Instanced grid */}
+      <InstancedBlocks data={data} colorMap={colorMap} />
 
-      {/* Camera controls & stats (can be removed for production) */}
-      <OrbitControls enablePan={true} enableZoom={true} enableRotate={true} />
+      {/* Controls / Stats */}
+      <OrbitControls enablePan enableZoom enableRotate />
       <StatsGl className="hidden md:block" />
     </Canvas>
   );
