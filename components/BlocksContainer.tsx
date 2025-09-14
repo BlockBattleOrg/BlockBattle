@@ -9,7 +9,7 @@ type Props = {
   defaultChain?: string | null; // e.g. "eth" or null = All
 };
 
-// Supported chains (All; DOT/ATOM removed)
+// Supported chains (All – DOT & ATOM removed)
 const CHAIN_OPTIONS = [
   { value: "", label: "All chains" },
   { value: "eth", label: "ETH" },
@@ -27,7 +27,7 @@ const CHAIN_OPTIONS = [
   { value: "sol", label: "SOL" },
 ];
 
-// Constant brand colors per chain (simple, readable)
+// Brand colors per chain (DOT & ATOM removed)
 const CHAIN_COLORS: Record<string, string> = {
   ETH: "#3b82f6",
   BTC: "#f59e0b",
@@ -92,7 +92,7 @@ export default function BlocksContainer({
     const id = window.setInterval(() => {
       const rCtrl = new AbortController();
       fetchOnce(rCtrl.signal);
-    }, Math.max(10000, refreshMs)); // min 10s, be gentle
+    }, Math.max(10000, refreshMs));
 
     return () => {
       ctrl.abort();
@@ -110,7 +110,7 @@ export default function BlocksContainer({
         onRefresh={() => fetchOnce()}
       />
 
-      {/* Legend: show supported chains (DOT/ATOM removed) */}
+      {/* Legend */}
       <Legend />
 
       <TetrisBlocks rows={rows} columns={10} />
@@ -157,9 +157,7 @@ function Toolbar(props: {
         <span className="text-sm text-red-600">Error: {error}</span>
       ) : (
         <span className="text-sm text-gray-500">
-          {loading
-            ? "Loading…"
-            : "View (auto-refreshed from hourly ingestions)"}
+          {loading ? "Loading…" : "View (auto-refreshed from hourly ingestions)"}
         </span>
       )}
     </div>
@@ -167,7 +165,6 @@ function Toolbar(props: {
 }
 
 function Legend() {
-  // exclude the "All chains" option
   const items = CHAIN_OPTIONS.filter((x) => x.value !== "");
   return (
     <div className="flex flex-wrap items-center gap-3">
