@@ -44,7 +44,7 @@ const SYMBOL_TO_CHAIN: Record<string, string> = {
   // DOT/ATOM uklonjeni
 };
 
-// mapiranje za /claim (očekuje npr. eth, arb, pol, avax, op, bsc, btc, itd.)
+// mapiranje za /claim (očekuje npr. eth, arb, pol, avax, op, bsc, btc, itd.)
 const SYMBOL_TO_CLAIM: Record<string, string> = {
   BTC: 'btc',
   ETH: 'eth',
@@ -206,7 +206,10 @@ export default function OverviewTable() {
     );
   }
 
-  const rows = data?.rows ?? [];
+  // ⬇⬇ UI-only filter: makni DOT i ATOM iz prikaza, ništa drugo ne dira
+  const rows = (data?.rows ?? []).filter(
+    (r) => r.symbol !== 'DOT' && r.symbol !== 'ATOM'
+  );
 
   return (
     <>
