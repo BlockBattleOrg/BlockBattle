@@ -7,9 +7,21 @@ import { createClient } from "@supabase/supabase-js";
 
 type UUID = string;
 
-function getAnonSupabase() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!; // RLS: read-only public
+// Server-side client: prefer SERVICE_ROLE (RLS bypass), else fall back to ANON.
+// This API runs on the server only; keys are never exposed to the browser.
+function getServerSupabase() {
+  const url =
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.SUPABASE_URL; // fallback if project uses this name
+
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY;
+
+  if (!url || !key) {
+    throw new Error("Supabase env missing (URL or KEY). Check Vercel env vars.");
+  }
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
@@ -42,9 +54,9 @@ export async function GET(req: NextRequest) {
     const fromStr = toUTCDateString(from);
     const toStr = toUTCDateString(now);
 
-    const supabase = getAnonSupabase();
+    const supabase = getServerSupabase();
 
-    // NOTE: Supabase vraća foreign tablice kao NIZ; koristimo currencies(symbol) i čitamo [0]
+    // NOTE: Supabase join vraća foreign tablice kao NIZ (currencies[])
     const { data, error } = await supabase
       .from("aggregates_daily")
       .select("currency_id, day, total_amount_usd, tx_count, currencies(symbol)")
@@ -60,11 +72,9 @@ export async function GET(req: NextRequest) {
       day: string;
       total_amount_usd: string | number | null;
       tx_count: number | null;
-      // ← BITNO: niz, ne objekt
       currencies?: { symbol: string }[] | null;
     };
 
-    // Sumarizacija po symbolu (DOT/ATOM filtriramo u ovom API-ju)
     const acc = new Map<string, { symbol: string; amountUsd: number; txCount: number }>();
 
     for (const r of (data || []) as Row[]) {
