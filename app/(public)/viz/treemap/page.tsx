@@ -1,10 +1,6 @@
-// app/(public)/viz/treemap/page.tsx
-// Preview page for the Top 15 Treemap (daily rollup)
-// This page is not linked in the main nav — use /viz/treemap to review the chart.
-
 import TreemapBattle from "@/components/treemap/TreemapBattle";
 
-export const dynamic = "force-dynamic"; // ensure fresh fetch from /api/public/treemap
+export const dynamic = "force-dynamic";
 
 export default function TreemapPreviewPage() {
   return (
@@ -16,8 +12,7 @@ export default function TreemapPreviewPage() {
         </p>
       </header>
 
-      {/* 30d by default; change to "7d" | "ytd" if you want */}
-      <TreemapBattle period="30d" />
+      <TreemapBattle period="all" limit={5} />
     </main>
   );
 }

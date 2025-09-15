@@ -1,5 +1,5 @@
 // components/treemap/TreemapBattle.tsx
-// Treemap “battle” view (Top 15) preko /api/public/treemap?period=30d
+// Treemap “battle” view (Top N) preko /api/public/treemap?period=all&limit=5
 
 "use client";
 
@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { ResponsiveContainer, Treemap, Tooltip } from "recharts";
 import type { Payload } from "recharts/types/component/DefaultTooltipContent";
 
-type Item = { symbol: string; amountUsd: number; txCount: number };
+type Item = { symbol: string; amountUsd: number; amountNative: number; txCount: number };
 
 const CHAIN_COLORS: Record<string, string> = {
   ETH: "#3b82f6",
@@ -30,7 +30,13 @@ function colorFor(symbol: string) {
   return CHAIN_COLORS[symbol] ?? "#4b5563";
 }
 
-export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d" | "ytd" }) {
+export default function TreemapBattle({
+  period = "all",
+  limit = 5,
+}: {
+  period?: "7d" | "30d" | "ytd" | "all";
+  limit?: number;
+}) {
   const [data, setData] = useState<Item[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -38,7 +44,7 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
     let cancel = false;
     (async () => {
       try {
-        const res = await fetch(`/api/public/treemap?period=${period}`, { cache: "no-store" });
+        const res = await fetch(`/api/public/treemap?period=${period}&limit=${limit}`, { cache: "no-store" });
         const json = await res.json();
         if (!cancel) {
           if (json?.ok) setData(json.items as Item[]);
@@ -51,12 +57,15 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
     return () => {
       cancel = true;
     };
-  }, [period]);
+  }, [period, limit]);
+
+  const labelPeriod =
+    period === "all" ? "All time" : period === "ytd" ? "YTD" : period.toUpperCase();
 
   return (
     <section className="mb-6">
       <header className="mb-2 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Top 15 (Treemap, {period.toUpperCase()})</h2>
+        <h2 className="text-lg font-semibold">Top {limit} (Treemap, {labelPeriod})</h2>
         <span className="text-xs text-gray-500">Data refreshes daily</span>
       </header>
 
@@ -71,9 +80,11 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
             <Treemap
               data={data.map((d) => ({
                 name: d.symbol,
-                size: Math.max(0.01, d.amountUsd), // Recharts expects positive
+                size: Math.max(0.01, d.amountUsd), // key za raspored
                 fill: colorFor(d.symbol),
                 txCount: d.txCount,
+                amountUsd: d.amountUsd,
+                amountNative: d.amountNative,
               }))}
               dataKey="size"
               nameKey="name"
@@ -82,20 +93,18 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
               isAnimationActive
             >
               <Tooltip
-                formatter={(value: any, name: any) => {
-                  if (name === "size") {
-                    return [
-                      (Number(value) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-                      "USD",
-                    ];
-                  }
-                  return [String(value), name];
-                }}
-                // ⬇⬇ KLJUČNA ISPRAVKA: readonly Payload<...>[]
-                labelFormatter={(_label: any, payload: readonly Payload<any, any>[]) => {
+                // Custom content: USD + native + tx
+                content={({ payload }: { payload?: readonly Payload<any, any>[] }) => {
                   const p = (payload?.[0] as any)?.payload;
-                  if (!p) return "";
-                  return `${p.name} — ${p.txCount} tx`;
+                  if (!p) return null;
+                  return (
+                    <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-xs shadow-sm">
+                      <div className="font-medium">{p.name}</div>
+                      <div>USD: {(Number(p.amountUsd) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                      <div>Native: {(Number(p.amountNative) || 0).toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
+                      <div>Tx: {p.txCount}</div>
+                    </div>
+                  );
                 }}
               />
             </Treemap>
