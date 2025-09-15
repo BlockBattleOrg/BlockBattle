@@ -1,49 +1,39 @@
 // app/api/admin/rollup-contributions-daily/route.ts
-// Secured admin endpoint (x-cron-secret) that computes daily rollups from `contributions`
-// and upserts into `aggregates_daily` (schema from your SQL).
-// Notes:
-// - Because `aggregates_daily` nema unique constraint na (day, currency_id),
-//   radimo "delete for day(s) + insert" (id je PK).
-// - Default radi za "jučer" (UTC). Možeš backfillati više dana s ?backfillDays=30
+// Rebuild daily aggregates from `contributions` into `aggregates_daily` for a given date window.
+// Security: header x-cron-secret must match process.env.CRON_SECRET
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 type UUID = string;
 
-type Contribution = {
-  wallet_id: UUID | null;
-  amount: string;       // numeric (string from PostgREST)
-  amount_usd: string | null;
-  block_time: string;   // timestamptz
-};
-
-type Wallet = {
-  id: UUID;
-  currency_id: UUID | null;
-};
-
-type Currency = {
-  id: UUID;
-  symbol: string; // e.g. "BTC"
-};
-
-function getAdminSupabase() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  return createClient(url, key, { auth: { persistSession: false } });
+function need(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing ENV: ${name}`);
+  return v;
 }
 
-function toUTCDateString(d: Date): string {
+function admin() {
+  return createClient(need("NEXT_PUBLIC_SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE_KEY"), {
+    auth: { persistSession: false },
+  });
+}
+
+function toUTCDateString(d: Date) {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
-
-function addDaysUTC(d: Date, delta: number) {
+function dayStartISO(d: Date) {
+  return `${toUTCDateString(d)}T00:00:00.000Z`;
+}
+function dayEndISO(d: Date) {
+  return `${toUTCDateString(d)}T23:59:59.999Z`;
+}
+function addDaysUTC(d: Date, n: number) {
   const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  x.setUTCDate(x.getUTCDate() + delta);
+  x.setUTCDate(x.getUTCDate() + n);
   return x;
 }
 
@@ -54,101 +44,123 @@ export async function POST(req: NextRequest) {
   }
 
   const url = new URL(req.url);
-  const backfillDays = Math.max(1, Math.min(90, Number(url.searchParams.get("backfillDays") || "1"))); // 1..90
-  // "jučer" kao gornja granica (da izbjegnemo partial day)
-  const yesterday = addDaysUTC(new Date(), -1);
+  const fromParam = url.searchParams.get("from"); // YYYY-MM-DD
+  const toParam = url.searchParams.get("to");     // YYYY-MM-DD
+  const backfillDaysParam = url.searchParams.get("backfillDays");
 
-  const supabase = getAdminSupabase();
+  // Odredi raspon
+  const today = new Date();
+  const yesterday = addDaysUTC(today, -1);
+
+  let fromDate: Date | null = null;
+  let toDate: Date = yesterday;
+
+  if (fromParam) {
+    const [Y, M, D] = fromParam.split("-").map(Number);
+    fromDate = new Date(Date.UTC(Y, (M || 1) - 1, D || 1));
+  }
+  if (toParam) {
+    const [Y, M, D] = toParam.split("-").map(Number);
+    toDate = new Date(Date.UTC(Y, (M || 1) - 1, D || 1));
+  }
+
+  if (!fromDate && backfillDaysParam) {
+    const n = Math.max(1, Number(backfillDaysParam) || 1);
+    fromDate = addDaysUTC(yesterday, -n + 1);
+  }
+  if (!fromDate) {
+    // default: ALL-TIME (od prvog doprinosa); praktično: 1970-01-01 do jučer
+    fromDate = new Date(Date.UTC(1970, 0, 1));
+  }
+
+  if (fromDate > toDate) {
+    return NextResponse.json({ ok: false, error: "invalid range (from>to)" }, { status: 400 });
+  }
+
+  const sb = admin();
 
   try {
-    // 1) Učitaj sve wallet -> currency_id (mapa)
-    const { data: wallets, error: wErr } = await supabase
-      .from("wallets")
-      .select("id, currency_id")
-      .eq("is_active", true) as unknown as { data: Wallet[] | null; error: any };
-
+    // Cache: wallet_id -> currency_id
+    const { data: wallets, error: wErr } = await sb.from("wallets").select("id, currency_id");
     if (wErr) throw wErr;
     const walletToCurrency = new Map<UUID, UUID>();
-    for (const w of wallets || []) {
-      if (w.currency_id) walletToCurrency.set(w.id, w.currency_id);
+    for (const w of wallets || []) if (w.currency_id) walletToCurrency.set(w.id as UUID, w.currency_id as UUID);
+
+    // Popis dana
+    const days: string[] = [];
+    for (let d = new Date(fromDate); d <= toDate; d = addDaysUTC(d, 1)) {
+      days.push(toUTCDateString(d));
     }
 
-    // 2) (neobvezno) mapa valuta za debug/log (nije nužno za rollup)
-    const { data: currencies, error: cErr } = await supabase
-      .from("currencies")
-      .select("id, symbol");
-    if (cErr) throw cErr;
-    const currencyName = new Map<UUID, string>();
-    for (const c of (currencies || []) as Currency[]) currencyName.set(c.id, c.symbol);
-
-    // 3) Za svaki dan u backfill rasponu:
-    for (let i = 0; i < backfillDays; i++) {
-      const day = addDaysUTC(yesterday, -i);
-      const dayStr = toUTCDateString(day);
-      const dayStart = `${dayStr}T00:00:00.000Z`;
-      const dayEnd = `${dayStr}T23:59:59.999Z`;
-
-      // 3a) Povuci sve contributions tog dana (s amount i amount_usd)
-      const { data: contribs, error: qErr } = await supabase
-        .from("contributions")
-        .select("wallet_id, amount, amount_usd, block_time")
-        .gte("block_time", dayStart)
-        .lte("block_time", dayEnd)
-        .limit(200000); // safety cap
-      if (qErr) throw qErr;
-
-      // 3b) Grupiraj po currency_id (preko wallet_id mape)
-      type Acc = { total_amount: number; total_amount_usd: number; tx_count: number };
-      const byCurrency = new Map<UUID, Acc>();
-
-      for (const row of (contribs || []) as Contribution[]) {
-        if (!row.wallet_id) continue;
-        const cid = walletToCurrency.get(row.wallet_id);
-        if (!cid) continue;
-
-        const acc = byCurrency.get(cid) || { total_amount: 0, total_amount_usd: 0, tx_count: 0 };
-        // numeric dolazi kao string – pretvorba
-        const amt = Number(row.amount ?? 0) || 0;
-        const usd = Number(row.amount_usd ?? 0) || 0;
-        acc.total_amount += amt;
-        acc.total_amount_usd += usd;
-        acc.tx_count += 1;
-        byCurrency.set(cid, acc);
-      }
-
-      // 3c) Očisti postojeće redove za taj dan (jer nemamo unique constraint)
-      const { error: delErr } = await supabase
+    // 1) Obriši postojeće agregate u rasponu
+    if (days.length > 0) {
+      const { error: delErr } = await sb
         .from("aggregates_daily")
         .delete()
-        .eq("day", dayStr);
+        .gte("day", days[0])
+        .lte("day", days[days.length - 1]);
       if (delErr) throw delErr;
-
-      // 3d) Insert novih agregata
-      const payload = Array.from(byCurrency.entries()).map(([cid, acc]) => ({
-        currency_id: cid,
-        day: dayStr,
-        total_amount: acc.total_amount,
-        total_amount_usd: acc.total_amount_usd,
-        tx_count: acc.tx_count,
-      }));
-
-      if (payload.length > 0) {
-        const { error: insErr } = await supabase.from("aggregates_daily").insert(payload);
-        if (insErr) throw insErr;
-      }
-
-      // eslint-disable-next-line no-console
-      console.log(
-        `[rollup] ${dayStr}: inserted ${payload.length} rows`,
-        payload.slice(0, 3).map(r => ({ ...r, currency: currencyName.get(r.currency_id) }))
-      );
     }
 
-    return NextResponse.json({ ok: true, backfillDays });
+    // 2) Povuci contributions za cijeli raspon
+    const { data: contribs, error: cErr } = await sb
+      .from("contributions")
+      .select("wallet_id, amount, amount_usd, block_time")
+      .gte("block_time", dayStartISO(fromDate))
+      .lte("block_time", dayEndISO(toDate));
+    if (cErr) throw cErr;
+
+    // 3) Grupiraj po (day, currency_id)
+    type Acc = { total_amount: number; total_amount_usd: number; tx_count: number };
+    const byDayCurrency = new Map<string, Acc>(); // key: `${day}|${currency_id}`
+
+    for (const r of contribs || []) {
+      const wid = r.wallet_id as UUID | null;
+      if (!wid) continue;
+      const cid = walletToCurrency.get(wid);
+      if (!cid) continue;
+
+      const dt = new Date(r.block_time);
+      const day = toUTCDateString(dt);
+      const key = `${day}|${cid}`;
+
+      const acc = byDayCurrency.get(key) || { total_amount: 0, total_amount_usd: 0, tx_count: 0 };
+      acc.total_amount += Number(r.amount ?? 0) || 0;
+      acc.total_amount_usd += Number(r.amount_usd ?? 0) || 0;
+      acc.tx_count += 1;
+      byDayCurrency.set(key, acc);
+    }
+
+    // 4) Insert payload (chunked)
+    const payload: any[] = [];
+    for (const [key, v] of byDayCurrency) {
+      const [day, currency_id] = key.split("|");
+      payload.push({
+        day,
+        currency_id,
+        total_amount: v.total_amount,
+        total_amount_usd: v.total_amount_usd,
+        tx_count: v.tx_count,
+      });
+    }
+
+    if (payload.length > 0) {
+      const chunk = 1000;
+      for (let i = 0; i < payload.length; i += chunk) {
+        const { error: insErr } = await sb.from("aggregates_daily").insert(payload.slice(i, i + chunk));
+        if (insErr) throw insErr;
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      from: toUTCDateString(fromDate),
+      to: toUTCDateString(toDate),
+      days: days.length,
+      inserted: payload.length,
+    });
   } catch (e: any) {
-    // eslint-disable-next-line no-console
-    console.error("rollup error:", e);
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
   }
 }
 
