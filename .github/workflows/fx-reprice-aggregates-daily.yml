@@ -1,0 +1,73 @@
+name: FX Reprice Aggregates (Daily)
+
+on:
+  schedule:
+    - cron: "15 0 * * *"  # 00:15 UTC, once per day
+  workflow_dispatch: {}
+
+jobs:
+  reprice_aggregates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BASE: ${{ vars.PROD_BASE_URL || 'https://www.blockbattle.org' }}
+      CG:   ${{ vars.COINGECKO_API_BASE || 'https://api.coingecko.com/api/v3' }}
+      # SYMBOL -> CoinGecko ID (DOT/ATOM izostavljeni)
+      MAP: >
+        BTC:bitcoin
+        LTC:litecoin
+        DOGE:dogecoin
+        ETH:ethereum
+        OP:optimism
+        ARB:arbitrum
+        POL:matic-network
+        AVAX:avalanche-2
+        BSC:binancecoin
+        XRP:ripple
+        SOL:solana
+        XLM:stellar
+        TRX:tron
+    steps:
+      - name: Build FX_MAP from CoinGecko
+        id: fx
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build list of IDs from MAP
+          IDS=()
+          for pair in $MAP; do
+            id="${pair#*:}"
+            IDS+=("$id")
+          done
+          IDCSV_JOINED="$(IFS=,; echo "${IDS[*]}")"
+
+          # Fetch USD prices
+          JSON="$(curl -sS --fail "$CG/simple/price?ids=${IDCSV_JOINED}&vs_currencies=usd")"
+
+          # Compose FX map "SYM:price,..." in the same order as MAP
+          FX_MAP=""
+          for pair in $MAP; do
+            sym="${pair%%:*}"
+            id="${pair#*:}"
+            price="$(echo "$JSON" | jq -r --arg id "$id" '.[$id].usd // empty')"
+            test -n "$price" || continue
+            FX_MAP+="${sym}:$price,"
+          done
+          FX_MAP="${FX_MAP%,}"
+          if [ -z "$FX_MAP" ]; then
+            echo "::error::No prices resolved from CoinGecko"
+            exit 1
+          fi
+          echo "fx_map=$FX_MAP" >> "$GITHUB_OUTPUT"
+
+      - name: Reprice ALL-TIME aggregates_daily (total_amount_usd)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          FX_MAP: ${{ steps.fx.outputs.fx_map }}
+        run: |
+          set -euo pipefail
+          curl -sS -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "${BASE}/api/admin/reprice-aggregates-daily?fx=${FX_MAP}" | jq .
+
