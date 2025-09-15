@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from "react";
 import { ResponsiveContainer, Treemap, Tooltip } from "recharts";
+import type { Payload } from "recharts/types/component/DefaultTooltipContent";
 
 type Item = { symbol: string; amountUsd: number; txCount: number };
 
@@ -90,8 +91,9 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
                   }
                   return [String(value), name];
                 }}
-                labelFormatter={(_, payload: any[]) => {
-                  const p = payload?.[0]?.payload;
+                // ⬇⬇ KLJUČNA ISPRAVKA: readonly Payload<...>[]
+                labelFormatter={(_label: any, payload: readonly Payload<any, any>[]) => {
+                  const p = (payload?.[0] as any)?.payload;
                   if (!p) return "";
                   return `${p.name} — ${p.txCount} tx`;
                 }}
