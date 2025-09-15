@@ -17,5 +17,5 @@ jobs:
           set -euo pipefail
           curl -sS -X POST \
             -H "x-cron-secret: ${CRON_SECRET}" \
-            "${PROD_URL}/api/admin/rollup-contributions-daily"
+            "${PROD_URL}/api/admin/rollup-contributions-daily?backfillDays=30"
 
