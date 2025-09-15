@@ -47,7 +47,9 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
         if (!cancel) setErr(String(e?.message || e));
       }
     })();
-    return () => { cancel = true; };
+    return () => {
+      cancel = true;
+    };
   }, [period]);
 
   return (
@@ -73,12 +75,13 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
                 txCount: d.txCount,
               }))}
               dataKey="size"
+              nameKey="name"
               aspectRatio={4 / 3}
               stroke="#ffffff"
-              contentStyle={{ outline: "none" }}
+              isAnimationActive
             >
               <Tooltip
-                formatter={(value: any, name: any, props: any) => {
+                formatter={(value: any, name: any) => {
                   if (name === "size") {
                     return [
                       (Number(value) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }),
@@ -87,9 +90,9 @@ export default function TreemapBattle({ period = "30d" }: { period?: "7d" | "30d
                   }
                   return [String(value), name];
                 }}
-                labelFormatter={(label: any, payload: any[]) => {
+                labelFormatter={(_, payload: any[]) => {
                   const p = payload?.[0]?.payload;
-                  if (!p) return String(label);
+                  if (!p) return "";
                   return `${p.name} — ${p.txCount} tx`;
                 }}
               />
