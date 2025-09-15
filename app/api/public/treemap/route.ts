@@ -7,21 +7,16 @@ import { createClient } from "@supabase/supabase-js";
 
 type UUID = string;
 
-// Server-side client: prefer SERVICE_ROLE (RLS bypass), else fall back to ANON.
-// This API runs on the server only; keys are never exposed to the browser.
 function getServerSupabase() {
   const url =
     process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    process.env.SUPABASE_URL; // fallback if project uses this name
-
+    process.env.SUPABASE_URL;
   const key =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    process.env.SUPABASE_ANON_KEY;
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  if (!url || !key) {
-    throw new Error("Supabase env missing (URL or KEY). Check Vercel env vars.");
-  }
+  if (!url || !key) throw new Error("Supabase env missing (URL or KEY).");
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
@@ -56,37 +51,51 @@ export async function GET(req: NextRequest) {
 
     const supabase = getServerSupabase();
 
-    // NOTE: Supabase join vraća foreign tablice kao NIZ (currencies[])
-    const { data, error } = await supabase
+    // 1) Povuci aggregates_daily u periodu (bez join-a)
+    const { data: agg, error: aggErr } = await supabase
       .from("aggregates_daily")
-      .select("currency_id, day, total_amount_usd, tx_count, currencies(symbol)")
+      .select("currency_id, day, total_amount_usd, tx_count")
       .gte("day", fromStr)
       .lte("day", toStr);
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: String(error.message || error) }, { status: 500 });
+    if (aggErr) {
+      return NextResponse.json({ ok: false, error: String(aggErr.message || aggErr) }, { status: 500 });
     }
 
-    type Row = {
-      currency_id: UUID;
-      day: string;
-      total_amount_usd: string | number | null;
-      tx_count: number | null;
-      currencies?: { symbol: string }[] | null;
-    };
+    // Ako nema ničega, vrati prazan skup
+    if (!agg || agg.length === 0) {
+      return NextResponse.json({ ok: true, period, from: fromStr, to: toStr, items: [] });
+    }
 
+    // 2) Izvuci sve currency_id i napravi lookup id -> symbol iz currencies
+    const currencyIds = Array.from(new Set(agg.map(r => r.currency_id).filter(Boolean))) as UUID[];
+    let idToSymbol = new Map<UUID, string>();
+    if (currencyIds.length > 0) {
+      const { data: cur, error: curErr } = await supabase
+        .from("currencies")
+        .select("id, symbol")
+        .in("id", currencyIds);
+      if (curErr) {
+        return NextResponse.json({ ok: false, error: String(curErr.message || curErr) }, { status: 500 });
+      }
+      for (const c of cur || []) idToSymbol.set(c.id as UUID, String(c.symbol));
+    }
+
+    // 3) Sumiraj po symbolu
+    type AggRow = { currency_id: UUID | null; total_amount_usd: string | number | null; tx_count: number | null };
     const acc = new Map<string, { symbol: string; amountUsd: number; txCount: number }>();
 
-    for (const r of (data || []) as Row[]) {
-      const sym = r.currencies?.[0]?.symbol || "UNKNOWN";
+    for (const r of agg as AggRow[]) {
+      const sym = (r.currency_id && idToSymbol.get(r.currency_id)) || "UNKNOWN";
       const cur = acc.get(sym) || { symbol: sym, amountUsd: 0, txCount: 0 };
       cur.amountUsd += Number(r.total_amount_usd ?? 0) || 0;
       cur.txCount += Number(r.tx_count ?? 0) || 0;
       acc.set(sym, cur);
     }
 
+    // 4) DOT/ATOM isključi, posloži i odreži Top 15
     const items = Array.from(acc.values())
-      .filter((x) => x.symbol !== "DOT" && x.symbol !== "ATOM")
+      .filter(x => x.symbol !== "DOT" && x.symbol !== "ATOM")
       .sort((a, b) => b.amountUsd - a.amountUsd)
       .slice(0, 15);
 
