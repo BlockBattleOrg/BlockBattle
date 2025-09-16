@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
 import { ResponsiveContainer, Treemap, Tooltip } from "recharts";
 
 type Item = {
-  name: string;
-  size: number;
-  fill: string;
+  name: string;   // symbol (e.g., ETH)
+  size: number;   // USD amount (tile size)
+  fill: string;   // color
   txCount: number;
   native?: number;
   usd?: number;
@@ -15,9 +15,27 @@ type Item = {
 type Props = {
   period?: "30d" | "all";
   limit?: number;
-  /** Visual height in pixels (container). Default: 260 */
+  /** Container height (px). Default 260. */
   height?: number;
   className?: string;
+};
+
+/** Colors aligned with Community Blocks (uppercase keys). */
+const CHAIN_COLORS: Record<string, string> = {
+  ETH: "#3b82f6",
+  BTC: "#f59e0b",
+  DOGE: "#b45309",
+  LTC: "#2563eb",
+  MATIC: "#7c3aed",
+  POL: "#7c3aed",
+  BSC: "#f59e0b",
+  AVAX: "#ef4444",
+  SOL: "#9333ea",
+  TRX: "#ef4444",
+  XLM: "#10b981",
+  XRP: "#0ea5e9",
+  ARB: "#1d4ed8",
+  OP:  "#ef4444",
 };
 
 function normalizeArray(payload: any): any[] {
@@ -25,15 +43,13 @@ function normalizeArray(payload: any): any[] {
   if (Array.isArray(payload?.data)) return payload.data;
   if (Array.isArray(payload?.rows)) return payload.rows;
   if (Array.isArray(payload?.items)) return payload.items;
-  // last-resort: if it's a plain object with values that look like rows
   if (payload && typeof payload === "object") return Object.values(payload);
   return [];
 }
 
 /**
- * TreemapBattle
- * Renders a Top-N treemap fed by /api/public/treemap.
- * English-only labels.
+ * TreemapBattle — Top-N treemap driven by /api/public/treemap
+ * English-only labels. Smaller footprint for footer section.
  */
 export default function TreemapBattle({
   period = "all",
@@ -55,14 +71,19 @@ export default function TreemapBattle({
         const payload = await res.json();
         const json = normalizeArray(payload);
 
-        const items: Item[] = (json || []).map((r: any) => ({
-          name: r.symbol ?? r.name ?? "UNKNOWN",
-          size: Number(r.amountUsd ?? r.usd ?? r.size ?? 0),
-          fill: r.color || "#64748b",
-          txCount: Number(r.txCount ?? r.count ?? 0),
-          native: r.native,
-          usd: Number(r.amountUsd ?? r.usd ?? 0),
-        }));
+        const items: Item[] = (json || []).map((r: any) => {
+          const sym: string = String(r.symbol ?? r.name ?? "UNKNOWN").toUpperCase();
+          const usdNum = Number(r.amountUsd ?? r.usd ?? r.size ?? 0);
+          const color = r.color || CHAIN_COLORS[sym] || "#64748b";
+          return {
+            name: sym,
+            size: usdNum,
+            fill: color,
+            txCount: Number(r.txCount ?? r.count ?? 0),
+            native: r.native != null ? Number(r.native) : undefined,
+            usd: usdNum,
+          };
+        });
 
         if (alive) {
           setData(items);
@@ -81,19 +102,23 @@ export default function TreemapBattle({
     <div className={className}>
       <div style={{ width: "100%", height }}>
         <ResponsiveContainer width="100%" height="100%">
-          <Treemap data={data || []} dataKey="size" aspectRatio={4 / 3} stroke="#ffffff">
+          <Treemap
+            data={data || []}
+            dataKey="size"
+            aspectRatio={4 / 3}
+            stroke="#1118270d" /* subtle border */
+          >
             <Tooltip
               formatter={(value: any, _name: any, props: any) => {
                 const p = props?.payload as Item | undefined;
                 const usd = typeof p?.usd === "number" ? p!.usd : Number(value) || 0;
-                const native = p?.native;
-                const sym = p?.name || "";
                 const first = usd.toLocaleString(undefined, {
                   style: "currency",
                   currency: "USD",
                   maximumFractionDigits: 2,
                 });
-                const second = native != null ? `${native} ${sym}` : `${sym}`;
+                const second =
+                  p?.native != null ? `${p.native} ${p.name}` : `${p?.name ?? ""}`;
                 return [first, second];
               }}
               labelFormatter={(_label: any, payload: readonly any[]) => {
