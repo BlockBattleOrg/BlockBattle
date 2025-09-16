@@ -3,7 +3,8 @@ import OverviewTable from '@/components/OverviewTable';
 import ContributionsPanel from '@/components/ContributionsPanel';
 import Countdown from '@/components/Countdown';
 import BlocksContainer from '@/components/BlocksContainer';
-import Viz3DInline from '@/components/three/Viz3DInline'; // ⬅ NEW
+import Viz3DInline from '@/components/three/Viz3DInline'; // ⬅ 3D viz iznad Community Blocks
+import TreemapSection from '@/components/treemap/TreemapSection'; // ⬅ NOVO: sekcija s Top 5 (All-time)
 
 export default function HomePage() {
   const campaignEnd = process.env.NEXT_PUBLIC_CAMPAIGN_END ?? '';
@@ -23,7 +24,7 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* NEW: Inline 3D viz iznad Community Blocks */}
+      {/* Inline 3D viz iznad Community Blocks */}
       <Viz3DInline />
 
       {/* Live Community Blocks (auto-refresh + chain filter) */}
@@ -35,11 +36,14 @@ export default function HomePage() {
         <BlocksContainer limit={200} refreshMs={60000} />
       </section>
 
-      {/* Existing overview (unchanged) */}
+      {/* Status overview */}
       <OverviewTable />
 
       {/* Community contributions (leaderboard + recent) */}
       <ContributionsPanel />
+
+      {/* ⬇ Treemap — Top 5 (All-time), odmah ispod Totals by chain */}
+      <TreemapSection />
     </main>
   );
 }

@@ -1,4 +1,6 @@
 import BlocksContainer from "@/components/BlocksContainer";
+import ContributionsPanel from "@/components/ContributionsPanel"; // ⬅ dodano: prikazuje Recent + Totals by chain
+import TreemapSection from "@/components/treemap/TreemapSection"; // ⬅ dodano: Treemap Top 5 (All-time)
 
 export default async function BlocksPage() {
   return (
@@ -12,6 +14,12 @@ export default async function BlocksPage() {
 
       {/* Client-side container handles fetching, filtering, and auto-refresh */}
       <BlocksContainer limit={200} refreshMs={60000} />
+
+      {/* Community contributions (leaderboard + recent) */}
+      <ContributionsPanel />
+
+      {/* Treemap — Top 5 (All-time), odmah ispod Totals by chain */}
+      <TreemapSection />
     </main>
   );
 }
