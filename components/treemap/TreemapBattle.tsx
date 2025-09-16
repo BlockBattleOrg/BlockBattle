@@ -1,26 +1,14 @@
+// components/treemap/TreemapBattle.tsx
+// Treemap “battle” view (Top N) via /api/public/treemap?period=all&limit=5
+
 "use client";
 
 import { useEffect, useState } from "react";
 import { ResponsiveContainer, Treemap, Tooltip } from "recharts";
+import type { Payload } from "recharts/types/component/DefaultTooltipContent";
 
-type Item = {
-  name: string;   // symbol (e.g., ETH)
-  size: number;   // USD amount (tile size)
-  fill: string;   // color
-  txCount: number;
-  native?: number;
-  usd?: number;
-};
+type Item = { symbol: string; amountUsd: number; amountNative: number; txCount: number };
 
-type Props = {
-  period?: "30d" | "all";
-  limit?: number;
-  /** Container height (px). Default 260. */
-  height?: number;
-  className?: string;
-};
-
-/** Colors aligned with Community Blocks (uppercase keys). */
 const CHAIN_COLORS: Record<string, string> = {
   ETH: "#3b82f6",
   BTC: "#f59e0b",
@@ -35,103 +23,94 @@ const CHAIN_COLORS: Record<string, string> = {
   XLM: "#10b981",
   XRP: "#0ea5e9",
   ARB: "#1d4ed8",
-  OP:  "#ef4444",
+  OP: "#ef4444",
 };
 
-function normalizeArray(payload: any): any[] {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.data)) return payload.data;
-  if (Array.isArray(payload?.rows)) return payload.rows;
-  if (Array.isArray(payload?.items)) return payload.items;
-  if (payload && typeof payload === "object") return Object.values(payload);
-  return [];
+function colorFor(symbol: string) {
+  return CHAIN_COLORS[symbol] ?? "#4b5563";
 }
 
-/**
- * TreemapBattle — Top-N treemap driven by /api/public/treemap
- * English-only labels. Smaller footprint for footer section.
- */
 export default function TreemapBattle({
   period = "all",
   limit = 5,
-  height = 260,
-  className,
-}: Props) {
+}: {
+  period?: "7d" | "30d" | "ytd" | "all";
+  limit?: number;
+}) {
   const [data, setData] = useState<Item[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    let alive = true;
+    let cancel = false;
     (async () => {
       try {
-        const res = await fetch(`/api/public/treemap?period=${period}&limit=${limit}`, {
-          cache: "no-store",
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const payload = await res.json();
-        const json = normalizeArray(payload);
-
-        const items: Item[] = (json || []).map((r: any) => {
-          const sym: string = String(r.symbol ?? r.name ?? "UNKNOWN").toUpperCase();
-          const usdNum = Number(r.amountUsd ?? r.usd ?? r.size ?? 0);
-          const color = r.color || CHAIN_COLORS[sym] || "#64748b";
-          return {
-            name: sym,
-            size: usdNum,
-            fill: color,
-            txCount: Number(r.txCount ?? r.count ?? 0),
-            native: r.native != null ? Number(r.native) : undefined,
-            usd: usdNum,
-          };
-        });
-
-        if (alive) {
-          setData(items);
-          setErr(null);
+        const res = await fetch(`/api/public/treemap?period=${period}&limit=${limit}`, { cache: "no-store" });
+        const json = await res.json();
+        if (!cancel) {
+          if (json?.ok) setData(json.items as Item[]);
+          else setErr(json?.error ?? "Failed to load");
         }
       } catch (e: any) {
-        if (alive) setErr(e?.message || "Failed to load");
+        if (!cancel) setErr(String(e?.message || e));
       }
     })();
     return () => {
-      alive = false;
+      cancel = true;
     };
   }, [period, limit]);
 
-  return (
-    <div className={className}>
-      <div style={{ width: "100%", height }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <Treemap
-            data={data || []}
-            dataKey="size"
-            aspectRatio={4 / 3}
-            stroke="#1118270d" /* subtle border */
-          >
-            <Tooltip
-              formatter={(value: any, _name: any, props: any) => {
-                const p = props?.payload as Item | undefined;
-                const usd = typeof p?.usd === "number" ? p!.usd : Number(value) || 0;
-                const first = usd.toLocaleString(undefined, {
-                  style: "currency",
-                  currency: "USD",
-                  maximumFractionDigits: 2,
-                });
-                const second =
-                  p?.native != null ? `${p.native} ${p.name}` : `${p?.name ?? ""}`;
-                return [first, second];
-              }}
-              labelFormatter={(_label: any, payload: readonly any[]) => {
-                const p = payload?.[0]?.payload as Item | undefined;
-                return p ? `${p.name} — ${p.txCount} tx` : "";
-              }}
-            />
-          </Treemap>
-        </ResponsiveContainer>
-      </div>
+  const labelPeriod =
+    period === "all" ? "All time" : period === "ytd" ? "YTD" : period.toUpperCase();
 
-      {err && <p className="mt-2 text-sm text-red-600">Failed to load: {err}</p>}
-    </div>
+  return (
+    <section className="mb-6">
+      <header className="mb-2 flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Top {limit} (Treemap, {labelPeriod})</h2>
+        <span className="text-xs text-gray-500">Data refreshes daily</span>
+      </header>
+
+      <div className="h-[24vh] w-full overflow-hidden rounded-xl border border-gray-200 bg-white">
+        {err && <div className="p-3 text-xs text-red-600">Failed to load: {err}</div>}
+        {!err && !data && <div className="p-3 text-xs text-gray-600">Loading treemap…</div>}
+        {!err && data && data.length === 0 && (
+          <div className="p-3 text-xs text-gray-600">No data available yet.</div>
+        )}
+        {!err && data && data.length > 0 && (
+          <ResponsiveContainer width="100%" height="100%">
+            <Treemap
+              data={data.map((d) => ({
+                name: d.symbol,
+                size: Math.max(0.01, d.amountUsd),
+                fill: colorFor(d.symbol),
+                txCount: d.txCount,
+                amountUsd: d.amountUsd,
+                amountNative: d.amountNative,
+              }))}
+              dataKey="size"
+              nameKey="name"
+              aspectRatio={4 / 3}
+              stroke="#ffffff"
+              isAnimationActive
+            >
+              <Tooltip
+                content={({ payload }: { payload?: readonly Payload<any, any>[] }) => {
+                  const p = (payload?.[0] as any)?.payload;
+                  if (!p) return null;
+                  return (
+                    <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-xs shadow-sm">
+                      <div className="font-medium">{p.name}</div>
+                      <div>USD: {(Number(p.amountUsd) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                      <div>Native: {(Number(p.amountNative) || 0).toLocaleString(undefined, { maximumFractionDigits: 6 })}</div>
+                      <div>Tx: {p.txCount}</div>
+                    </div>
+                  );
+                }}
+              />
+            </Treemap>
+          </ResponsiveContainer>
+        )}
+      </div>
+    </section>
   );
 }
 
