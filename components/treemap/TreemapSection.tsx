@@ -1,8 +1,8 @@
 "use client";
 
 // components/treemap/TreemapSection.tsx
-// Lightweight section za umetanje ispod "Totals by chain".
-// Prikazuje Treemap Top 5 (ALL-TIME) uz naslov i kratki opis.
+// Small wrapper section rendered below "Totals by chain".
+// Shows Treemap Top 5 (All-time). English-only.
 
 import TreemapBattle from "@/components/treemap/TreemapBattle";
 
@@ -11,13 +11,16 @@ export default function TreemapSection() {
     <section className="mt-10">
       <header className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold">Treemap Top 5 (All-time)</h2>
-        <span className="text-xs text-gray-500">Hover za detalje • boje usklađene s Community Blocks</span>
+        <span className="text-xs text-gray-500">
+          Hover for details • Colors match Community Blocks
+        </span>
       </header>
 
-      {/* Visina je prilagođena da stane ispod tablica bez skrola */}
-      <div className="rounded-xl border border-gray-200 bg-white">
-        <TreemapBattle period="all" limit={5} />
+      <div className="rounded-xl border border-gray-200 bg-white p-3">
+        {/* Smaller height so the section doesn’t dominate the page */}
+        <TreemapBattle period="all" limit={5} height={260} />
       </div>
+      <div className="mt-1 text-right text-[11px] text-gray-400">Data refreshes daily</div>
     </section>
   );
 }
