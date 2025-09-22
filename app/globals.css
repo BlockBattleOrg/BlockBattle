@@ -3,7 +3,9 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens (light) */
+/* =========================
+   Design tokens (light)
+   ========================= */
 :root {
   /* Base */
   --background: 0 0% 100%;
@@ -16,10 +18,11 @@
   --popover: 0 0% 100%;
   --popover-foreground: 222 47% 11%;
 
-  /* Brand (adjust to your brand) */
-  --primary: 262 83% 57%;            /* Indigo/Violet hybrid */
+  /* Brand */
+  --primary: 262 83% 57%;
   --primary-foreground: 0 0% 100%;
 
+  /* Neutrals */
   --secondary: 220 14% 96%;
   --secondary-foreground: 222 47% 11%;
 
@@ -38,7 +41,9 @@
   --ring: 262 83% 57%;
 }
 
-/* Dark theme */
+/* =========================
+   Dark theme
+   ========================= */
 .dark {
   --background: 222 47% 7%;
   --foreground: 213 31% 91%;
@@ -69,34 +74,65 @@
   --ring: 263 89% 68%;
 }
 
-/* Base elements */
+/* =========================
+   Base elements
+   ========================= */
 @layer base {
-  html, body, :root {
-    height: 100%;
-  }
-  body {
-    @apply bg-background text-foreground antialiased;
-  }
+  html, body, :root { height: 100%; }
 
-  /* Headings tuned for crypto dashboard look */
+  body { @apply bg-background text-foreground antialiased; }
+
   h1 { @apply text-3xl font-semibold tracking-tight; }
   h2 { @apply text-2xl font-semibold tracking-tight; }
   h3 { @apply text-xl font-semibold; }
+
+  /* ------- Tables: enforce themed surfaces in light/dark ------- */
+  table { @apply w-full border-collapse text-sm; }
+  thead { @apply bg-secondary text-secondary-foreground; }
+  thead th { @apply font-medium text-left border-b border-border; }
+  th, td { @apply px-3 py-2 align-middle; }
+  tbody tr { @apply border-b border-border; }
+  /* zebra striping using theme tokens (works in dark too) */
+  tbody tr:nth-child(odd) { @apply bg-card; }
+  tbody tr:nth-child(even) { @apply bg-muted; }
+  /* subtle hover */
+  tbody tr:hover { @apply bg-accent/10; }
+  /* links in tables remain readable */
+  table a { color: hsl(var(--foreground)); text-decoration: underline; }
+  table a:hover { opacity: .9; }
 }
 
-/* Components helpers */
+/* =========================
+   Component helpers
+   ========================= */
 @layer components {
   .card {
-    @apply bg-card text-card-foreground rounded-2xl shadow-soft border border-border;
+    @apply bg-card text-card-foreground rounded-2xl shadow border border-border;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.08);
   }
   .chip {
     @apply inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-sm bg-secondary text-secondary-foreground;
   }
   .btn {
-    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium border border-border bg-secondary hover:opacity-90;
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium border border-border bg-secondary text-secondary-foreground hover:opacity-90;
   }
-  .btn-primary {
-    @apply bg-primary text-primary-foreground border-transparent;
-  }
+  .btn-primary { @apply bg-primary text-primary-foreground border-transparent; }
 }
+
+/* =========================
+   Recharts (readable labels in dark)
+   ========================= */
+.recharts-wrapper,
+.recharts-default-legend,
+.recharts-tooltip-wrapper {
+  color: hsl(var(--foreground));
+}
+.recharts-text { /* SVG text */
+  fill: hsl(var(--foreground)) !important;
+  opacity: .9;
+}
+
+/* Optional: make any translucent white headers adapt to theme
+   If neki header još koristi bg-white/70 u kodu, ovo ga ublažava u darku. */
+.dark .bg-white\/70 { background-color: hsl(var(--background) / 0.7) !important; }
 
