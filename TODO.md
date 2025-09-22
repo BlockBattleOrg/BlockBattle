@@ -23,56 +23,49 @@
 
 ## Phase 3 — Ingestion (Chain Heights & Contributions)
 - ✅ `[x]` Heights ingest routes (protected by `x-cron-secret`) using **NowNodes**:
-  **BTC, LTC, DOGE, ETH, OP, ARB, POL (alias `/ingest/matic`), AVAX, DOT, ATOM, XRP, SOL, XLM, TRX, BSC**
+  **BTC, LTC, DOGE, ETH, OP, ARB, POL (alias `/ingest/matic`), AVAX, XRP, SOL, XLM, TRX, BSC**  
+  (DOT/ATOM removed)
 - ✅ `[x]` Standardized height markers in `settings` as `<CHAIN>_last_height`
 - ✅ `[x]` GitHub Actions schedules for height ingests (optimized: hourly, staggered)
-- ✅ `[x]` Native **contribution ingest**:
-  - ✅ `[x]` POL (EVM native)
-  - ✅ `[x]` ETH (EVM native)
-  - ✅ `[x]` ATOM (Cosmos LCD/RPC via NowNodes, Supabase integration)
-  - ✅ `[x]` AVAX (EVM native, Supabase integration)
-  - ✅ `[x]` DOT (proxy/core setup, Supabase integration)
-  - ✅ `[x]` OP (EVM native)
-  - ✅ `[x]` ARB (EVM native)
-  - ✅ `[x]` All chains maintain `<chain>_contrib_last_scanned` markers in `settings`
-  - ✅ `[x]` GitHub Actions contrib ingests (optimized: every 3h, staggered)
+- ✅ `[x]` Native **contribution ingest** (all supported chains)
+- ✅ `[x]` All chains maintain `<chain>_contrib_last_scanned` markers in `settings`
+- ✅ `[x]` GitHub Actions contrib ingests (optimized: every 3h, staggered)
 - ✅ `[x]` Normalize `amount_usd` (FX integration) and write to `contributions.amount_usd`
 - ☐ `[ ]` Telemetry (structured logs) & basic alerts on failure
-
-**Phase 3 acceptance:** All ingest routes return `{ ok: true, ... }`, and `settings` markers advance per run.
 
 ---
 
 ## Phase 4 — Aggregation & Public API
-- ✅ `[x]` `/api/public/overview` (heights summary consumed by homepage)
-- ✅ `[x]` `/api/public/wallets` (fetch donation address by chain)
+- ✅ `[x]` `/api/public/overview`
+- ✅ `[x]` `/api/public/wallets`
 - ✅ `[x]` `/api/public/contributions/leaderboard`
 - ✅ `[x]` `/api/public/contributions/recent`
-- ✅ `[x]` `/api/claim` (public endpoint to claim contribution by tx hash, with Supabase pre-check for idempotency)
-- ✅ `[x]` APIs marked **dynamic** (`no-store`) to avoid stale data
-- ✅ `[x]` Daily rollups (`/api/admin/snapshot-heights` + cron at 00:05 UTC) for contributions & heights
+- ✅ `[x]` `/api/claim`
+- ✅ `[x]` APIs marked **dynamic**
+- ✅ `[x]` Daily rollups (`/api/admin/snapshot-heights`)
 - ✅ `[x]` Contributions rollup job adjusted to 2-hourly schedule
-- 🟡 `[~]` Stale/latency metadata in `/api/public/overview` (endpoint works, metadata not yet added)
-- ✅ `[x]` CORS allow-list + lightweight rate limiting on public routes
-
-**Phase 4 acceptance:** UI reads real data via public API; responses are fresh and fast.
+- ✅ `[x]` New `/api/admin/rollup-contributions-daily` (all-time + from/to window) → rebuilds `aggregates_daily`
+- 🟡 `[~]` Stale/latency metadata in `/api/public/overview`
+- ✅ `[x]` CORS allow-list + lightweight rate limiting
 
 ---
 
 ## Phase 5 — UI (Live Data)
-- ✅ `[x]` Heights table uses live values
-- ✅ `[x]` “Participate” modal with QR (dynamic import of `qrcode`)
-- ✅ `[x]` Contributions panel (Leaderboard + Recent)
-- ✅ `[x]` Explorer links (Etherscan/Polygonscan) for recent tx
-- ✅ `[x]` Amount rendering with full native precision per chain (no confusing “0”)
-- ✅ `[x]` `/claim` page (form for claiming contributions)
-- ✅ `[x]` DOT/ATOM hidden in Overview table UI:contentReference[oaicite:2]{index=2}
-- ☐ `[ ]` Empty/loading/error states polish across the app
+- ✅ `[x]` Heights table (live)
+- ✅ `[x]` “Participate” modal with QR
+- ✅ `[x]` Contributions panel (Leaderboard + Recent, explorer links, notes)
+- ✅ `[x]` Amount rendering with full native precision
+- ✅ `[x]` `/claim` page
+- ❌ `[ ]` Status badges per chain (dropped — no longer needed for contrib/claim UX)
+- 🟡 `[~]` Empty/loading/error states polish
 
 ---
 
-## Phase 6 — Community Blocks (Top 15) — optional
-- ☐ `[ ]` Treemap (“battle” view) using Recharts; fed by overview/rollups
+## Phase 6 — Community Blocks (Visuals)
+- ✅ `[x]` Treemap Top-5 (All-time) implemented via Recharts, mounted below “Totals by chain”
+- ✅ `[x]` Integrated with rollup data (`aggregates_daily`)
+- ✅ `[x]` Color-coding aligned with Community Blocks legend
+- 🟡 `[~]` Visual polish (hover effects, sizing tweaks, playful layout for crypto audience)
 
 ---
 
@@ -87,50 +80,30 @@
 ---
 
 ## Phase 8 — Post-MVP
-- ✅ `[x]` FX aggregator (CoinGecko/proxy) → fill `amount_usd` at insert time
-- ☐ `[ ]` Token donations (ERC-20 `Transfer` logs to project wallets)
+- ✅ `[x]` FX aggregator (CoinGecko/proxy) in workflows → reprices `contributions.amount_usd`
+- ✅ `[x]` FX reprice integrated into `aggregates_daily`
+- ☐ `[ ]` Token donations (ERC-20 `Transfer` logs)
 
 ---
 
 ## Phase 9 — Exploratory Visualizations
-- ✅ `[x]` Tetris grid view (Community Blocks live grid)
-- ✅ `[x]` Three.js 3D prototype (page + inline embed above Community Blocks on homepage):contentReference[oaicite:3]{index=3}
+- ✅ `[x]` Treemap (Top-5 All-time)
+- ☐ `[ ]` Tetris grid view (prototype)
+- ☐ `[ ]` Three.js 3D prototype (Level 1 MVP scene exists, not public yet)
 
 ---
 
 ## Tech-Debt & Cleanup
 - 🟡 `[~]` ENV cleanup
-  - ✅ `[x]` Keep: `NOWNODES_API_KEY`, `CRON_SECRET`, `SUPABASE_*`, per-chain `*_RPC_URL`
-  - ✅ `[x]` AVAX RPC must include `/ext/bc/C/rpc`
-  - 🟡 `[~]` BTC uses Blockstream/Mempool → keep `BTC_API_BASE`
-  - 🟡 `[~]` Remove legacy groups (`*_RPC_URLS`, old DOGE/LTC tunables) once unused
-  - 🟡 `[~]` Keep `/ingest/matic` alias temporarily; remove when all schedulers call `/ingest/pol`
-- ☐ `[ ]` Uniform error payload across ingest routes
+- ☐ `[ ]` Uniform error payloads across ingest routes
 - ☐ `[ ]` Unit tests for helpers; smoke tests for APIs
 
 ---
 
 ## Immediate Next Steps
-1. ✅ **Cron optimization across all chains** (hourly heights, 3h contrib, staggered).  
-2. ✅ **Rollups**: heights daily @00:05, contributions every 2h @:05.  
-3. **UI polish**: empty/loading/error states.
+1. UI polish: loading/empty states, minor error feedback.  
+2. Visual/UI refresh: more playful crypto-style look (colors, logo, branding).  
+3. Explore optional prototypes (Tetris grid, 3D) for engagement.
 
 ---
-
-### ENV (production)
-- `NOWNODES_API_KEY`, `CRON_SECRET`
-- `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- Per-chain RPCs: `ETH_RPC_URL`, `OP_RPC_URL`, `ARB_RPC_URL`, `POL_RPC_URL`, `AVAX_RPC_URL`,  
-  `DOT_RPC_URL`, `ATOM_RPC_URL`, `XRP_RPC_URL`, `SOL_RPC_URL`, `XLM_HORIZON_URL`, `TRX_RPC_URL`, `BSC_RPC_URL`
-- BTC: `BTC_API_BASE` (Blockstream/Mempool)
-- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (for rate limiting)
-
----
-
-## Changelog (today)
-- DOT and ATOM removed from UI table.  
-- Inline 3D visualization embedded above Community Blocks on homepage.  
-- Phase 8 FX aggregator implemented at insert time.  
-- Phase 9 visualizations live (Tetris grid + Three.js scene).  
-- All ingest + rollups confirmed green.  
 
