@@ -1,16 +1,102 @@
+/* /app/globals.css */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens (light) */
 :root {
-  --bb-bg: 255 255 255;
+  /* Base */
+  --background: 0 0% 100%;
+  --foreground: 222 47% 11%;
+
+  /* Surfaces */
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 47% 11%;
+
+  /* Brand (adjust to your brand) */
+  --primary: 262 83% 57%;            /* Indigo/Violet hybrid */
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 220 14% 96%;
+  --secondary-foreground: 222 47% 11%;
+
+  --muted: 220 14% 96%;
+  --muted-foreground: 220 9% 46%;
+
+  --accent: 200 89% 54%;
+  --accent-foreground: 210 40% 98%;
+
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+
+  /* Lines/inputs */
+  --border: 220 13% 91%;
+  --input: 220 13% 91%;
+  --ring: 262 83% 57%;
 }
 
-html, body, #__next {
-  height: 100%;
+/* Dark theme */
+.dark {
+  --background: 222 47% 7%;
+  --foreground: 213 31% 91%;
+
+  --card: 222 47% 9%;
+  --card-foreground: 213 31% 91%;
+
+  --popover: 222 47% 9%;
+  --popover-foreground: 213 31% 91%;
+
+  --primary: 263 89% 68%;
+  --primary-foreground: 222 47% 7%;
+
+  --secondary: 217 33% 17%;
+  --secondary-foreground: 213 31% 91%;
+
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+
+  --accent: 199 89% 58%;
+  --accent-foreground: 222 47% 7%;
+
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 222 47% 7%;
+
+  --border: 217 33% 17%;
+  --input: 217 33% 17%;
+  --ring: 263 89% 68%;
 }
 
-body {
-  background-color: rgb(var(--bb-bg));
+/* Base elements */
+@layer base {
+  html, body, :root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  /* Headings tuned for crypto dashboard look */
+  h1 { @apply text-3xl font-semibold tracking-tight; }
+  h2 { @apply text-2xl font-semibold tracking-tight; }
+  h3 { @apply text-xl font-semibold; }
+}
+
+/* Components helpers */
+@layer components {
+  .card {
+    @apply bg-card text-card-foreground rounded-2xl shadow-soft border border-border;
+  }
+  .chip {
+    @apply inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-sm bg-secondary text-secondary-foreground;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium border border-border bg-secondary hover:opacity-90;
+  }
+  .btn-primary {
+    @apply bg-primary text-primary-foreground border-transparent;
+  }
 }
 
