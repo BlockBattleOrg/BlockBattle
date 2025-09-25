@@ -6,14 +6,18 @@ import ThemeToggle from "@/components/ThemeToggle";
 export default function Header() {
   return (
     <header className="sticky top-0 z-30 w-full border-b border-border bg-background/80 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
+      {/* ↑ povećali smo visinu headera da primi logo bez rezanja */}
+      <div className="mx-auto flex h-16 sm:h-20 max-w-6xl items-center justify-between px-4">
         <Link href="/" className="flex items-center">
+          {/* Intrinsic dimenzije veće radi kvalitete, a stvarnu visinu kontroliramo klasama */}
           <Image
             src="/logo_blockbattle.png"
             alt="BlockBattle logo"
-            width={140}
-            height={40}
+            width={320}
+            height={120}
             priority
+            className="h-10 w-auto sm:h-12"
+            sizes="(max-width: 640px) 120px, 160px"
           />
         </Link>
 
