@@ -1,10 +1,10 @@
-// app/page.tsx
+// /app/page.tsx
 import OverviewTable from '@/components/OverviewTable';
 import ContributionsPanel from '@/components/ContributionsPanel';
 import Countdown from '@/components/Countdown';
 import BlocksContainer from '@/components/BlocksContainer';
-import Viz3DInline from '@/components/three/Viz3DInline'; // ⬅ 3D viz iznad Community Blocks
-import TreemapSection from '@/components/treemap/TreemapSection'; // ⬅ NOVO: sekcija s Top 5 (All-time)
+import Viz3DInline from '@/components/three/Viz3DInline'; // ⬅ 3D viz Community Blocks
+import TreemapSection from '@/components/treemap/TreemapSection'; // ⬅ Top 5 (All-time)
 
 export default function HomePage() {
   const campaignEnd = process.env.NEXT_PUBLIC_CAMPAIGN_END ?? '';
@@ -14,17 +14,27 @@ export default function HomePage() {
       {/* Hero + Countdown */}
       <header className="mb-8">
         <h1 className="text-2xl font-bold">BlockBattle</h1>
-        <p className="text-sm text-gray-500">
-          Live chain heights aggregated from scheduled ingestion.
+
+        {/* Intro copy (motivational, user-facing) */}
+        <p className="mt-2 max-w-3xl text-sm text-gray-600">
+          Welcome to a space where true crypto communities reveal their strength. This challenge brings
+          together <strong>13 leading blockchain projects</strong> – all listed on major global exchanges
+          with proven reputations. The mission is simple: to show the <strong>real support</strong> behind
+          each chain, free from pump-and-dump cycles, fake news, or media hype.
+        </p>
+        <p className="mt-2 max-w-3xl text-sm text-gray-600">
+          Every contribution reflects genuine <strong>commitment and sacrifice</strong> from the community.
+          At the end of this journey, you’ll see clear statistics and visual insights –
+          <strong> authentic indicators</strong> of which blockchains truly stand tall.
         </p>
 
         <div className="mt-4">
           {/* Configure NEXT_PUBLIC_CAMPAIGN_END on Vercel (ISO, e.g. 2026-01-01T00:00:00Z) */}
-          <Countdown endIso={campaignEnd} label="Time remaining in this year-long challenge" />
+          <Countdown endIso={campaignEnd} label="Time remaining in this challenge" />
         </div>
       </header>
 
-      {/* Inline 3D viz iznad Community Blocks */}
+      {/* Inline 3D viz Community Blocks */}
       <Viz3DInline />
 
       {/* Live Community Blocks (auto-refresh + chain filter) */}
@@ -42,7 +52,7 @@ export default function HomePage() {
       {/* Community contributions (leaderboard + recent) */}
       <ContributionsPanel />
 
-      {/* ⬇ Treemap — Top 5 (All-time), odmah ispod Totals by chain */}
+      {/* ⬇ Treemap — Top 5 (All-time), below Totals by chain */}
       <TreemapSection />
     </main>
   );
