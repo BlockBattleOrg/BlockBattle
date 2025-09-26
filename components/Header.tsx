@@ -7,16 +7,16 @@ export default function Header() {
   return (
     <header className="sticky top-0 z-30 w-full border-b border-border bg-background/80 backdrop-blur">
       {/* povećali smo visinu headera */}
-      <div className="mx-auto flex h-24 max-w-6xl items-center justify-between px-4">
+      <div className="mx-auto flex h-28 max-w-6xl items-center justify-between px-4">
         <Link href="/" className="flex items-center">
           <Image
             src="/logo_blockbattle.png"
             alt="BlockBattle logo"
-            width={400}
-            height={160}
+            width={480}
+            height={200}
             priority
-            className="h-16 w-auto sm:h-20"
-            sizes="(max-width: 640px) 160px, 240px"
+            className="h-20 w-auto sm:h-24"
+            sizes="(max-width: 640px) 200px, 280px"
           />
         </Link>
 
