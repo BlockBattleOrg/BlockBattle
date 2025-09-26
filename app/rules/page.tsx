@@ -1,4 +1,4 @@
-// app/rules/page.tsx
+// /app/rules/page.tsx
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
@@ -15,10 +15,10 @@ export default function RulesPage() {
           <strong>Voluntary contributions.</strong> Sending funds to the published addresses is fully voluntary and not a purchase.
         </li>
         <li className="mb-3">
-          <strong>No refunds.</strong> All transfers are on-chain and irreversible. Double‑check addresses and networks.
+          <strong>No refunds.</strong> All transfers are on-chain and irreversible. Double-check addresses and networks.
         </li>
         <li className="mb-3">
-          <strong>Fair play.</strong> Sybil or wash‑like activity to game rankings may be filtered from aggregates.
+          <strong>Fair play.</strong> Sybil or wash-like activity to game rankings may be filtered from aggregates.
         </li>
         <li className="mb-3">
           <strong>Transparency.</strong> Addresses, aggregation approach and update frequency will be public.
@@ -30,7 +30,13 @@ export default function RulesPage() {
           <strong>Compliance.</strong> Participants are responsible for following their local laws and tax rules.
         </li>
       </ol>
-      <p className="mt-8 text-sm text-gray-500">These rules may evolve to protect fairness and transparency.</p>
+      <p className="mt-8 text-sm text-gray-500">
+        These rules may evolve to protect fairness and transparency.
+      </p>
+      <p className="mt-2 text-xs text-gray-500">
+        Disclaimer: All information provided on this site is for transparency and community engagement only.
+        It should <strong>not</strong> be considered financial, investment, or legal advice.
+      </p>
     </main>
   );
 }
