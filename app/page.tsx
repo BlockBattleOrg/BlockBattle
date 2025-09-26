@@ -5,6 +5,7 @@ import Countdown from '@/components/Countdown';
 import BlocksContainer from '@/components/BlocksContainer';
 import Viz3DInline from '@/components/three/Viz3DInline'; // ⬅ 3D viz Community Blocks
 import TreemapSection from '@/components/treemap/TreemapSection'; // ⬅ Top 5 (All-time)
+import Script from 'next/script';
 
 export default function HomePage() {
   const campaignEnd = process.env.NEXT_PUBLIC_CAMPAIGN_END ?? '';
@@ -33,6 +34,37 @@ export default function HomePage() {
           <Countdown endIso={campaignEnd} label="Time remaining in this challenge" />
         </div>
       </header>
+
+      {/* JSON-LD structured data */}
+      <Script
+        id="ld-organization"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            '@context': 'https://schema.org',
+            '@type': 'Organization',
+            name: 'BlockBattle',
+            url: 'https://www.blockbattle.org/',
+            logo: 'https://www.blockbattle.org/logo_blockbattle.png',
+            sameAs: [
+              'https://x.com/BlockBattleOrg' // TODO: replace if your X handle differs
+            ]
+          })
+        }}
+      />
+      <Script
+        id="ld-website"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            '@context': 'https://schema.org',
+            '@type': 'WebSite',
+            name: 'BlockBattle',
+            url: 'https://www.blockbattle.org/'
+            // You can add a SearchAction later if on-site search is implemented
+          })
+        }}
+      />
 
       {/* Inline 3D viz Community Blocks */}
       <Viz3DInline />
