@@ -58,7 +58,7 @@ export default function Viz3DInline() {
     <section className="mb-6">
       <header className="mb-2 flex items-center justify-between">
         <h2 className="text-lg font-semibold">Live 3D Contributions</h2>
-        <span className="text-xs text-gray-500">Hover a block to see details</span>
+        <span className="text-xs text-gray-500">Zoom & rotate, hover a block to see details</span>
       </header>
 
       <div className="relative h-[48vh] w-full overflow-hidden rounded-xl border border-gray-200 bg-white">
