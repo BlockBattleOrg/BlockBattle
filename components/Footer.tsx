@@ -12,7 +12,7 @@ export default function Footer() {
         <div className="flex items-center gap-4">
           {/* X (Twitter) link */}
           <Link
-            href="https://x.com/BlockBattleOrg"
+            href="https://x.com/BlockBattleOrg" // TODO: promijeni ako je handle drugačiji
             aria-label="X (Twitter)"
             rel="me noopener noreferrer"
             target="_blank"
@@ -30,6 +30,14 @@ export default function Footer() {
             </svg>
           </Link>
         </div>
+      </div>
+
+      {/* Short legal disclaimer (always visible, non-intrusive) */}
+      <div className="mx-auto max-w-6xl px-4 pb-6 -mt-2">
+        <p className="text-[11px] leading-snug text-muted-foreground">
+          Disclaimer: Information on BlockBattle.org is for transparency and community engagement only.
+          It is not financial, investment, or legal advice.
+        </p>
       </div>
     </footer>
   );
