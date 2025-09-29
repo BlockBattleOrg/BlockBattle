@@ -17,13 +17,13 @@ export default function HomePage() {
         <h1 className="text-2xl font-bold">BlockBattle</h1>
 
         {/* Intro copy (motivational, user-facing) */}
-        <p className="mt-2 max-w-3xl text-sm text-gray-600">
+        <p className="mt-2 text-sm text-muted-foreground text-justify">
           Welcome to a space where true crypto communities reveal their strength. This challenge brings
           together <strong>13 leading blockchain projects</strong> – all listed on major global exchanges
           with proven reputations. The mission is simple: to show the <strong>real support</strong> behind
           each chain, free from pump-and-dump cycles, fake news, or media hype.
         </p>
-        <p className="mt-2 max-w-3xl text-sm text-gray-600">
+        <p className="mt-2 text-sm text-muted-foreground text-justify">
           Every contribution reflects genuine <strong>commitment and sacrifice</strong> from the community.
           At the end of this journey, you’ll see clear statistics and visual insights –
           <strong> authentic indicators</strong> of which blockchains truly stand tall.
@@ -78,7 +78,21 @@ export default function HomePage() {
         <BlocksContainer limit={200} refreshMs={60000} />
       </section>
 
-      {/* Status overview */}
+      {/* ✅ NEW: Participate / Claim helper note (above the table) */}
+      <section className="mb-6 rounded-lg border border-border bg-muted/20 p-4">
+        <p className="text-sm text-muted-foreground">
+          <strong>How to participate:</strong> choose a chain and send a contribution to the published address
+          (via the <em>Participate</em> button/QR). After your wallet confirms the transaction, click <em>Claim</em> —
+          this helps record your support faster.
+        </p>
+        <p className="mt-2 text-sm text-muted-foreground">
+          <strong>Heads-up:</strong> network confirmations can take time. Contributions are tracked automatically,
+          but Claim ensures your data is included in the rankings sooner. In some cases confirmations may take several
+          hours — if your tx is confirmed, try Claim again a little later.
+        </p>
+      </section>
+
+      {/* Status overview (table with Participate / Claim) */}
       <OverviewTable />
 
       {/* Community contributions (leaderboard + recent) */}
