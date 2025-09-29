@@ -81,6 +81,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="icon" href="/favicon.ico" sizes="any" />
         <link rel="icon" href="/favicon_blockbattle.png" type="image/png" />
         <link rel="icon" href="/favicon_blockbattle.svg" type="image/svg+xml" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+        <meta name="theme-color" content="#0B2D4D" />
 
         {/* Social preview image (kept explicit; also covered by Metadata API) */}
         <meta property="og:image" content="/logo_blockbattle.png" />
