@@ -230,7 +230,7 @@ export async function POST(req: Request) {
       const { result: tx } = await evmRpc<RpcTx | null>("eth_getTransactionByHash", [txHash], debug);
       if (!tx || !tx.blockNumber) {
         return NextResponse.json({ ok: false, chain: "BSC", error: "tx not found or not yet mined" }, { status: 200 });
-        }
+      }
       const toAddr = toLower(tx.to);
       if (!toAddr || !fundingMap.has(toAddr)) {
         return NextResponse.json({ ok: true, chain: "BSC", reason: "forceTx-nonFunding", inserted: 0, funding }, { status: 200 });
@@ -256,5 +256,104 @@ export async function POST(req: Request) {
         );
       if (ierr) throw new Error(`insert failed: ${ierr.message}`);
 
-      return Next
+      return NextResponse.json({
+        ok: true,
+        chain: "BSC",
+        inserted: 1,
+        reason: "forceTx",
+        tx: tx.hash,
+        wallet_id: walletId,
+        funding,
+      });
+    }
+
+    // Range scan mode
+    let fromBlock: number | null = null;
+    if (sinceBlockParam) {
+      const n = Number(sinceBlockParam);
+      if (Number.isFinite(n) && n >= 0) fromBlock = n;
+    }
+    if (fromBlock === null && sinceHoursParam) {
+      // approximate: BSC ~ 3s block -> ~1200 blocks/hour; cap with MAX_LOOKBACK
+      const hours = Math.max(1, Number(sinceHoursParam));
+      const approxBlocks = Math.min(MAX_LOOKBACK, Math.floor(hours * 1200));
+      fromBlock = Math.max(0, safeTip - approxBlocks);
+    }
+    if (fromBlock === null) {
+      const last = await getLastScanned(db);
+      if (last && last > 0) fromBlock = Math.max(0, last - overlap);
+    }
+    if (fromBlock === null) fromBlock = Math.max(0, safeTip - 1000);
+
+    const toLimit = maxBlocks > 0 ? Math.min(safeTip, fromBlock + maxBlocks) : safeTip;
+    let cursor = fromBlock;
+    let inserted = 0;
+    let scanned = 0;
+    const lastSeen = (await getLastScanned(db)) ?? 0;
+
+    while (cursor <= toLimit) {
+      const end = Math.min(cursor + BATCH_BLOCKS - 1, toLimit);
+
+      // fetch blocks in parallel
+      const blockPromises = Array.from({ length: end - cursor + 1 }, (_, i) => cursor + i).map((b) =>
+        evmRpc<RpcBlock>("eth_getBlockByNumber", ["0x" + b.toString(16), true], debug).then((x) => x.result)
+      );
+      const blocks: RpcBlock[] = await Promise.all(blockPromises);
+
+      scanned += blocks.length;
+
+      const puts: { wallet_id: string; tx_hash: string; amount: number; block_time: string }[] = [];
+
+      for (const blk of blocks) {
+        const ts = hexToNum(blk.timestamp) * 1000;
+        for (const tx of blk.transactions || []) {
+          const to = toLower(tx.to);
+          if (!to || !fundingMap.has(to)) continue;
+          if (!tx.value || tx.value === "0x0") continue;
+
+          // check success (only for funding matches to reduce calls)
+          const { result: rc } = await evmRpc<RpcReceipt>("eth_getTransactionReceipt", [tx.hash], debug);
+          if (rc?.status !== "0x1") continue;
+
+          puts.push({
+            wallet_id: fundingMap.get(to)!.id,
+            tx_hash: tx.hash,
+            amount: weiToEth(tx.value),
+            block_time: new Date(ts).toISOString(),
+          });
+        }
+      }
+
+      if (puts.length) {
+        const { error: ierr } = await db
+          .from("contributions")
+          .upsert(puts, { onConflict: "wallet_id,tx_hash" });
+        if (ierr) throw new Error(`upsert chunk failed: ${ierr.message}`);
+        inserted += puts.length;
+      }
+
+      cursor = end + 1;
+      await setLastScanned(db, end);
+    }
+
+    return NextResponse.json({
+      ok: true,
+      chain: "BSC",
+      tip: tip,
+      from: fromBlock,
+      to: toLimit,
+      scanned,
+      inserted,
+      lastSeen,
+      reason: sinceBlockParam ? "sinceBlock" : sinceHoursParam ? "sinceHours" : "markerScan",
+      overlap,
+      minConf,
+      funding,
+      rpcTipFrom: tipUrl,
+      rpcHeadersUsed: headersUsed, // for prod debugging
+    });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500 });
+  }
+}
 
