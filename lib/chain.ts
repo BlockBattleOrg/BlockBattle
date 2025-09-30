@@ -11,6 +11,9 @@ export type ChainSlug =
   | "eth" | "arb" | "avax" | "op" | "pol" | "bsc"
   | "btc" | "ltc" | "doge" | "xrp" | "xlm" | "sol" | "trx" | "dot" | "atom";
 
+// Backward-compat alias for older imports (some files import { Canon }).
+export type Canon = ChainSlug;
+
 const CANON_MAP: Record<string, ChainSlug> = {
   // --- EVM ---
   eth: "eth",
