@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 // Legacy public /api/claim shape (kept for backward compatibility)
 type ClaimResponseOld = {
@@ -22,6 +23,28 @@ type ClaimResponseNew = {
 
 type AnyClaimResponse = ClaimResponseOld | ClaimResponseNew;
 type UiMsg = { kind: 'success' | 'info' | 'error'; text: string };
+
+/** Local canonical chain mapping (UI-only; mirrors lib/chain.ts) */
+const canon = (raw: string | null | undefined): string | null => {
+  if (!raw) return null;
+  const k = String(raw).trim().toLowerCase();
+  const map: Record<string, string> = {
+    eth: 'eth', ethereum: 'eth',
+    arb: 'arb', arbitrum: 'arb',
+    avax: 'avax', avalanche: 'avax',
+    op: 'op', optimism: 'op',
+    pol: 'pol', polygon: 'pol', matic: 'pol',
+    bsc: 'bsc', bnb: 'bsc',
+    btc: 'btc', bitcoin: 'btc',
+    ltc: 'ltc', litecoin: 'ltc',
+    doge: 'doge', dogecoin: 'doge',
+    xrp: 'xrp', ripple: 'xrp',
+    xlm: 'xlm', stellar: 'xlm',
+    sol: 'sol', solana: 'sol',
+    trx: 'trx', tron: 'trx',
+  };
+  return map[k] ?? null;
+};
 
 // Full chain list (DOT i ATOM privremeno uklonjeni)
 const CHAINS = [
@@ -67,20 +90,36 @@ type CaptchaState = 'idle' | 'ready' | 'solved' | 'expired' | 'error';
 const EVM_CHAINS = ['eth', 'op', 'arb', 'pol', 'avax', 'bsc'] as const;
 const isEvm = (c: string) => (EVM_CHAINS as unknown as string[]).includes(c);
 
-// Normalize & validate EVM hashes
+/** Remove whitespace, zero-width chars, and normalize case; do not add/remove "0x" here. */
+const clean = (s: string) =>
+  s
+    .replace(/[\u200B-\u200D\uFEFF]/g, '') // zero-width
+    .replace(/\s+/g, '')
+    .trim();
+
+/** Normalize & validate EVM hashes (adds 0x if missing for 64-hex). */
 function normalizeEvmTx(input: string) {
-  const raw = input.trim();
+  const raw = clean(input);
   if (/^0x[0-9a-fA-F]{64}$/.test(raw)) return raw.toLowerCase();
   if (/^[0-9a-fA-F]{64}$/.test(raw)) return ('0x' + raw).toLowerCase();
-  return raw;
+  return raw.toLowerCase();
 }
 function isValidEvmHash(input: string) {
-  return /^0x[0-9a-fA-F]{64}$/.test(input.trim());
+  return /^0x[0-9a-fA-F]{64}$/.test(clean(input));
+}
+/** Current EVM hex length (ignoring 0x), for UI counter. */
+function evmHexLen(input: string) {
+  const s = clean(input).replace(/^0x/i, '');
+  const onlyHex = s.replace(/[^0-9a-fA-F]/g, '');
+  return onlyHex.length;
 }
 
 // Hints
-function expectedFormatHint(chain: string) {
-  if (isEvm(chain)) return 'Expected format: 0x + 64 hex (EVM).';
+function expectedFormatHint(chain: string, tx: string) {
+  if (isEvm(chain)) {
+    const len = evmHexLen(tx);
+    return `Expected format: 0x + 64 hex (EVM). ${len}/64`;
+  }
   if (chain === 'sol') return 'Expected format: base58 signature (Solana).';
   return 'Expected format: chain-native transaction id/hash.';
 }
@@ -140,6 +179,8 @@ function classify(resp: ClaimResponseNew): UiMsg {
 }
 
 export default function ClaimPage() {
+  const search = useSearchParams();
+
   const [chain, setChain] = useState('eth');
   const [tx, setTx] = useState('');
   const [message, setMessage] = useState('');
@@ -154,6 +195,17 @@ export default function ClaimPage() {
 
   const captchaContainerRef = useRef<HTMLDivElement | null>(null);
   const captchaWidgetIdRef = useRef<number | null>(null);
+
+  // Prefill from URL (?chain=..., ?tx=..., ?msg=...)
+  useEffect(() => {
+    const qChain = canon(search.get('chain'));
+    if (qChain) setChain(qChain);
+    const qTx = search.get('tx');
+    if (qTx) setTx(qTx);
+    const qMsg = search.get('msg');
+    if (qMsg) setMessage(qMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once
 
   useEffect(() => {
     if (!hcaptchaEnabled) return;
@@ -205,13 +257,28 @@ export default function ClaimPage() {
     }
   };
 
+  const onTxChange = (value: string) => {
+    // Clean as user types; for EVM also force lowercase for readability
+    const cleaned = isEvm(chain) ? normalizeEvmTx(value) : clean(value);
+    setTx(cleaned);
+    setResp(null); // clear previous alert when editing
+  };
+
+  const onTxPaste: React.ClipboardEventHandler<HTMLInputElement> = (e) => {
+    const pasted = e.clipboardData.getData('text');
+    if (!pasted) return;
+    e.preventDefault();
+    const cleaned = isEvm(chain) ? normalizeEvmTx(pasted) : clean(pasted);
+    setTx(cleaned);
+  };
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setResp(null);
     setLoading(true);
 
     // Client-side validation (one unified message path)
-    const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
+    const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : clean(tx);
     if (isEvm(chain) && !isValidEvmHash(normalizedTx)) {
       setResp({ ok: false, code: 'invalid_payload', message: 'Hash format is not correct.' });
       setLoading(false);
@@ -251,14 +318,14 @@ export default function ClaimPage() {
     }
   };
 
-  const submitDisabled = loading || !tx.trim() || (hcaptchaEnabled && !hcaptchaToken);
+  const submitDisabled = loading || !clean(tx) || (hcaptchaEnabled && !hcaptchaToken);
   const msgLen = message.trim().length;
 
   // Single message renderer (no duplicate banners)
   const renderAlert = () => {
     if (!resp) return null;
     const ui = classify(resp);
-    const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : tx.trim();
+    const normalizedTx = isEvm(chain) ? normalizeEvmTx(tx) : clean(tx);
     const explorer = isValidEvmHash(normalizedTx) ? txExplorerUrl(chain, normalizedTx) : null;
 
     const border =
@@ -278,6 +345,9 @@ export default function ClaimPage() {
     );
   };
 
+  const evmInvalid = isEvm(chain) && !!clean(tx) && !isValidEvmHash(tx);
+  const hint = expectedFormatHint(chain, tx);
+
   return (
     <main className="mx-auto max-w-xl px-4 py-10">
       <h1 className="text-3xl font-bold">Claim your contribution</h1>
@@ -294,7 +364,11 @@ export default function ClaimPage() {
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
         <div>
           <label className="block text-sm font-medium">Chain</label>
-          <select className="mt-1 w-full rounded-xl border px-3 py-2" value={chain} onChange={(e) => setChain(e.target.value)}>
+          <select
+            className="mt-1 w-full rounded-xl border px-3 py-2"
+            value={chain}
+            onChange={(e) => setChain(e.target.value)}
+          >
             {CHAINS.map((c) => (<option key={c.value} value={c.value}>{c.label}</option>))}
           </select>
         </div>
@@ -302,15 +376,16 @@ export default function ClaimPage() {
         <div>
           <label className="block text-sm font-medium">Transaction hash</label>
           <input
-            className="mt-1 w-full rounded-xl border px-3 py-2"
+            className={`mt-1 w-full rounded-xl border px-3 py-2 ${evmInvalid ? 'border-red-400 focus:outline-none focus:ring-2 focus:ring-red-300' : ''}`}
             placeholder="0x… | hex | base58 (SOL)"
             value={tx}
-            onChange={(e) => setTx(e.target.value)}
+            onChange={(e) => onTxChange(e.target.value)}
+            onPaste={onTxPaste}
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
           />
-          <p className="mt-1 text-xs text-gray-500">{expectedFormatHint(chain)}</p>
+          <p className={`mt-1 text-xs ${evmInvalid ? 'text-red-600' : 'text-gray-500'}`}>{hint}</p>
         </div>
 
         <div>
